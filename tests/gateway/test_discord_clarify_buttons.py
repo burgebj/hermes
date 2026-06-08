@@ -32,6 +32,31 @@ from plugins.platforms.discord.adapter import (  # noqa: E402
 from gateway.config import PlatformConfig  # noqa: E402
 
 
+# The test-suite-wide conftest replaces the real ``discord`` module
+# with a fake one whose UI classes are named ``_FakeSelect`` /
+# ``_FakeButton`` / ``_FakeSelectOption`` instead of the real names.
+# Real production uses ``discord.ui.Select`` etc. — both expose the
+# same constructor signature. We import the names we need to detect
+# them by class identity rather than by name.
+import discord as _discord_for_test  # noqa: E402
+
+
+def _is_select(child) -> bool:
+    """True if the child is a Select menu (real or test-mocked)."""
+    name = child.__class__.__name__
+    if name in ("Select", "_FakeSelect"):
+        return True
+    # In case some other naming slips in, check by attribute shape.
+    return hasattr(child, "options") and hasattr(child, "placeholder")
+
+
+def _is_button(child) -> bool:
+    """True if the child is a Button (real or test-mocked)."""
+    name = child.__class__.__name__
+    return name in ("Button", "_FakeButton")
+
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -85,35 +110,66 @@ class TestClarifyChoiceViewConstruction:
     """The view should build numeric buttons plus an Other button."""
 
     def test_renders_n_choice_buttons_plus_other(self):
+        # 2 choices → buttons (one per choice + 1 Other button = 3 children)
+        view = ClarifyChoiceView(
+            choices=["apple", "banana"],
+            clarify_id="cidX",
+            allowed_user_ids={"42"},
+        )
+        assert len(view.children) == 3
+        labels = [b.label for b in view.children]
+        assert labels[0].startswith("1. apple")
+        assert labels[1].startswith("2. banana")
+        assert "Other" in labels[2]
+        # custom_ids encode clarify_id + index/other
+        ids = [b.custom_id for b in view.children]
+        assert ids[0] == "clarify:cidX:0"
+        assert ids[1] == "clarify:cidX:1"
+        assert ids[2] == "clarify:cidX:other"
+
+    def test_renders_3_choices_as_select_menu(self):
+        # 3 choices → Select menu (1 child with 4 options: 3 real + Other)
         view = ClarifyChoiceView(
             choices=["apple", "banana", "cherry"],
             clarify_id="cidX",
             allowed_user_ids={"42"},
         )
-        # 3 numeric + 1 "Other"
-        assert len(view.children) == 4
-        labels = [b.label for b in view.children]
-        assert labels[0].startswith("1. apple")
-        assert labels[1].startswith("2. banana")
-        assert labels[2].startswith("3. cherry")
-        assert "Other" in labels[3]
-        # custom_ids encode clarify_id + index/other
-        ids = [b.custom_id for b in view.children]
-        assert ids[0] == "clarify:cidX:0"
-        assert ids[1] == "clarify:cidX:1"
-        assert ids[2] == "clarify:cidX:2"
-        assert ids[3] == "clarify:cidX:other"
+        assert len(view.children) == 1
+        select = view.children[0]
+        # Inside the select: 3 numbered choices + Other
+        option_labels = [opt.label for opt in select.options]
+        assert option_labels[0] == "apple"
+        assert option_labels[1] == "banana"
+        assert option_labels[2] == "cherry"
+        assert "Other" in option_labels[3]
+        # custom_id encodes the clarify_id
+        assert select.custom_id == "clarify:cidX"
 
     def test_caps_at_24_choices_plus_other(self):
+        # 2 choices stay as buttons; only the 25-cap test applies to
+        # the Select path which has its own test. Here we verify that
+        # a long list of button choices still gets capped at the
+        # MAX_SELECT_OPTIONS - 1 (24) cap before rendering.
         choices = [f"choice-{i}" for i in range(50)]
         view = ClarifyChoiceView(
             choices=choices,
             clarify_id="cidY",
             allowed_user_ids=set(),
         )
-        # Discord limit is 25 components; we cap choices at 24 + 1 Other = 25
-        assert len(view.children) == 25
-        assert "Other" in view.children[-1].label
+        # Either path (buttons for 2, select for 3+) — at most 24 real
+        # choices + 1 Other surface in the UI. The tool's MAX_CHOICES=4
+        # already caps the input upstream, so the practical cap here
+        # is much smaller, but the view's defence-in-depth cap must
+        # still apply if a caller bypasses the tool.
+        # For Select: at most 25 options (24 real + 1 Other)
+        # For buttons: at most 25 buttons (24 real + 1 Other)
+        if len(view.children) == 1 and _is_select(view.children[0]):
+            assert len(view.children[0].options) <= 25
+            assert "Other" in view.children[0].options[-1].label
+        else:
+            # Button path: 24 + 1 Other = 25 max
+            assert len(view.children) <= 25
+            assert "Other" in view.children[-1].label
 
     def test_truncates_long_choice_label(self):
         long_choice = "x" * 200
@@ -128,6 +184,143 @@ class TestClarifyChoiceViewConstruction:
         assert first_label.endswith("...")
         # Final label total <= 80 (Discord cap on button labels)
         assert len(first_label) <= 80
+
+    def test_dict_choices_dont_leak_python_repr(self):
+        """Regression: models sometimes pass dict choices like
+        ``{'key': 'cc', 'value': 'Claude Code CLI (Anthropic) — recommended default'}``
+        to the clarify tool. The view MUST render the human-readable
+        ``value`` field, never the Python ``str(dict)`` repr — that
+        corrupted form was making Discord buttons unreadable.
+        """
+        view = ClarifyChoiceView(
+            choices=[
+                {"key": "cc", "value": "Claude Code CLI (Anthropic) — recommended default"},
+                {"key": "oc", "value": "OpenCode CLI — open-source, provider-agnostic"},
+            ],
+            clarify_id="cidD",
+            allowed_user_ids=set(),
+        )
+        labels = [b.label for b in view.children]
+        # Two real choices + Other button
+        assert len(view.children) == 3
+        # First two labels must contain the human-readable value, not the dict repr
+        assert "Claude Code CLI" in labels[0]
+        assert "{" not in labels[0], f"dict repr leaked into button: {labels[0]!r}"
+        assert "key" not in labels[0], f"key field leaked: {labels[0]!r}"
+        assert "OpenCode CLI" in labels[1]
+        assert "{" not in labels[1], f"dict repr leaked: {labels[1]!r}"
+        # Other button still present
+        assert "Other" in labels[2]
+
+    def test_dict_choices_fall_back_to_label(self):
+        """If the dict has no 'value' field, fall back to 'label'."""
+        view = ClarifyChoiceView(
+            choices=[{"label": "Apple", "description": "red fruit"}],
+            clarify_id="cidL",
+            allowed_user_ids=set(),
+        )
+        labels = [b.label for b in view.children]
+        assert "Apple" in labels[0]
+        assert "{" not in labels[0]
+
+    def test_three_choices_uses_select_menu(self):
+        """>2 choices should use a Select menu (drop-up) instead of buttons,
+        so descriptions don't get truncated at Discord's 80-char button cap.
+        Each Select option gets label + description rows."""
+        view = ClarifyChoiceView(
+            choices=[
+                {"value": "Install Claude Code", "description": "Recommended default, strongest reasoning"},
+                {"value": "Install OpenCode", "description": "Provider-agnostic, BYO API keys"},
+                {"value": "Install Codex", "description": "OpenAI, batch issue fixing"},
+            ],
+            clarify_id="cidM",
+            allowed_user_ids=set(),
+        )
+        select_children = [c for c in view.children if _is_select(c)]
+        button_children = [c for c in view.children if _is_button(c)]
+        assert len(select_children) == 1, f"expected 1 Select, got {len(select_children)}"
+        assert len(button_children) == 0, f"expected 0 Buttons, got {len(button_children)}"
+        sel = select_children[0]
+        labels = [opt.label for opt in sel.options]
+        descs = [opt.description for opt in sel.options]
+        assert "Install Claude Code" in labels
+        assert "Recommended default, strongest reasoning" in descs
+        assert "Other" in labels[-1]
+
+    def test_two_choices_still_uses_buttons(self):
+        """≤2 choices should stay as buttons (faster for yes/no)."""
+        view = ClarifyChoiceView(
+            choices=["Yes", "No"],
+            clarify_id="cidYN",
+            allowed_user_ids=set(),
+        )
+        select_children = [c for c in view.children if _is_select(c)]
+        button_children = [c for c in view.children if _is_button(c)]
+        assert len(select_children) == 0
+        assert len(button_children) == 3  # 2 choices + 1 Other button
+
+    def test_select_menu_truncates_long_descriptions(self):
+        """Discord Select option.description caps at 100 chars; we truncate
+        with an ellipsis to fit the platform constraint."""
+        # We use 3 choices (the minimum that triggers the Select path)
+        view = ClarifyChoiceView(
+            choices=[
+                {"value": "X", "description": "d" * 200},
+                {"value": "Y", "description": "ok"},
+                {"value": "Z", "description": "ok"},
+            ],
+            clarify_id="cidD",
+            allowed_user_ids=set(),
+        )
+        select_children = [c for c in view.children if _is_select(c)]
+        assert len(select_children) == 1
+        sel = select_children[0]
+        real_option = sel.options[0]
+        assert len(real_option.description) <= 100
+        assert real_option.description.endswith("...")
+
+    def test_select_menu_other_row_appended(self):
+        """A trailing "Other" row is appended to every Select menu so
+        the user can still type a custom answer. Tool layer caps at
+        4 real choices (MAX_CHOICES), so the Select has at most 5
+        options (4 real + 1 Other). Discord's 25-option cap is never
+        reached at the tool's max."""
+        view = ClarifyChoiceView(
+            choices=[{"value": f"choice-{i}"} for i in range(4)],
+            clarify_id="cidMax",
+            allowed_user_ids=set(),
+        )
+        select_children = [c for c in view.children if _is_select(c)]
+        assert len(select_children) == 1
+        sel = select_children[0]
+        # 4 real + 1 Other = 5
+        assert len(sel.options) == 5
+        # First 4 are the real choices
+        for i, opt in enumerate(sel.options[:4]):
+            assert opt.label == f"choice-{i}"
+        # Last is Other
+        assert "Other" in sel.options[-1].label
+
+    def test_choice_resolves_via_select_option(self):
+        """When a Select option is chosen, it should resolve the clarify
+        with the option's label, not just the index."""
+        view = ClarifyChoiceView(
+            choices=["apple", "banana", "cherry"],
+            clarify_id="cidS",
+            allowed_user_ids=set(),
+        )
+        select_children = [c for c in view.children if _is_select(c)]
+        sel = select_children[0]
+        # The custom_id encodes the clarify_id
+        assert sel.custom_id == "clarify:cidS"
+        # The option values are what gets sent to the interaction callback
+        option_values = [opt.value for opt in sel.options[:3]]
+        assert "0" in option_values
+        assert "1" in option_values
+        assert "2" in option_values
+        # The labels carry the actual choice text (not the index)
+        option_labels = [opt.label for opt in sel.options[:3]]
+        assert option_labels == ["apple", "banana", "cherry"]
 
 
 # ===========================================================================
@@ -321,8 +514,14 @@ class TestDiscordSendClarify:
         assert "embed" in kwargs
         assert "view" in kwargs
         assert isinstance(kwargs["view"], ClarifyChoiceView)
-        # 3 choice buttons + 1 Other
-        assert len(kwargs["view"].children) == 4
+        # 3 choices → Select menu (1 child with 4 options: 3 real + Other)
+        view = kwargs["view"]
+        assert len(view.children) == 1
+        select = view.children[0]
+        assert len(select.options) == 4
+        assert "Other" in select.options[-1].label
+        # The view should also carry the question for the Select placeholder
+        assert view.question == "Pick a color"
 
     @pytest.mark.asyncio
     async def test_open_ended_omits_view(self):
@@ -401,6 +600,101 @@ class TestDiscordSendClarify:
         )
         kwargs = channel.send.call_args.kwargs
         view = kwargs["view"]
-        # Only 1 real choice + 1 Other = 2 children
+        # Only 1 real choice → falls into button path (≤2): 1 button + 1 Other
         assert len(view.children) == 2
         assert "real-choice" in view.children[0].label
+
+    @pytest.mark.asyncio
+    async def test_select_option_click_resolves_clarify(self):
+        """End-to-end: simulate a user clicking a Select option and verify
+        the gateway clarify entry resolves with the option's label."""
+        from tools import clarify_gateway as cm
+
+        adapter = _make_adapter(allowed_users={"42"})
+        channel = MagicMock()
+        sent_msg = MagicMock()
+        sent_msg.id = 555
+        channel.send = AsyncMock(return_value=sent_msg)
+        adapter._client.get_channel = MagicMock(return_value=channel)
+
+        # 3 choices → Select menu
+        await adapter.send_clarify(
+            chat_id="9001",
+            question="Pick one",
+            choices=[
+                {"value": "alpha", "description": "first"},
+                {"value": "beta", "description": "second"},
+                {"value": "gamma", "description": "third"},
+            ],
+            clarify_id="cidSel",
+            session_key="sk-Sel",
+        )
+        view = channel.send.call_args.kwargs["view"]
+        # Get the Select
+        select = next(c for c in view.children if _is_select(c))
+
+        # Register a pending clarify entry so the resolve path can find it
+        with cm._lock:
+            cm._entries["cidSel"] = cm._ClarifyEntry(
+                clarify_id="cidSel",
+                session_key="sk-Sel",
+                question="Pick one",
+                choices=["alpha", "beta", "gamma"],
+            )
+        try:
+            # Simulate the user picking the second option ("beta")
+            interaction = _make_interaction(user_id="42", display_name="Tester")
+            interaction.data = {"values": ["1"]}  # "1" = index of "beta"
+            await view._on_select(interaction)
+
+            # The clarify entry should be resolved with "beta"
+            entry = cm._entries.get("cidSel")
+            assert entry is not None
+            assert entry.response == "beta"
+            # The interaction should have responded
+            interaction.response.edit_message.assert_called_once()
+        finally:
+            _clear_clarify_state()
+
+    @pytest.mark.asyncio
+    async def test_select_other_option_routes_to_text_capture(self):
+        """Selecting the 'Other' row in the Select should flip the clarify
+        entry into text-capture mode (same as the Other button)."""
+        from tools import clarify_gateway as cm
+
+        adapter = _make_adapter(allowed_users={"42"})
+        channel = MagicMock()
+        sent_msg = MagicMock()
+        sent_msg.id = 666
+        channel.send = AsyncMock(return_value=sent_msg)
+        adapter._client.get_channel = MagicMock(return_value=channel)
+
+        await adapter.send_clarify(
+            chat_id="9001",
+            question="Pick one",
+            choices=["alpha", "beta", "gamma"],
+            clarify_id="cidOther",
+            session_key="sk-Other",
+        )
+        view = channel.send.call_args.kwargs["view"]
+        select = next(c for c in view.children if _is_select(c))
+
+        with cm._lock:
+            cm._entries["cidOther"] = cm._ClarifyEntry(
+                clarify_id="cidOther",
+                session_key="sk-Other",
+                question="Pick one",
+                choices=["alpha", "beta", "gamma"],
+            )
+        try:
+            interaction = _make_interaction(user_id="42", display_name="Tester")
+            interaction.data = {"values": ["other"]}
+            await view._on_select(interaction)
+
+            # The entry should be marked as awaiting text, not resolved
+            entry = cm._entries.get("cidOther")
+            assert entry is not None
+            assert entry.awaiting_text is True
+            assert entry.response is None
+        finally:
+            _clear_clarify_state()

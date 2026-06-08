@@ -122,6 +122,86 @@ class TestClarifyToolChoicesValidation:
         clarify_tool("Pick", choices=[1, 2, 3], callback=mock_callback)  # type: ignore
         assert choices_received == ["1", "2", "3"]
 
+    def test_dict_choices_extract_value_field(self):
+        """Regression: models sometimes pass dict choices like
+        ``{"key": "cc", "value": "Claude Code CLI"}`` instead of plain
+        strings. The tool must extract a human-readable string, NOT
+        ``str(dict)`` (which produces ``{'key': 'cc', 'value': '...'}``)
+        — that corrupted form is what was rendering on Discord buttons.
+        """
+        choices_received = []
+
+        def mock_callback(question: str, choices: Optional[List[str]]) -> str:
+            choices_received.extend(choices or [])
+            return "picked"
+
+        clarify_tool(
+            "Pick a worker",
+            choices=[
+                {"key": "cc", "value": "Claude Code CLI (Anthropic) — recommended default"},
+                {"key": "oc", "value": "OpenCode CLI — open-source, provider-agnostic"},
+            ],
+            callback=mock_callback,
+        )
+
+        assert choices_received == [
+            "Claude Code CLI (Anthropic) — recommended default",
+            "OpenCode CLI — open-source, provider-agnostic",
+        ]
+        # Crucially: no Python repr, no key field leaking through
+        for c in choices_received:
+            assert "{" not in c, f"dict repr leaked: {c!r}"
+            assert "key" not in c, f"key field leaked: {c!r}"
+
+    def test_dict_choices_fall_back_to_label(self):
+        """If the model uses ``label`` instead of ``value``, prefer ``value`` first."""
+        choices_received = []
+
+        def mock_callback(question: str, choices: Optional[List[str]]) -> str:
+            choices_received.extend(choices or [])
+            return "picked"
+
+        clarify_tool(
+            "Pick",
+            choices=[{"label": "Apple", "description": "red fruit"}],
+            callback=mock_callback,
+        )
+        assert choices_received == ["Apple"]
+
+    def test_mixed_string_and_dict_choices_normalized(self):
+        """A mix of str and dict should all normalize to strings."""
+        choices_received = []
+
+        def mock_callback(question: str, choices: Optional[List[str]]) -> str:
+            choices_received.extend(choices or [])
+            return "picked"
+
+        clarify_tool(
+            "Pick",
+            choices=["plain string", {"value": "dict value"}, 42],
+            callback=mock_callback,
+        )
+        assert choices_received == ["plain string", "dict value", "42"]
+
+    def test_unrenderable_dict_choices_become_open_ended(self):
+        """If every choice is unrenderable (e.g. all-numeric dicts), the
+        question degrades gracefully into open-ended rather than
+        erroring. The user can still type a free-form answer."""
+        received_choices = []
+
+        def mock_cb(question, choices):
+            received_choices.extend(choices or [])
+            return "typed answer"
+
+        result = json.loads(clarify_tool(
+            "Pick",
+            choices=[{"foo": 1, "bar": 2}],
+            callback=mock_cb,
+        ))
+        assert "error" not in result
+        # Tool passed None to the callback (open-ended)
+        assert received_choices == []
+
 
 class TestClarifyToolCallbackHandling:
     """Tests for callback error handling."""

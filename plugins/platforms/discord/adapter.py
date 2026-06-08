@@ -4402,9 +4402,28 @@ class DiscordAdapter(BasePlatformAdapter):
                 color=discord.Color.orange(),
             )
 
-            clean_choices = [
-                str(c).strip() for c in (choices or []) if c is not None and str(c).strip()
-            ]
+            # Normalise choices defensively. The clarify_tool layer
+            # already does this, but adapters receive choices directly
+            # from a few other code paths (model_picker, custom
+            # workflows) and any of them could feed us a dict / int /
+            # None. ``str(c)`` on a dict produces a Python repr like
+            # ``"{'key': 'cc', 'value': 'Claude Code CLI'}"`` which is
+            # exactly what was making the Discord buttons unreadable.
+            try:
+                from tools.clarify_tool import _normalize_clarify_choice as _norm_choice
+            except Exception:
+                _norm_choice = None
+
+            if _norm_choice is not None:
+                clean_choices = [
+                    s for s in (_norm_choice(c) for c in (choices or []))
+                    if s
+                ]
+            else:
+                # Fallback: best-effort stringification
+                clean_choices = [
+                    str(c).strip() for c in (choices or []) if c is not None and str(c).strip()
+                ]
             # Discord allows up to 5 buttons per row, 5 rows per view = 25.
             # We reserve one slot for the "Other" button, so cap at 24 choices.
             clean_choices = clean_choices[:24]
@@ -4420,6 +4439,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     clarify_id=clarify_id,
                     allowed_user_ids=self._allowed_user_ids,
                     allowed_role_ids=self._allowed_role_ids,
+                    question=question,
                 )
             else:
                 embed.add_field(
@@ -5821,52 +5841,173 @@ def _define_discord_view_classes() -> None:
 
 
     class ClarifyChoiceView(discord.ui.View):
-        """Interactive button view for the clarify tool's multiple-choice prompts.
+        """Interactive view for the clarify tool's multiple-choice prompts.
 
-        Renders one button per choice (max 24) plus a final ``✏️ Other`` button.
-        Picking a numeric choice resolves the gateway clarify entry immediately;
-        picking ``Other`` flips the entry into text-capture mode so the next
-        user message in the session becomes the response (the gateway's
-        text-intercept handles the resolution).
+        Two render paths based on choice count:
 
-        Auth gating mirrors ``ExecApprovalView`` — only users/roles in the
-        Discord adapter's allowlist may answer. Single-use: after the first
-        valid click all buttons disable and the embed updates to show who
-        answered and what they chose.
+        * **≤2 choices** → buttons (faster to click for yes/no style prompts)
+        * **>2 choices** → Discord Select menu (drop-up) so each row gets
+          a 100-char ``label`` *and* a 100-char ``description``. Buttons
+          cap at 80 chars and don't support a second line, so a Select
+          is required for any non-trivial choice set.
+
+        The Select path is the opencode-style "dropup with title and
+        description" — each row reads cleanly even when the label is
+        long. A trailing "✏️ Other (type your answer)" row is appended
+        as the 25th option to preserve the free-text fallback.
+
+        Auth gating mirrors ``ExecApprovalView`` — only users/roles in
+        the Discord adapter's allowlist may answer. Single-use: after
+        the first valid interaction the menu/buttons disable and the
+        embed updates to show who answered and what they chose.
         """
+
+        # Discord limits:
+        #   - button label: 80 chars
+        #   - select option label: 100 chars
+        #   - select option description: 100 chars
+        #   - select options per menu: 25
+        _MAX_BUTTON_LABEL = 80
+        _MAX_SELECT_LABEL = 100
+        _MAX_SELECT_DESC = 100
+        _MAX_SELECT_OPTIONS = 25
+        _OTHER_LABEL = "✏️ Other (type your answer)"
+        _OTHER_DESC = "Type a custom answer in the channel"
 
         def __init__(
             self,
-            choices: List[str],
+            choices,  # List[str] | List[dict] | List[ClarifyChoice]
             clarify_id: str,
             allowed_user_ids: set,
             allowed_role_ids: Optional[set] = None,
+            question: str = "",
         ):
             super().__init__(timeout=300)  # 5-minute timeout
-            self.choices = list(choices)[:24]
+
+            # Normalise choices to a list of {label, description} dicts.
+            # The clarify_tool layer already does this on the normal
+            # path, but the view is also constructed directly in some
+            # test paths. ``str(c)`` on a dict would render Python repr
+            # like ``"{'key': 'cc', ...}"`` on the button label — the
+            # bug we are regressing.
+            try:
+                from tools.clarify_tool import (
+                    _normalize_clarify_choices_rich as _norm_rich,
+                )
+            except Exception:
+                _norm_rich = None
+
+            if _norm_rich is not None:
+                rich = _norm_rich(choices) or []
+            else:
+                # Fallback: best-effort stringification, no descriptions
+                rich = []
+                for c in (choices or []):
+                    s = str(c).strip() if c is not None else ""
+                    if s:
+                        rich.append({"label": s, "description": None})
+
+            # Truncate to fit Discord's Select option cap. The Other
+            # row takes one slot, so real choices get at most 24.
+            self.choices: List[dict] = rich[: self._MAX_SELECT_OPTIONS - 1]
             self.clarify_id = clarify_id
             self.allowed_user_ids = allowed_user_ids
             self.allowed_role_ids = allowed_role_ids or set()
             self.resolved = False
+            self.question = question
 
+            if len(self.choices) <= 2:
+                # Buttons path: faster for short prompts, no truncation risk
+                self._build_buttons()
+            else:
+                # Select menu path: full opencode-style title + description
+                self._build_select_menu()
+
+        # ------------------------------------------------------------------
+        # Render paths
+        # ------------------------------------------------------------------
+
+        def _build_buttons(self) -> None:
+            """≤2 choices: one button per choice, plus an Other button."""
             for index, choice in enumerate(self.choices):
-                # Discord button labels are capped at 80 chars.
-                label_body = choice if len(choice) <= 75 else choice[:72] + "..."
+                label = choice["label"]
+                label_body = (
+                    label
+                    if len(label) <= 75
+                    else label[:72] + "..."
+                )
                 button = discord.ui.Button(
                     label=f"{index + 1}. {label_body}",
                     style=discord.ButtonStyle.primary,
-                    custom_id=f"clarify:{clarify_id}:{index}",
+                    custom_id=f"clarify:{self.clarify_id}:{index}",
                 )
-                button.callback = self._make_choice_callback(index, choice)
+                button.callback = self._make_choice_callback(index, label)
                 self.add_item(button)
 
             other_btn = discord.ui.Button(
-                label="✏️ Other (type answer)",
+                label=self._OTHER_LABEL,
                 style=discord.ButtonStyle.secondary,
-                custom_id=f"clarify:{clarify_id}:other",
+                custom_id=f"clarify:{self.clarify_id}:other",
             )
             other_btn.callback = self._on_other
             self.add_item(other_btn)
+
+        def _build_select_menu(self) -> None:
+            """>2 choices: single Select menu with one option per choice,
+            plus a trailing "Other" option. Each option carries a
+            label + optional description (100 chars each, Discord caps)."""
+            options: List[discord.SelectOption] = []
+            for index, choice in enumerate(self.choices):
+                label = self._fit(choice["label"], self._MAX_SELECT_LABEL)
+                desc = choice.get("description")
+                desc = self._fit(desc, self._MAX_SELECT_DESC) if desc else None
+                options.append(
+                    discord.SelectOption(
+                        label=label,
+                        description=desc,
+                        value=str(index),
+                    )
+                )
+
+            # Append the "Other" row as the last option. We give it a
+            # distinct value so the callback can dispatch to text-capture.
+            options.append(
+                discord.SelectOption(
+                    label=self._OTHER_LABEL,
+                    description=self._OTHER_DESC,
+                    value="other",
+                )
+            )
+
+            placeholder = self._fit(
+                f"Pick one… ({self.question})" if self.question else "Pick one…",
+                150,  # Discord Select.placeholder cap
+            )
+
+            select = discord.ui.Select(
+                placeholder=placeholder,
+                options=options,
+                custom_id=f"clarify:{self.clarify_id}",
+            )
+            select.callback = self._on_select
+            self.add_item(select)
+
+        @staticmethod
+        def _fit(text: str, max_len: int) -> str:
+            """Truncate to fit Discord's per-field char cap. Appends
+            an ellipsis when the input was actually clipped."""
+            if text is None:
+                return ""
+            s = str(text)
+            if len(s) <= max_len:
+                return s
+            if max_len <= 3:
+                return s[:max_len]
+            return s[: max_len - 3] + "..."
+
+        # ------------------------------------------------------------------
+        # Interaction handlers
+        # ------------------------------------------------------------------
 
         def _check_auth(self, interaction: "discord.Interaction") -> bool:
             return _component_check_auth(
@@ -5877,6 +6018,43 @@ def _define_discord_view_classes() -> None:
             async def _callback(interaction: "discord.Interaction"):
                 await self._resolve_choice(interaction, index, choice)
             return _callback
+
+        async def _on_select(self, interaction: "discord.Interaction") -> None:
+            """Dispatch a Select menu pick: real choice → resolve, other → text."""
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorized to answer this prompt~",
+                    ephemeral=True,
+                )
+                return
+
+            # discord.Interaction.data.values is a list of selected option values
+            values = (getattr(interaction, "data", None) or {}).get("values") or []
+            if not values:
+                return
+            pick = values[0]
+
+            if pick == "other":
+                await self._on_other(interaction)
+                return
+
+            try:
+                index = int(pick)
+            except (TypeError, ValueError):
+                await interaction.response.send_message(
+                    "Invalid selection~", ephemeral=True,
+                )
+                return
+
+            if not (0 <= index < len(self.choices)):
+                await interaction.response.send_message(
+                    "Selection out of range~", ephemeral=True,
+                )
+                return
+
+            await self._resolve_choice(
+                interaction, index, self.choices[index]["label"],
+            )
 
         async def _resolve_choice(
             self,
