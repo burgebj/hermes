@@ -47,6 +47,8 @@ export const es: Translations = {
       "No se pudo cargar el script de este complemento. Revisa la pestaña Network (dashboard-plugins/…) y la ruta del complemento del servidor.",
     pluginNotRegistered:
       "El script del complemento no llamó a register(), o falló. Abre la consola del navegador para más detalles.",
+    pluginCrashed:
+      "Este complemento no pudo renderizarse. Si acabas de actualizar Hermes, reconstruye los assets web (npm run build) y recarga. Abre la consola del navegador para más detalles.",
   },
 
   app: {

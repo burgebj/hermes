@@ -66,6 +66,7 @@ export interface Translations {
     gatewayHint?: string;
     pluginLoadFailed: string;
     pluginNotRegistered: string;
+    pluginCrashed: string;
   };
 
   // ── App shell ──

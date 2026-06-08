@@ -47,6 +47,8 @@ export const zhHant: Translations = {
       "無法載入此外掛的指令碼。請檢查網路請求（dashboard-plugins/…）以及伺服器上的外掛路徑。",
     pluginNotRegistered:
       "外掛指令碼未呼叫 register()，或執行時發生錯誤。請開啟瀏覽器主控台查看詳細資訊。",
+    pluginCrashed:
+      "此外掛繪製失敗。若您剛更新了 Hermes，請重新建置網頁資源 (npm run build) 並重新載入。請開啟瀏覽器主控台查看詳細資訊。",
   },
 
   app: {

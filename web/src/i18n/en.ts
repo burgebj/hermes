@@ -50,6 +50,8 @@ export const en: Translations = {
       "Could not load this plugin’s script. Check the Network tab (dashboard-plugins/…) and the server’s plugin path.",
     pluginNotRegistered:
       "The plugin’s script did not call register(), or the script errored. Open the browser console for details.",
+    pluginCrashed:
+      "This plugin failed to render. If you just updated Hermes, rebuild the web assets (npm run build) and reload. Open the browser console for details.",
   },
 
   app: {

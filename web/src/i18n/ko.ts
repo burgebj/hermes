@@ -47,6 +47,8 @@ export const ko: Translations = {
       "이 플러그인의 스크립트를 로드할 수 없습니다. Network 탭(dashboard-plugins/…)과 서버의 플러그인 경로를 확인하세요.",
     pluginNotRegistered:
       "플러그인 스크립트가 register()를 호출하지 않았거나 스크립트에 오류가 발생했습니다. 자세한 내용은 브라우저 콘솔을 열어 확인하세요.",
+    pluginCrashed:
+      "이 플러그인을 렌더링하지 못했습니다. Hermes를 방금 업데이트했다면 웹 에셋을 재빌드 (npm run build) 하고 새로고침하세요. 자세한 내용은 브라우저 콘솔을 열어 확인하세요.",
   },
 
   app: {

@@ -47,6 +47,8 @@ export const ga: Translations = {
       "Níorbh fhéidir script an plugin seo a luchtú. Seiceáil an cluaisín Network (dashboard-plugins/…) agus conair plugin an fhreastalaí.",
     pluginNotRegistered:
       "Níor ghlaoigh script an plugin ar register(), nó tharla earráid sa script. Oscail consól an bhrabhsálaí le haghaidh sonraí.",
+    pluginCrashed:
+      "Theip ar an plugin seo rindreáil. Má nuashonraigh tú Hermes le déanaí, atóg na sócmhainní gréasáin (npm run build) agus athlódáil. Oscail consól an bhrabhsálaí le haghaidh sonraí.",
   },
 
   app: {

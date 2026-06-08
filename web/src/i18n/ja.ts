@@ -47,6 +47,8 @@ export const ja: Translations = {
       "このプラグインのスクリプトを読み込めませんでした。Network タブ（dashboard-plugins/…）とサーバーのプラグインパスをご確認ください。",
     pluginNotRegistered:
       "プラグインのスクリプトが register() を呼び出していないか、スクリプトでエラーが発生しました。詳細はブラウザのコンソールをご確認ください。",
+    pluginCrashed:
+      "このプラグインの描画に失敗しました。Hermes を更新した直後の場合は、Web アセットを再ビルド (npm run build) してリロードしてください。詳細はブラウザのコンソールをご確認ください。",
   },
 
   app: {

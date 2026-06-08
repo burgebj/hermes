@@ -47,6 +47,8 @@ export const af: Translations = {
       "Kon nie hierdie inprop se skrip laai nie. Kontroleer die Netwerk-oortjie (dashboard-plugins/…) en die bediener se inprop-pad.",
     pluginNotRegistered:
       "Die inprop se skrip het nie register() geroep nie, of die skrip het 'n fout gegee. Maak die blaaier-konsole oop vir besonderhede.",
+    pluginCrashed:
+      "Hierdie inprop het misluk om te vertoon. As jy Hermes pas opgedateer het, herbou die web-bates (npm run build) en herlaai. Maak die blaaier-konsole oop vir besonderhede.",
   },
 
   app: {

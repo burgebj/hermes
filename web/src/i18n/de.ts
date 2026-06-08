@@ -47,6 +47,8 @@ export const de: Translations = {
       "Das Skript dieses Plugins konnte nicht geladen werden. Prüfe den Netzwerk-Tab (dashboard-plugins/…) und den Plugin-Pfad des Servers.",
     pluginNotRegistered:
       "Das Skript des Plugins hat register() nicht aufgerufen oder ist fehlgeschlagen. Öffne die Browser-Konsole für Details.",
+    pluginCrashed:
+      "Dieses Plugin konnte nicht gerendert werden. Wenn du Hermes gerade aktualisiert hast, erstelle die Web-Assets neu (npm run build) und lade die Seite neu. Öffne die Browser-Konsole für Details.",
   },
 
   app: {

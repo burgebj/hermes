@@ -47,6 +47,8 @@ export const hu: Translations = {
       "Nem sikerült betölteni a bővítmény szkriptjét. Ellenőrizze a Network fület (dashboard-plugins/…) és a kiszolgáló bővítmény-elérési útját.",
     pluginNotRegistered:
       "A bővítmény szkriptje nem hívta meg a register() függvényt, vagy hibára futott. A részletekért nyissa meg a böngésző konzolját.",
+    pluginCrashed:
+      "A bővítmény megjelenítése sikertelen. Ha frissítette a Hermest, fordítsa újra a webes erőforrásokat (npm run build), és töltse újra az oldalt. A részletekért nyissa meg a böngésző konzolját.",
   },
 
   app: {

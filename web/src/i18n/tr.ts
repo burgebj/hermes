@@ -47,6 +47,8 @@ export const tr: Translations = {
       "Bu eklentinin betiği yüklenemedi. Ağ sekmesini (dashboard-plugins/…) ve sunucunun eklenti yolunu kontrol edin.",
     pluginNotRegistered:
       "Eklenti betiği register() çağırmadı veya betik hata verdi. Ayrıntılar için tarayıcı konsolunu açın.",
+    pluginCrashed:
+      "Bu eklenti oluşturulamadı. Hermes'i yeni güncellediyseniz web varlıklarını yeniden derleyin (npm run build) ve yeniden yükleyin. Ayrıntılar için tarayıcı konsolunu açın.",
   },
 
   app: {

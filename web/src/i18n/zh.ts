@@ -46,6 +46,7 @@ export const zh: Translations = {
     pluginLoadFailed:
       "无法加载此插件的脚本。请检查网络请求（dashboard-plugins/…）以及服务器上的插件路径。",
     pluginNotRegistered: "插件脚本未调用 register()，或执行出错。请打开浏览器控制台查看详情。",
+    pluginCrashed: "此插件渲染失败。如果您刚刚更新了 Hermes，请重新构建 Web 资源 (npm run build) 并重新加载页面。请打开浏览器控制台查看详情。",
   },
 
   app: {
