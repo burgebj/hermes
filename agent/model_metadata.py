@@ -1664,6 +1664,26 @@ def get_model_context_length(
         if context_length is not None:
             return context_length
         if not _is_known_provider_base_url(base_url):
+            # 2a. If the endpoint responded with an OpenAI-shape catalog
+            # and is not detected as Ollama, treat it as a generic
+            # OpenAI-compatible proxy (LiteLLM, vLLM, custom OpenAI
+            # gateway, ...) and skip Ollama-native /api/show probes.
+            # The probes 404 quickly in isolation but their cumulative
+            # effect appears to interfere with downstream requests on
+            # some proxies — see #26489 (LiteLLM proxy fronting Ollama:
+            # full probe avalanche, then no chat completion issued).
+            # fetch_endpoint_model_metadata is in-memory cached (300s),
+            # so this re-call costs ~nothing.
+            catalog = fetch_endpoint_model_metadata(base_url, api_key=api_key)
+            if catalog and detect_local_server_type(base_url, api_key=api_key) != "ollama":
+                logger.info(
+                    "Endpoint %s exposes OpenAI-compatible catalog "
+                    "(%d models, non-Ollama); defaulting context_length "
+                    "to %s. Set model.context_length in config.yaml to "
+                    "override.",
+                    base_url, len(catalog), f"{DEFAULT_FALLBACK_CONTEXT:,}",
+                )
+                return DEFAULT_FALLBACK_CONTEXT
             # 2b. Ollama native /api/show — any URL might be an Ollama server
             # (local, cloud, or custom hosting).  Non-Ollama servers return
             # 404/405 quickly.  Fall through on failure.
