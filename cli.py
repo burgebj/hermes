@@ -10043,6 +10043,7 @@ class HermesCLI:
             print(f"  Available: {', '.join(sorted(available))}")
             return
 
+        old_skin = get_active_skin_name()
         set_active_skin(new_skin)
         _ACCENT.reset()  # Re-resolve ANSI color for the new skin
         # _DIM is now a fixed dim+italic ANSI escape (terminal-default fg)
@@ -10051,9 +10052,27 @@ class HermesCLI:
             print(f"  Skin set to: {new_skin} (saved)")
         else:
             print(f"  Skin set to: {new_skin}")
-        print("  Note: banner colors will update on next session start.")
         if self._apply_tui_skin_style():
             print("  Prompt + TUI colors updated.")
+        # Reprint the banner with the new skin's colors so the user sees
+        # the full theme change immediately — not just on next session start.
+        self._refresh_banner_after_skin_switch()
+
+    def _refresh_banner_after_skin_switch(self):
+        """Reprint the compact banner with the new skin's colors.
+
+        Inside the TUI, Rich output must go through ChatConsole (prompt_toolkit's
+        native ANSI renderer) instead of self.console (raw stdout, mangled by
+        patch_stdout).  Outside the TUI, self.console works fine.
+        """
+        try:
+            if self._app:
+                cc = ChatConsole()
+                cc.print(_build_compact_banner())
+            else:
+                self.console.print(_build_compact_banner())
+        except Exception:
+            pass  # banner refresh is cosmetic — never break /skin
 
     def _handle_footer_command(self, cmd_original: str) -> None:
         """Toggle or inspect ``display.runtime_footer.enabled`` from the CLI.
@@ -12538,7 +12557,17 @@ class HermesCLI:
             # by the Enter key binding (routed to the clarify response queue),
             # so we skip interrupt processing to avoid stealing that input.
             interrupt_msg = None
+            interrupt_requested_without_message = False
             while agent_thread.is_alive():
+                if (
+                    self.agent
+                    and getattr(self.agent, "_interrupt_requested", False)
+                    and interrupt_msg is None
+                ):
+                    interrupt_requested_without_message = True
+                    if stop_event is not None:
+                        stop_event.set()
+                    break
                 if hasattr(self, '_interrupt_queue'):
                     try:
                         interrupt_msg = self._interrupt_queue.get(timeout=0.1)
@@ -12581,7 +12610,8 @@ class HermesCLI:
             # session).  Poll instead of a blocking join so the process_loop
             # stays responsive — if the user sent another interrupt or the
             # agent gets stuck, we can break out instead of freezing forever.
-            if interrupt_msg is not None:
+            interrupt_requested = interrupt_msg is not None or interrupt_requested_without_message
+            if interrupt_requested:
                 # Interrupt path: poll briefly, then move on.  The agent
                 # thread is daemon — it dies on process exit regardless.
                 for _wait_tick in range(50):  # 50 * 0.2s = 10s max
@@ -12603,6 +12633,16 @@ class HermesCLI:
                 # Normal completion: agent thread should be done already,
                 # but guard against edge cases.
                 agent_thread.join(timeout=30)
+
+            if interrupt_requested and result is None:
+                result = {
+                    "final_response": "Operation interrupted.",
+                    "messages": self.conversation_history,
+                    "api_calls": 0,
+                    "completed": False,
+                    "interrupted": True,
+                    "interrupt_message": interrupt_msg,
+                }
 
             # Freeze per-prompt elapsed timer once the agent thread has
             # exited (or been abandoned as a daemon after interrupt).
