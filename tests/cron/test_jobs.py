@@ -972,6 +972,111 @@ class TestMarkJobRunConcurrency:
             )
 
 
+class TestJobStoreMutatorConcurrency:
+    """Regression tests for the job-store mutators under concurrency.
+
+    create_job / update_job / remove_job each run a load→modify→save cycle on
+    jobs.json. In a live gateway these run on different threads than the cron
+    tick (HTTP/dashboard handlers and the curator call the mutators while the
+    tick pool calls mark_job_run / advance_next_run). The mutators previously
+    skipped _jobs_file_lock, so a tick's save could be silently clobbered by a
+    concurrent mutator that wrote back a stale snapshot — a lost update that
+    resurrects a completed one-shot or reverts repeat.completed / next_run_at.
+    With the lock in place no write may be dropped.
+    """
+
+    def test_concurrent_create_and_mark_no_lost_writes(self, tmp_cron_dir):
+        """create_job appends while mark_job_run advances an existing job.
+
+        Without the lock the appends and the tick's save race on the same
+        snapshot: either some created jobs vanish or the marked job's
+        completed count is reverted. With the lock both survive in full.
+        """
+        n = 40
+        anchor = create_job(prompt="Anchor", schedule="every 1h")
+        errors: list = []
+
+        def do_creates():
+            for i in range(n):
+                try:
+                    create_job(prompt=f"Created {i}", schedule="every 1h")
+                except Exception as exc:  # pragma: no cover
+                    errors.append(exc)
+
+        def do_marks():
+            for _ in range(n):
+                try:
+                    mark_job_run(anchor["id"], success=True)
+                except Exception as exc:  # pragma: no cover
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=do_creates),
+            threading.Thread(target=do_marks),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Unexpected exceptions: {errors}"
+
+        all_jobs = load_jobs()
+        # Anchor + n created jobs must all survive — no append clobbered.
+        assert len(all_jobs) == n + 1, (
+            f"Expected {n + 1} jobs, found {len(all_jobs)} — a create or mark "
+            f"save was lost"
+        )
+        marked = get_job(anchor["id"])
+        assert marked is not None, "Anchor job was clobbered out of existence"
+        assert marked["repeat"]["completed"] == n, (
+            f"Anchor completed count is {marked['repeat']['completed']}, "
+            f"expected {n} — a mark_job_run save was lost"
+        )
+
+    def test_concurrent_remove_does_not_resurrect(self, tmp_cron_dir):
+        """remove_job deletes a finished one-shot while mark_job_run advances a peer.
+
+        The removed job must stay gone — a concurrent tick save writing back a
+        pre-removal snapshot would resurrect it (e.g. re-firing a one-shot).
+        """
+        anchor = create_job(prompt="Anchor", schedule="every 1h")
+        victims = [create_job(prompt=f"Victim {i}", schedule="every 1h") for i in range(20)]
+        errors: list = []
+
+        def do_removes():
+            for v in victims:
+                try:
+                    remove_job(v["id"])
+                except Exception as exc:  # pragma: no cover
+                    errors.append(exc)
+
+        def do_marks():
+            for _ in range(len(victims)):
+                try:
+                    mark_job_run(anchor["id"], success=True)
+                except Exception as exc:  # pragma: no cover
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=do_removes),
+            threading.Thread(target=do_marks),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"Unexpected exceptions: {errors}"
+
+        remaining_ids = {j["id"] for j in load_jobs()}
+        for v in victims:
+            assert v["id"] not in remaining_ids, (
+                f"Removed job {v['id']} was resurrected by a racing tick save"
+            )
+        assert anchor["id"] in remaining_ids, "Anchor job was wrongly deleted"
+
+
 class TestSaveJobOutput:
     def test_creates_output_file(self, tmp_cron_dir):
         output_file = save_job_output("test123", "# Results\nEverything ok.")
