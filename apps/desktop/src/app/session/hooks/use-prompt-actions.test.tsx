@@ -3,10 +3,11 @@ import type { MutableRefObject } from 'react'
 import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { ChatMessage } from '@/lib/chat-messages'
 import { $sessions, setSessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
-import { usePromptActions } from './use-prompt-actions'
+import { usePromptActions, visibleUserOrdinal } from './use-prompt-actions'
 
 vi.mock('@/hermes', () => ({
   getProfiles: vi.fn(async () => ({ profiles: [] })),
@@ -312,5 +313,36 @@ describe('usePromptActions steerPrompt', () => {
 
     expect(await handle!.steerPrompt('   ')).toBe(false)
     expect(requestGateway).not.toHaveBeenCalled()
+  })
+})
+
+describe('visibleUserOrdinal', () => {
+  const user = (id: string): ChatMessage => ({ id, role: 'user', parts: [] })
+  const assistant = (id: string): ChatMessage => ({ id, role: 'assistant', parts: [] })
+  const failed = (id: string): ChatMessage => ({ id, role: 'assistant', parts: [], error: 'provider down' })
+
+  it('counts the visible user turns before the cut', () => {
+    const messages = [user('u1'), assistant('a1'), user('u2'), assistant('a2')]
+
+    // Two prior user turns persisted before the slice end.
+    expect(visibleUserOrdinal(messages, 2)).toBe(1)
+    expect(visibleUserOrdinal(messages, 4)).toBe(2)
+  })
+
+  it('skips a failed user turn so the ordinal matches the backend persisted index', () => {
+    // u1's prompt.submit failed (assistant error, never persisted), then u2/u3
+    // succeeded. The gateway only counts u2 before u3, so regenerating u3 must
+    // resolve to ordinal 1 — not 2 — or the backend rejects with error 4018.
+    const messages = [user('u1'), failed('a1'), user('u2'), assistant('a2'), user('u3'), assistant('a3')]
+
+    const u3Index = messages.findIndex(m => m.id === 'u3')
+
+    expect(visibleUserOrdinal(messages, u3Index)).toBe(1)
+  })
+
+  it('ignores hidden (branched-away) user turns', () => {
+    const messages: ChatMessage[] = [{ ...user('u1'), hidden: true }, assistant('a1'), user('u2'), assistant('a2')]
+
+    expect(visibleUserOrdinal(messages, 4)).toBe(1)
   })
 })

@@ -164,8 +164,35 @@ function appendText(message: AppendMessage): string {
     .trim()
 }
 
-function visibleUserOrdinal(messages: readonly ChatMessage[], end: number): number {
-  return messages.slice(0, end).filter(m => m.role === 'user' && !m.hidden).length
+// Count the user turns the *backend* persisted before `end`, which is what
+// `truncate_before_user_ordinal` indexes against. A user turn whose
+// prompt.submit failed keeps its optimistic bubble (submitPromptText's catch
+// appends an assistant error and leaves the user message in place) but never
+// reaches backend history. The gateway only counts persisted user turns, so a
+// failed turn must be skipped here too — otherwise every later ordinal
+// overshoots the backend index and prompt.submit rejects with error 4018
+// ("target user message is no longer in session history"), silently breaking
+// regenerate for the rest of the session.
+export function visibleUserOrdinal(messages: readonly ChatMessage[], end: number): number {
+  let ordinal = 0
+
+  for (let index = 0; index < end; index += 1) {
+    const message = messages[index]
+
+    if (message.role !== 'user' || message.hidden) {
+      continue
+    }
+
+    const next = messages[index + 1]
+
+    if (next?.role === 'assistant' && Boolean(next.error)) {
+      continue
+    }
+
+    ordinal += 1
+  }
+
+  return ordinal
 }
 
 export function usePromptActions({
