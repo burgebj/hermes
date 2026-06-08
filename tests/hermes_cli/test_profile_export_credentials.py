@@ -20,6 +20,38 @@ class TestCredentialExclusion:
         """.env must be in the default export exclusion set."""
         assert ".env" in _DEFAULT_EXPORT_EXCLUDE_ROOT
 
+    def test_cache_in_default_exclude_set(self):
+        """Volatile tool/browser caches must be excluded from default export."""
+        assert "cache" in _DEFAULT_EXPORT_EXCLUDE_ROOT
+
+    def test_large_runtime_dirs_in_default_exclude_set(self):
+        """Default export should skip bulky local runtime/backup directories."""
+        for name in {"backups", "state-snapshots", "heapdumps", "kanban", "node", "lsp"}:
+            assert name in _DEFAULT_EXPORT_EXCLUDE_ROOT
+
+    def test_default_profile_export_excludes_volatile_cache(self, tmp_path, monkeypatch):
+        """Default profile export should not fail on volatile cache entries."""
+        default_home = tmp_path / ".hermes"
+        default_home.mkdir()
+        (default_home / "config.yaml").write_text("model: gpt-4\n")
+        (default_home / "SOUL.md").write_text("I am helpful.\n")
+        cache_dir = default_home / "cache" / "browser-profile"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "SingletonLock").write_text("volatile\n")
+
+        monkeypatch.setattr("hermes_cli.profiles._get_default_hermes_home", lambda: default_home)
+        monkeypatch.setattr("hermes_cli.profiles.get_profile_dir", lambda n: default_home)
+        monkeypatch.setattr("hermes_cli.profiles.validate_profile_name", lambda n: None)
+
+        output = tmp_path / "default-export.tar.gz"
+        result = export_profile("default", str(output))
+
+        with tarfile.open(result, "r:gz") as tf:
+            names = tf.getnames()
+
+        assert any("config.yaml" in n for n in names), "config.yaml should be in export"
+        assert not any("/cache/" in n or n.endswith("/cache") for n in names), "cache must NOT be in export"
+
     def test_named_profile_export_excludes_auth(self, tmp_path, monkeypatch):
         """Named profile export must not contain auth.json or .env."""
         profiles_root = tmp_path / "profiles"

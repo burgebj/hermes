@@ -213,6 +213,25 @@ def wait_for_mcp_discovery(timeout: float = 0.75) -> None:
 def main():
     _install_sidecar_publisher()
 
+    # Push the resolved skin out *before* the potentially slow MCP discovery
+    # below. The Ink TUI renders with its built-in DEFAULT_THEME until it
+    # receives the configured skin; that skin used to ride only on
+    # ``gateway.ready``, which is emitted after MCP discovery setup. For anyone
+    # with MCP servers configured, startup can still spend time importing and
+    # connecting to those servers, so the TUI may sit in the default theme and
+    # then visibly snap to the user's theme. A cheap, side-effect-free
+    # ``skin.changed`` here collapses that window to the first event the TUI
+    # processes. ``gateway.ready`` still carries the skin, so old clients lose
+    # nothing and applySkin remains idempotent.
+    try:
+        write_json({
+            "jsonrpc": "2.0",
+            "method": "event",
+            "params": {"type": "skin.changed", "payload": resolve_skin()},
+        })
+    except Exception:
+        pass
+
     # MCP tool discovery — runs in a background daemon thread so a slow or
     # unreachable MCP server can't freeze TUI startup.  Previously this ran
     # inline before ``gateway.ready``, which meant any configured-but-down
