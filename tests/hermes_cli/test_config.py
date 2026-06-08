@@ -477,6 +477,23 @@ class TestSanitizeEnvLines:
         assert result[0].startswith("GLM_API_KEY=")
         assert result[1].startswith("LM_API_KEY=")
 
+    def test_value_with_embedded_known_key_not_split(self):
+        """A structured value embedding a known KEY= must not be split (#secret-corruption).
+
+        A proxy/base URL whose query string contains another provider's key
+        name was being truncated and a phantom credential fabricated. The real
+        value contains an ``=`` before the embedded key, so it stays intact.
+        """
+        lines = ["OPENAI_BASE_URL=https://proxy/?upstream=OPENAI_API_KEY=secret123\n"]
+        result = _sanitize_env_lines(lines)
+        assert result == lines
+
+    def test_secret_value_with_equals_and_embedded_key_preserved(self):
+        """A secret whose value contains '=' followed by a known key is preserved whole."""
+        lines = ["FIRECRAWL_API_KEY=tok=ANTHROPIC_API_KEY=should-stay-in-value\n"]
+        result = _sanitize_env_lines(lines)
+        assert result == lines
+
     def test_save_env_value_fixes_corruption_on_write(self, tmp_path):
         """save_env_value sanitizes corrupted lines when writing a new key."""
         env_file = tmp_path / ".env"

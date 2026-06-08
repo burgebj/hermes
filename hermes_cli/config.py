@@ -5414,7 +5414,11 @@ def _sanitize_env_lines(lines: list) -> list:
 
     Uses a known-keys set (OPTIONAL_ENV_VARS + _EXTRA_ENV_KEYS) so we only
     split on real Hermes env var names, avoiding false positives from values
-    that happen to contain uppercase text with ``=``.
+    that happen to contain uppercase text with ``=``. A known ``KEY=`` is only
+    treated as a record boundary when the preceding record's value contains no
+    ``=`` of its own — this keeps structured values (proxy/base URLs with query
+    strings, secrets embedding ``=``) intact instead of truncating them and
+    fabricating a phantom entry for an unrelated provider.
     """
     # Build the known keys set lazily from OPTIONAL_ENV_VARS + extras.
     # Done inside the function so OPTIONAL_ENV_VARS is guaranteed to be defined.
@@ -5444,13 +5448,35 @@ def _sanitize_env_lines(lines: list) -> list:
                 match_ranges.append((idx, idx + len(needle)))
                 idx = stripped.find(needle, idx + len(needle))
 
-        split_positions = sorted({
+        candidate_positions = sorted({
             s for s, e in match_ranges
             if not any(
                 s2 <= s and e2 >= e and (s2, e2) != (s, e)
                 for s2, e2 in match_ranges
             )
         })
+
+        # Only treat a known ``KEY=`` as a record boundary when the value of
+        # the preceding record does not itself contain an ``=``. Once a value
+        # is "structured" (e.g. a proxy/base URL with a query string, or any
+        # secret that embeds ``=``), a later ``KEY=`` is almost certainly part
+        # of that value rather than a new entry — splitting there would
+        # truncate the real secret and fabricate a phantom credential for an
+        # unrelated provider. A plain token value (no ``=``) followed by a
+        # known ``KEY=`` is still the missing-newline concatenation we repair.
+        split_positions: list[int] = []
+        for pos in candidate_positions:
+            if not split_positions:
+                split_positions.append(pos)
+                continue
+            prev = split_positions[-1]
+            segment = stripped[prev:pos]  # the preceding "KEY=VALUE" record
+            eq = segment.find("=")
+            value = segment[eq + 1:] if eq >= 0 else ""
+            if "=" in value:
+                # Structured value — keep the remainder glued to it.
+                continue
+            split_positions.append(pos)
 
         if len(split_positions) > 1:
             for i, pos in enumerate(split_positions):
