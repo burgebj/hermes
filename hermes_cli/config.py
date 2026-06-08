@@ -2105,6 +2105,16 @@ DEFAULT_CONFIG = {
             "search_default_limit": 5,
             # Hard upper bound the model can request via ``limit``. Range 1..50.
             "max_search_limit": 20,
+            # Opt-in: also defer non-essential Hermes core tools. Defaults off
+            # for provider/model compatibility. On large-window GPT-5.x/Codex
+            # routes this can cut the fixed tool schema tax substantially while
+            # keeping local inspection/editing and skill-loading tools direct.
+            "defer_core": False,
+            "core_visible_tools": [
+                "terminal", "process",
+                "read_file", "search_files", "patch", "write_file",
+                "todo", "skills_list", "skill_view",
+            ],
         },
     },
 

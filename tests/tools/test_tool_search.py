@@ -82,6 +82,22 @@ class TestConfigParsing:
         assert cfg.max_search_limit == 50
         assert cfg.search_default_limit <= cfg.max_search_limit
 
+    def test_core_defer_defaults_off_with_bootstrap_allowlist(self):
+        from tools.tool_search import ToolSearchConfig
+        cfg = ToolSearchConfig.from_raw(None)
+        assert cfg.defer_core is False
+        assert "terminal" in cfg.core_visible_tools
+        assert "skill_view" in cfg.core_visible_tools
+
+    def test_core_visible_tools_configurable(self):
+        from tools.tool_search import ToolSearchConfig
+        cfg = ToolSearchConfig.from_raw({
+            "defer_core": True,
+            "core_visible_tools": ["terminal", "read_file"],
+        })
+        assert cfg.defer_core is True
+        assert cfg.core_visible_tools == frozenset({"terminal", "read_file"})
+
 
 # ---------------------------------------------------------------------------
 # Classification — the hard invariant: core tools NEVER defer.
@@ -89,8 +105,8 @@ class TestConfigParsing:
 
 
 class TestClassification:
-    def test_core_tools_never_defer(self):
-        """The critical invariant from the OpenClaw report."""
+    def test_core_tools_never_defer_by_default(self):
+        """Default behavior preserves the historical core-tool invariant."""
         from tools.tool_search import is_deferrable_tool_name
         # Sample of core tools from _HERMES_CORE_TOOLS.
         for core_name in ["terminal", "read_file", "write_file", "patch",
@@ -98,8 +114,17 @@ class TestClassification:
                           "web_search", "session_search", "clarify",
                           "execute_code", "delegate_task", "send_message"]:
             assert not is_deferrable_tool_name(core_name), (
-                f"Core tool '{core_name}' must NEVER be deferrable"
+                f"Core tool '{core_name}' must not be deferrable by default"
             )
+
+    def test_core_defer_mode_hides_nonessential_core_only(self):
+        from tools.tool_search import ToolSearchConfig, is_deferrable_tool_name
+        cfg = ToolSearchConfig.from_raw({"defer_core": True})
+        assert not is_deferrable_tool_name("terminal", config=cfg)
+        assert not is_deferrable_tool_name("skill_view", config=cfg)
+        assert is_deferrable_tool_name("web_search", config=cfg)
+        assert is_deferrable_tool_name("browser_navigate", config=cfg)
+        assert is_deferrable_tool_name("send_message", config=cfg)
 
     def test_bridge_tools_never_defer(self):
         from tools.tool_search import is_deferrable_tool_name, BRIDGE_TOOL_NAMES
@@ -239,7 +264,7 @@ class TestRetrieval:
 
 class TestAssembly:
     def test_no_deferrable_returns_unchanged(self):
-        """Pure-core toolset: pass-through, no bridge tools added."""
+        """Pure-core toolset: pass-through by default, no bridge tools added."""
         from tools.tool_search import assemble_tool_defs, ToolSearchConfig
         defs = [_td("terminal", "Run shell"), _td("read_file", "Read a file")]
         result = assemble_tool_defs(
@@ -249,6 +274,26 @@ class TestAssembly:
         )
         assert not result.activated
         assert {t["function"]["name"] for t in result.tool_defs} == {"terminal", "read_file"}
+
+    def test_core_defer_activates_for_nonessential_core(self):
+        from tools.tool_search import assemble_tool_defs, ToolSearchConfig, BRIDGE_TOOL_NAMES
+        defs = [
+            _td("terminal", "Run shell"),
+            _td("read_file", "Read a file"),
+            _td("web_search", "Search web"),
+            _td("browser_navigate", "Open browser"),
+        ]
+        result = assemble_tool_defs(
+            defs,
+            context_length=200_000,
+            config=ToolSearchConfig.from_raw({"enabled": "on", "defer_core": True}),
+        )
+        names = {t["function"]["name"] for t in result.tool_defs}
+        assert result.activated
+        assert {"terminal", "read_file"} <= names
+        assert "web_search" not in names
+        assert "browser_navigate" not in names
+        assert BRIDGE_TOOL_NAMES <= names
 
     def test_below_threshold_returns_unchanged(self):
         """Tiny deferrable surface: don't bother."""

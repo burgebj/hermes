@@ -5,23 +5,22 @@ sidebar_position: 95
 
 # Tool Search
 
-When you have many MCP servers or non-core plugin tools attached to a
-session, their JSON schemas can consume a substantial fraction of the
-context window on every turn — even when only a few of them are relevant
-to what the user actually asked for.
+When you have many MCP servers, plugin tools, or a broad Hermes core toolset
+attached to a session, their JSON schemas can consume a substantial fraction
+of the context window on every turn — even when only a few of them are
+relevant to what the user actually asked for.
 
-**Tool Search** is Hermes' opt-in progressive-disclosure layer for that
-problem. When activated, MCP and plugin tools are replaced in the
-model-visible tools array by three bridge tools, and the model loads each
-specific tool's schema on demand.
+**Tool Search** is Hermes' progressive-disclosure layer for that problem.
+When activated, deferrable tools are replaced in the model-visible tools array
+by three bridge tools, and the model loads each specific tool's schema on
+demand.
 
-:::info Built-in Hermes tools never defer
-The tools that make up Hermes' core capability set (`terminal`,
-`read_file`, `write_file`, `patch`, `search_files`, `todo`, `memory`,
-`browser_*`, `web_search`, `web_extract`, `clarify`, `execute_code`,
-`delegate_task`, `session_search`, `send_message`, and the rest of
-`_HERMES_CORE_TOOLS`) are *always* loaded directly. Only MCP tools and
-non-core plugin tools are eligible for deferral.
+:::info Core tools stay direct unless you opt in
+Hermes keeps core tools direct by default for maximum model/provider
+compatibility. Set `defer_core: true` to hide non-essential core tools behind
+Tool Search while keeping the bootstrap allowlist (`terminal`, `read_file`,
+`search_files`, `patch`, `write_file`, `todo`, `skills_list`, `skill_view`,
+and `process`) directly callable.
 :::
 
 ## How it works
@@ -78,6 +77,17 @@ tools:
     threshold_pct: 10   # percentage of context — only used in auto mode
     search_default_limit: 5
     max_search_limit: 20
+    defer_core: false   # opt-in: also defer non-essential Hermes core tools
+    core_visible_tools:
+      - terminal
+      - process
+      - read_file
+      - search_files
+      - patch
+      - write_file
+      - todo
+      - skills_list
+      - skill_view
 ```
 
 | Key | Default | Meaning |
@@ -86,6 +96,8 @@ tools:
 | `threshold_pct` | `10` | Percentage of context length at which `auto` mode kicks in. Range 0–100. |
 | `search_default_limit` | `5` | Hits returned when the model calls `tool_search` without a `limit`. |
 | `max_search_limit` | `20` | Hard upper bound the model can request via `limit`. Range 1–50. |
+| `defer_core` | `false` | Also defer Hermes core tools not listed in `core_visible_tools`. Use on large-window models/profiles where fixed tool schemas dominate. |
+| `core_visible_tools` | bootstrap allowlist | Core tools that remain directly callable when `defer_core` is true. Keep enough tools here for local inspection/editing and skill loading. |
 
 You can also flip the legacy boolean shape:
 
