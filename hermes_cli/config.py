@@ -4707,6 +4707,17 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
             if not quiet:
                 print("  ✓ Lowered model_catalog.ttl_hours to 1 (hourly picker refresh)")
 
+    # ── Version 27 → 28: clear HERMES_DASHBOARD_SESSION_TOKEN from .env ──
+    # Remote mode now uses username/password auth; local mode auto-generates tokens per boot.
+    if current_ver < 28:
+        try:
+            removed = remove_env_value("HERMES_DASHBOARD_SESSION_TOKEN")
+            if removed and not quiet:
+                print("  ✓ Removed HERMES_DASHBOARD_SESSION_TOKEN from .env (no longer used)")
+        except Exception as exc:
+            if not quiet:
+                print(f"  ⚠ Failed to remove HERMES_DASHBOARD_SESSION_TOKEN from .env: {exc}")
+
     if current_ver < latest_ver and not quiet:
         print(f"Config version: {current_ver} → {latest_ver}")
     
