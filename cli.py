@@ -7613,7 +7613,54 @@ class HermesCLI:
                 self._status_bar_visible = was_visible
                 self._app.invalidate()
         else:
-            _ask()
+            # On MSYS2 / Git Bash (sys.platform == "win32" but termios is
+            # available), prompt_toolkit sets the PTY to raw mode which makes
+            # input() block forever waiting for a newline that the raw-mode
+            # line discipline never inserts (issue #37230).  Temporarily
+            # restore cooked mode before calling input(), then re-enter raw
+            # mode so prompt_toolkit's state stays consistent.
+            _restored = False
+            _saved_attrs = None
+            if sys.platform == "win32":
+                try:
+                    import termios as _termios
+                    _fd = sys.stdin.fileno()
+                    _saved_attrs = _termios.tcgetattr(_fd)
+                    # Reconstruct cooked-mode attributes from the current
+                    # raw-mode settings.  tcgetattr returns [iflag, oflag,
+                    # cflag, lflag, ispeed, ospeed, cc].  Cooked mode needs:
+                    #   iflag: ICRNL (map CR→NL), BRKINT, IXON
+                    #   oflag: OPOST (output processing)
+                    #   lflag: ICANON (line discipline), ECHO, ISIG, IEXTEN
+                    #   cc: standard control chars (VEOF=4, VEOL=0xFF, etc.)
+                    _cooked = list(_saved_attrs)
+                    _cooked[0] = _termios.BRKINT | _termios.ICRNL | _termios.IXON
+                    _cooked[1] = _termios.OPOST
+                    _cooked[3] = (_termios.ICANON | _termios.ECHO | _termios.ISIG
+                                  | getattr(_termios, "IEXTEN", 0))
+                    _cc = list(_cooked[6])
+                    _cc[_termios.VEOF] = 0x04      # EOT (Ctrl-D)
+                    _cc[_termios.VEOL] = 0x00       # NUL
+                    _cc[_termios.VERASE] = 0x7F     # DEL
+                    if hasattr(_termios, "VINTR"):
+                        _cc[_termios.VINTR] = 0x03  # ETX (Ctrl-C)
+                    if hasattr(_termios, "VKILL"):
+                        _cc[_termios.VKILL] = 0x15  # NAK (Ctrl-U)
+                    _cooked[6] = bytes(_cc)
+                    _termios.tcsetattr(_fd, _termios.TCSANOW, _cooked)
+                    _restored = True
+                except Exception:
+                    pass
+            try:
+                _ask()
+            finally:
+                if _restored and _saved_attrs is not None:
+                    try:
+                        import termios as _termios
+                        _termios.tcsetattr(
+                            sys.stdin.fileno(), _termios.TCSANOW, _saved_attrs)
+                    except Exception:
+                        pass
         return result[0]
 
     def _prompt_text_input_modal(
