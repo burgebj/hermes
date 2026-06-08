@@ -8,7 +8,7 @@ import { listPackage } from '@electron/asar'
 const DESKTOP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PACKAGE_JSON = JSON.parse(fs.readFileSync(path.join(DESKTOP_ROOT, 'package.json'), 'utf8'))
 const MODE = process.argv[2] || 'help'
-const ARCH = process.arch === 'arm64' ? 'arm64' : 'x64'
+const ARCH = process.env.HERMES_DESKTOP_ARCH || (process.arch === 'arm64' ? 'arm64' : 'x64')
 const RELEASE_ROOT = path.join(DESKTOP_ROOT, 'release')
 const PLATFORM = process.platform
 
@@ -18,7 +18,15 @@ const PLATFORM = process.platform
 // launch via install.ps1 / install.sh, per the Phase 1 thin-installer flow).
 const APP = (() => {
   if (PLATFORM === 'darwin') {
-    const appPath = path.join(RELEASE_ROOT, `mac-${ARCH}`, 'Hermes.app')
+    let appPath = path.join(RELEASE_ROOT, `mac-${ARCH}`, 'Hermes.app')
+    // Fall back to mac-universal when the arch-specific directory is missing
+    // (e.g. after a universal build or when testing a different arch).
+    if (!fs.existsSync(appPath)) {
+      const universalPath = path.join(RELEASE_ROOT, 'mac-universal', 'Hermes.app')
+      if (fs.existsSync(universalPath)) {
+        appPath = universalPath
+      }
+    }
     return {
       appPath,
       binary: path.join(appPath, 'Contents', 'MacOS', 'Hermes'),
