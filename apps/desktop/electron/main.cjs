@@ -301,6 +301,12 @@ const APP_ICON_PATHS = [
   path.join(APP_ROOT, 'dist', 'apple-touch-icon.png'),
   path.join(unpackedPathFor(APP_ROOT), 'dist', 'apple-touch-icon.png')
 ]
+const DOCK_ICON_PATHS = [
+  // .icns file has proper optical padding for macOS Dock
+  path.join(APP_ROOT, 'assets', 'icon.icns'),
+  path.join(APP_ROOT, 'dist', 'assets', 'icon.icns'),
+  path.join(unpackedPathFor(APP_ROOT), 'dist', 'assets', 'icon.icns')
+]
 
 let rendererTitleBarTheme = null
 const terminalSessions = new Map()
@@ -3073,6 +3079,15 @@ function getAppIconPath() {
   return APP_ICON_PATHS.find(fileExists)
 }
 
+function getDockIconPath() {
+  if (!IS_MAC) return null
+  // Try .icns first (proper optical padding for Dock), fall back to PNG
+  const icnsPath = DOCK_ICON_PATHS.find(fileExists)
+  if (icnsPath) return icnsPath
+  // Fall back to PNG if .icns not found
+  return APP_ICON_PATHS.find(fileExists)
+}
+
 function sendOpenUpdatesRequested() {
   if (!mainWindow || mainWindow.isDestroyed()) return
   const { webContents } = mainWindow
@@ -4693,8 +4708,9 @@ function createWindow() {
 
   if (IS_MAC) {
     mainWindow.setWindowButtonPosition?.(WINDOW_BUTTON_POSITION)
-    if (icon) {
-      app.dock?.setIcon(icon)
+    const dockIcon = getDockIconPath()
+    if (dockIcon) {
+      app.dock?.setIcon(dockIcon)
     }
   }
 
