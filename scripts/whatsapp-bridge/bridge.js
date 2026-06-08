@@ -23,7 +23,7 @@ import express from 'express';
 import { Boom } from '@hapi/boom';
 import pino from 'pino';
 import path from 'path';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'fs';
 import { randomBytes } from 'crypto';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
@@ -51,6 +51,11 @@ const AUDIO_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'audio_cac
 const PAIR_ONLY = args.includes('--pair-only');
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
+const GROUP_POLICY = String(process.env.WHATSAPP_GROUP_POLICY || 'open').trim().toLowerCase();
+const ALLOWED_GROUPS = new Set(String(process.env.WHATSAPP_ALLOWED_GROUPS || process.env.WHATSAPP_GROUP_ALLOWED_USERS || '')
+  .split(/[\n,]+/)
+  .map(s => s.trim())
+  .filter(Boolean));
 const DEFAULT_REPLY_PREFIX = '⚕ *Hermes Agent*\n────────────\n';
 const REPLY_PREFIX = process.env.WHATSAPP_REPLY_PREFIX === undefined
   ? DEFAULT_REPLY_PREFIX
@@ -62,6 +67,10 @@ const CHUNK_DELAY_MS = parseInt(process.env.WHATSAPP_CHUNK_DELAY_MS || '300', 10
 // which pins the bridge's HTTP handler until the upstream aiohttp timeout
 // fires. Fail fast instead so the gateway can surface a real error and retry.
 const SEND_TIMEOUT_MS = parseInt(process.env.WHATSAPP_SEND_TIMEOUT_MS || '60000', 10);
+// Default ceiling for media uploads. Large videos can legitimately take longer
+// than SEND_TIMEOUT_MS — mediaUploadTimeoutMs() scales by file size and the
+// caller can override via the request body's `mediaUploadTimeoutMs` field.
+const DEFAULT_MEDIA_UPLOAD_TIMEOUT_MS = parseInt(process.env.WHATSAPP_MEDIA_UPLOAD_TIMEOUT_MS || '300000', 10);
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -110,6 +119,19 @@ function splitLongMessage(message, maxLength = MAX_MESSAGE_LENGTH) {
   return chunks;
 }
 
+function mediaUploadTimeoutMs(filePath, requestedTimeoutMs) {
+  const requested = Number(requestedTimeoutMs);
+  if (Number.isFinite(requested) && requested > 0) {
+    return requested;
+  }
+  let sizeMb = 0;
+  try {
+    sizeMb = statSync(filePath).size / (1024 * 1024);
+  } catch {}
+  const scaled = Math.floor(60000 + (sizeMb * 30000));
+  return Math.max(DEFAULT_MEDIA_UPLOAD_TIMEOUT_MS, Math.min(scaled, 900000));
+}
+
 function trackSentMessageId(sent) {
   if (sent?.key?.id) {
     recentlySentIds.add(sent.key.id);
@@ -122,6 +144,12 @@ function trackSentMessageId(sent) {
 function normalizeWhatsAppId(value) {
   if (!value) return '';
   return String(value).replace(':', '@');
+}
+
+function isAllowedGroup(chatId) {
+  if (GROUP_POLICY === 'disabled') return false;
+  if (GROUP_POLICY === 'allowlist') return ALLOWED_GROUPS.has(chatId);
+  return true;
 }
 
 function getMessageContent(msg) {
@@ -289,29 +317,48 @@ async function startSocket() {
       // themselves — stranger DMs / group pings must never reach the
       // Python gateway, otherwise a pairing-code reply fires in response
       // to arbitrary incoming messages (#8389).
-      if (!msg.key.fromMe) {
-        if (WHATSAPP_MODE === 'self-chat') {
+      if (!msg.key.fromMe && WHATSAPP_MODE === 'self-chat') {
+        try {
+          console.log(JSON.stringify({
+            event: 'ignored',
+            reason: 'self_chat_mode_rejects_non_self',
+            chatId,
+            senderId,
+          }));
+        } catch {}
+        continue;
+      }
+
+      // Drop disallowed groups before parsing/downloading media.  Allowed groups
+      // must pass regardless of sender so the Python gateway can keep group
+      // context and decide whether replying is valuable.
+      if (isGroup && !isAllowedGroup(chatId)) {
+        if (WHATSAPP_DEBUG) {
           try {
             console.log(JSON.stringify({
               event: 'ignored',
-              reason: 'self_chat_mode_rejects_non_self',
+              reason: 'group_policy_mismatch',
               chatId,
               senderId,
             }));
           } catch {}
-          continue;
         }
-        if (!matchesAllowedUser(senderId, ALLOWED_USERS, SESSION_DIR)) {
-          try {
-            console.log(JSON.stringify({
-              event: 'ignored',
-              reason: 'allowlist_mismatch',
-              chatId,
-              senderId,
-            }));
-          } catch {}
-          continue;
-        }
+        continue;
+      }
+
+      // Check allowlist for DMs from others (resolve LID ↔ phone aliases).  Do
+      // not apply the DM sender allowlist inside allowed groups; group policy is
+      // the privacy boundary there.
+      if (!isGroup && !msg.key.fromMe && !matchesAllowedUser(senderId, ALLOWED_USERS, SESSION_DIR)) {
+        try {
+          console.log(JSON.stringify({
+            event: 'ignored',
+            reason: 'allowlist_mismatch',
+            chatId,
+            senderId,
+          }));
+        } catch {}
+        continue;
       }
 
       const messageContent = getMessageContent(msg);
@@ -581,7 +628,7 @@ app.post('/send-media', async (req, res) => {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
 
-  const { chatId, filePath, mediaType, caption, fileName } = req.body;
+  const { chatId, filePath, mediaType, caption, fileName, mediaUploadTimeoutMs: requestedUploadTimeoutMs } = req.body;
   if (!chatId || !filePath) {
     return res.status(400).json({ error: 'chatId and filePath are required' });
   }
@@ -591,50 +638,46 @@ app.post('/send-media', async (req, res) => {
       return res.status(404).json({ error: `File not found: ${filePath}` });
     }
 
-    const buffer = readFileSync(filePath);
     const ext = filePath.toLowerCase().split('.').pop();
     const type = mediaType || inferMediaType(ext);
     let msgPayload;
 
     switch (type) {
       case 'image':
-        msgPayload = { image: buffer, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'image/jpeg' };
+        msgPayload = { image: { url: filePath }, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'image/jpeg' };
         break;
       case 'video':
-        msgPayload = { video: buffer, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'video/mp4' };
+        msgPayload = { video: { url: filePath }, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'video/mp4' };
         break;
       case 'audio': {
         // WhatsApp only renders a native voice bubble (ptt) when the file is ogg/opus.
         // If the caller passes mp3, wav, m4a etc. (e.g. from Edge TTS / NeuTTS),
         // silently convert to ogg/opus via ffmpeg so ptt is always honoured.
-        let audioBuffer = buffer;
+        let audioPath = filePath;
         let audioExt = ext;
         const needsConversion = !['ogg', 'opus'].includes(ext);
-        let tmpPath = null;
         if (needsConversion) {
-          tmpPath = path.join(tmpdir(), `hermes_voice_${randomBytes(6).toString('hex')}.ogg`);
+          const tmpPath = path.join(tmpdir(), `hermes_voice_${randomBytes(6).toString('hex')}.ogg`);
           try {
             execSync(
               `ffmpeg -y -i ${JSON.stringify(filePath)} -ar 48000 -ac 1 -c:a libopus ${JSON.stringify(tmpPath)}`,
               { timeout: 30000, stdio: 'pipe' }
             );
-            audioBuffer = readFileSync(tmpPath);
+            audioPath = tmpPath;
             audioExt = 'ogg';
           } catch (convErr) {
             // ffmpeg not available or conversion failed — fall back to original format
             console.warn('[bridge] ffmpeg conversion failed, sending as file attachment:', convErr.message);
-          } finally {
-            try { if (tmpPath && existsSync(tmpPath)) unlinkSync(tmpPath); } catch (_) {}
           }
         }
         const audioMime = (audioExt === 'ogg' || audioExt === 'opus') ? 'audio/ogg; codecs=opus' : 'audio/mpeg';
-        msgPayload = { audio: audioBuffer, mimetype: audioMime, ptt: audioExt === 'ogg' || audioExt === 'opus' };
+        msgPayload = { audio: { url: audioPath }, mimetype: audioMime, ptt: audioExt === 'ogg' || audioExt === 'opus' };
         break;
       }
       case 'document':
       default:
         msgPayload = {
-          document: buffer,
+          document: readFileSync(filePath),
           fileName: fileName || path.basename(filePath),
           caption: caption || undefined,
           mimetype: MIME_MAP[ext] || 'application/octet-stream',
@@ -642,7 +685,12 @@ app.post('/send-media', async (req, res) => {
         break;
     }
 
-    const sent = await sendWithTimeout(chatId, msgPayload);
+    // Media uploads scale by file size and can legitimately exceed SEND_TIMEOUT_MS.
+    const sent = await sendWithTimeout(
+      chatId,
+      msgPayload,
+      mediaUploadTimeoutMs(filePath, requestedUploadTimeoutMs),
+    );
 
     trackSentMessageId(sent);
 

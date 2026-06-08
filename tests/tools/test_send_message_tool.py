@@ -384,6 +384,88 @@ class TestSendMessageTool:
             force_document=False,
         )
 
+    def test_whatsapp_display_label_resolves_to_lid_not_home_channel(self, tmp_path):
+        whatsapp_cfg = SimpleNamespace(enabled=True, token=None, extra={"bridge_port": 18792})
+        home = SimpleNamespace(chat_id="5215514706713@s.whatsapp.net")
+        config = SimpleNamespace(
+            platforms={Platform.WHATSAPP: whatsapp_cfg},
+            get_home_channel=lambda _platform: home,
+        )
+        cache_file = tmp_path / "channel_directory.json"
+        cache_file.write_text(json.dumps({
+            "updated_at": "2026-01-01T00:00:00",
+            "platforms": {
+                "whatsapp": [
+                    {"id": "96370627199010@lid", "name": "Eliacim", "type": "dm"}
+                ]
+            },
+        }))
+
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file), \
+             patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True):
+            result = json.loads(send_message_tool({
+                "action": "send",
+                "target": "whatsapp:Eliacim (dm)",
+                "message": "hello",
+            }))
+
+        assert result["success"] is True
+        assert "note" not in result
+        send_mock.assert_awaited_once_with(
+            Platform.WHATSAPP,
+            whatsapp_cfg,
+            "96370627199010@lid",
+            "hello",
+            thread_id=None,
+            media_files=[],
+            force_document=False,
+        )
+
+    def test_whatsapp_numeric_group_label_resolves_to_group_jid_not_bare_digits(self, tmp_path):
+        whatsapp_cfg = SimpleNamespace(enabled=True, token=None, extra={"bridge_port": 18792})
+        home = SimpleNamespace(chat_id="5215514706713@s.whatsapp.net")
+        config = SimpleNamespace(
+            platforms={Platform.WHATSAPP: whatsapp_cfg},
+            get_home_channel=lambda _platform: home,
+        )
+        cache_file = tmp_path / "channel_directory.json"
+        cache_file.write_text(json.dumps({
+            "updated_at": "2026-01-01T00:00:00",
+            "platforms": {
+                "whatsapp": [
+                    {"id": "120363400236163214@g.us", "name": "120363400236163214", "type": "group"}
+                ]
+            },
+        }))
+
+        with patch("gateway.channel_directory.DIRECTORY_PATH", cache_file), \
+             patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True):
+            result = json.loads(send_message_tool({
+                "action": "send",
+                "target": "whatsapp:120363400236163214 (group)",
+                "message": "hello",
+            }))
+
+        assert result["success"] is True
+        assert "note" not in result
+        send_mock.assert_awaited_once_with(
+            Platform.WHATSAPP,
+            whatsapp_cfg,
+            "120363400236163214@g.us",
+            "hello",
+            thread_id=None,
+            media_files=[],
+            force_document=False,
+        )
+
     def test_mirror_receives_current_session_user_id(self):
         config, _telegram_cfg = _make_config()
 
@@ -864,6 +946,31 @@ class TestSendToPlatformWhatsapp:
         assert result["success"] is True
         async_mock.assert_awaited_once_with({"bridge_port": 3000}, chat_id, "hello from hermes")
 
+    def test_whatsapp_media_routes_via_live_adapter(self, tmp_path):
+        chat_id = "test-user@lid"
+        image_path = tmp_path / "generated.png"
+        image_path.write_bytes(b"png")
+        async_mock = AsyncMock(return_value={"success": True, "message_id": "media123"})
+
+        with patch("tools.send_message_tool._send_whatsapp_via_adapter", async_mock):
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.WHATSAPP,
+                    SimpleNamespace(enabled=True, token=None, extra={"bridge_port": 3000}),
+                    chat_id,
+                    "",
+                    media_files=[(str(image_path), False)],
+                )
+            )
+
+        assert result["success"] is True
+        async_mock.assert_awaited_once_with(
+            chat_id,
+            "",
+            media_files=[(str(image_path), False)],
+            thread_id=None,
+        )
+
 
 class TestSendTelegramHtmlDetection:
     """Verify that messages containing HTML tags are sent with parse_mode=HTML
@@ -1194,9 +1301,9 @@ class TestParseTargetRefE164:
         assert chat_id == "+15551234567"
         assert is_explicit is True
 
-    def test_whatsapp_e164_is_explicit(self):
-        chat_id, _, is_explicit = _parse_target_ref("whatsapp", "+15551234567")
-        assert chat_id == "+15551234567"
+    def test_whatsapp_e164_is_normalized_to_baileys_jid(self):
+        chat_id, _, is_explicit = _parse_target_ref("whatsapp", "+155****4567")
+        assert chat_id == "15551234567@s.whatsapp.net"
         assert is_explicit is True
 
     def test_signal_bare_digits_still_work(self):
@@ -1204,6 +1311,18 @@ class TestParseTargetRefE164:
         chat_id, _, is_explicit = _parse_target_ref("signal", "15551234567")
         assert chat_id == "15551234567"
         assert is_explicit is True
+
+    def test_whatsapp_bare_digits_are_normalized_to_jid(self):
+        chat_id, _, is_explicit = _parse_target_ref("whatsapp", "5215514706713")
+        assert chat_id == "5215514706713@s.whatsapp.net"
+        assert is_explicit is True
+
+    def test_whatsapp_bridge_ready_jids_are_explicit(self):
+        for jid in ["96370627199010@lid", "5215514706713@s.whatsapp.net", "120363400236163214@g.us"]:
+            chat_id, thread_id, is_explicit = _parse_target_ref("whatsapp", jid)
+            assert chat_id == jid
+            assert thread_id is None
+            assert is_explicit is True
 
     def test_signal_invalid_e164_rejected(self):
         """Too-short, too-long, and non-numeric E.164 strings are not explicit."""

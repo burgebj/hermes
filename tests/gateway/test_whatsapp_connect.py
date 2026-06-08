@@ -52,6 +52,8 @@ def _make_adapter():
     adapter._bridge_log = None
     adapter._bridge_process = None
     adapter._reply_prefix = None
+    adapter._group_policy = "open"
+    adapter._group_allow_from = set()
     adapter._running = False
     adapter._message_handler = None
     adapter._fatal_error_code = None
