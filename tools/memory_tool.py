@@ -369,7 +369,12 @@ class MemoryStore:
             matches = [(i, e) for i, e in enumerate(entries) if old_text in e]
 
             if not matches:
-                return {"success": False, "error": f"No entry matched '{old_text}'."}
+                previews = [e[:80] + ("..." if len(e) > 80 else "") for e in entries]
+                return {
+                    "success": False,
+                    "error": f"No entry matched '{old_text}'.",
+                    "existing_entries": previews,
+                }
 
             if len(matches) > 1:
                 # If all matches are identical (exact duplicates), operate on the first one
@@ -426,7 +431,12 @@ class MemoryStore:
             matches = [(i, e) for i, e in enumerate(entries) if old_text in e]
 
             if not matches:
-                return {"success": False, "error": f"No entry matched '{old_text}'."}
+                previews = [e[:80] + ("..." if len(e) > 80 else "") for e in entries]
+                return {
+                    "success": False,
+                    "error": f"No entry matched '{old_text}'.",
+                    "existing_entries": previews,
+                }
 
             if len(matches) > 1:
                 # If all matches are identical (exact duplicates), remove the first one
