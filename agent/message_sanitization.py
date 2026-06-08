@@ -21,6 +21,14 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+INVALID_TOOL_ARGUMENTS_ERROR_KEY = "__hermes_invalid_tool_arguments_error__"
+
+INVALID_TOOL_ARGUMENTS_ERROR_MESSAGE = (
+    "Tool call arguments were truncated or malformed and could not be "
+    "repaired. Please shorten large argument values or split the work "
+    "across multiple tool calls, then retry with valid JSON."
+)
+
 # Lone surrogate code points are invalid in UTF-8 and crash json.dumps
 # inside the OpenAI SDK.  Used by every surrogate-sanitization helper
 # below as well as by run_agent and the CLI for paste-from-clipboard
@@ -188,8 +196,10 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     Models like GLM-5.1 via Ollama can produce truncated JSON, trailing
     commas, Python ``None``, etc.  The API proxy rejects these with HTTP 400
     "invalid tool call arguments".  This function applies common repairs;
-    if all fail it returns ``"{}"`` so the request succeeds (better than
-    crashing the session).  All repairs are logged at WARNING level.
+    if all fail it returns a valid JSON error sentinel so the request can
+    continue while the executor reports a tool error instead of executing the
+    tool with silently-empty arguments.  All repairs are logged at WARNING
+    level.
     """
     raw_stripped = raw_args.strip() if isinstance(raw_args, str) else ""
 
@@ -269,14 +279,16 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
-    # Last resort: replace with empty object so the API request doesn't
-    # crash the entire session.
+    # Last resort: keep the arguments wire-valid so the API request doesn't
+    # crash the entire session, but mark them as invalid. The tool executor
+    # detects this sentinel and returns a tool error instead of executing the
+    # original tool with silently-empty arguments.
     logger.warning(
         "Unrepairable tool_call arguments for %s — "
-        "replaced with empty object (was: %s)",
+        "replaced with invalid-arguments sentinel (was: %s)",
         tool_name, raw_stripped[:80],
     )
-    return "{}"
+    return json.dumps({INVALID_TOOL_ARGUMENTS_ERROR_KEY: INVALID_TOOL_ARGUMENTS_ERROR_MESSAGE})
 
 
 def _strip_non_ascii(text: str) -> str:

@@ -29,6 +29,7 @@ from agent.display import (
     _detect_tool_failure,
 )
 from agent.tool_guardrails import ToolGuardrailDecision
+from agent.message_sanitization import INVALID_TOOL_ARGUMENTS_ERROR_KEY
 from agent.tool_dispatch_helpers import (
     _is_destructive_command,
     _is_multimodal_tool_result,
@@ -46,6 +47,16 @@ from tools.tool_result_storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _invalid_tool_arguments_block(function_args: object) -> Optional[str]:
+    """Return a model-facing error when repaired tool args are a sentinel."""
+    if not isinstance(function_args, dict):
+        return None
+    error = function_args.get(INVALID_TOOL_ARGUMENTS_ERROR_KEY)
+    if not isinstance(error, str):
+        return None
+    return f"Error: {error}"
 
 # Maximum number of concurrent worker threads for parallel tool execution.
 # Mirrors the constant in ``run_agent`` for tests/imports that look here.
@@ -271,12 +282,14 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         elif function_name == "skill_manage":
             agent._iters_since_skill = 0
 
+        invalid_args_block = None
         try:
             function_args = json.loads(tool_call.function.arguments)
         except json.JSONDecodeError:
             function_args = {}
         if not isinstance(function_args, dict):
             function_args = {}
+        invalid_args_block = _invalid_tool_arguments_block(function_args)
 
         # ── Tool Search unwrap ────────────────────────────────────────
         # When the model invokes the tool_call bridge, peel it open so
@@ -326,7 +339,12 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # checkpoint state (dedup slot, real snapshots).
         block_result = None
         blocked_by_guardrail = False
-        if _ts_scope_block is not None:
+        if invalid_args_block is not None:
+            # A previous repair pass could not recover model-emitted JSON
+            # arguments. Keep the tool call in the transcript but do not run
+            # the tool with silently-empty/default arguments.
+            block_result = json.dumps({"error": invalid_args_block}, ensure_ascii=False)
+        elif _ts_scope_block is not None:
             # Out-of-scope tool_call: reject before hooks/guardrails/dispatch.
             block_result = _ts_scope_block
             _emit_terminal_post_tool_call(
@@ -790,6 +808,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
 
         function_name = tool_call.function.name
 
+        invalid_args_block = None
         try:
             function_args = json.loads(tool_call.function.arguments)
         except json.JSONDecodeError as e:
@@ -797,6 +816,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             function_args = {}
         if not isinstance(function_args, dict):
             function_args = {}
+        invalid_args_block = _invalid_tool_arguments_block(function_args)
 
         # Tool Search unwrap — see execute_tool_calls_concurrent for full
         # rationale, including the scope gate (the unwrap dispatches the
@@ -829,7 +849,13 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # Check plugin hooks for a block directive before executing.
         _block_msg: Optional[str] = None
         _block_error_type = "plugin_block"
-        if _ts_scope_block is not None:
+        if invalid_args_block is not None:
+            # A previous repair pass could not recover model-emitted JSON
+            # arguments. Keep the tool call in the transcript but do not run
+            # the tool with silently-empty/default arguments.
+            _block_msg = invalid_args_block
+            _block_error_type = "invalid_tool_arguments"
+        elif _ts_scope_block is not None:
             _block_msg = _ts_scope_block
             _block_error_type = "tool_scope_block"
         else:

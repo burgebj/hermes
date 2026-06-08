@@ -14,6 +14,7 @@ unclosed brackets, Python None) don't kill the session.
 import json
 
 from run_agent import _repair_tool_call_arguments
+from agent.message_sanitization import INVALID_TOOL_ARGUMENTS_ERROR_KEY
 
 
 class TestStreamingAssemblyRepair:
@@ -93,18 +94,11 @@ class TestStreamingAssemblyRepair:
     # -- Real-world GLM-5.1 truncation pattern --
 
     def test_glm_truncation_pattern(self):
-        """GLM-5.1 via Ollama commonly truncates like this.
-
-        This pattern has an unclosed colon at the end ("background":) which
-        makes it unrepairable — the last-resort empty object {} is the
-        safest option.  The important thing is that repairable patterns
-        (trailing comma, unclosed brace WITHOUT hanging colon) DO get fixed.
-        """
+        """A hanging colon is unrepairable and must not become empty args."""
         raw = '{"command": "ls -la /tmp", "timeout": 30, "background":'
         result = _repair_tool_call_arguments(raw, "terminal")
-        # Unrepairable — returns empty object (hanging colon can't be fixed)
         parsed = json.loads(result)
-        assert parsed == {}
+        assert parsed[INVALID_TOOL_ARGUMENTS_ERROR_KEY]
 
     def test_glm_truncation_repairable(self):
         """GLM-5.1 truncation pattern that IS repairable."""
