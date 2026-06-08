@@ -451,6 +451,20 @@ class TestGatewayStopCleanup:
 
 
 class TestLaunchdServiceRecovery:
+    @pytest.fixture(autouse=True)
+    def _isolate_launchd_domain(self, monkeypatch):
+        """Reset the launchd domain cache and force the user domain for tests.
+
+        `_launchd_domain()` caches per-process and persists to disk, and
+        `_bootstrap_launchd_service()` probes candidate domains. Force a single
+        deterministic domain (user) so tests don't depend on host launchctl
+        behavior or leak state between tests.
+        """
+        monkeypatch.setattr(gateway_cli, "_LAUNCHD_DOMAIN_CACHE", None)
+        monkeypatch.setenv("HERMES_LAUNCHD_DOMAIN", "user")
+        yield
+        monkeypatch.setattr(gateway_cli, "_LAUNCHD_DOMAIN_CACHE", None)
+
     def test_get_restart_drain_timeout_prefers_env_then_config_then_default(self, monkeypatch):
         monkeypatch.delenv("HERMES_RESTART_DRAIN_TIMEOUT", raising=False)
         monkeypatch.setattr(gateway_cli, "read_raw_config", lambda: {})
@@ -481,6 +495,8 @@ class TestLaunchdServiceRecovery:
         plist_path.write_text("<plist>old content</plist>", encoding="utf-8")
 
         monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        # Service is unloaded after bootout, so refresh proceeds cleanly.
+        monkeypatch.setattr(gateway_cli, "_launchd_service_is_loaded", lambda: False)
 
         calls = []
 
@@ -495,9 +511,11 @@ class TestLaunchdServiceRecovery:
         label = gateway_cli.get_launchd_label()
         domain = gateway_cli._launchd_domain()
         assert "--replace" in plist_path.read_text(encoding="utf-8")
-        assert calls[:2] == [
+        # refresh_launchd_plist_if_needed: bootout, bootstrap, kickstart -k.
+        assert calls[:3] == [
             ["launchctl", "bootout", f"{domain}/{label}"],
             ["launchctl", "bootstrap", domain, str(plist_path)],
+            ["launchctl", "kickstart", "-k", f"{domain}/{label}"],
         ]
 
     def test_launchd_start_reloads_unloaded_job_and_retries(self, tmp_path, monkeypatch):
@@ -524,7 +542,7 @@ class TestLaunchdServiceRecovery:
         assert calls == [
             ["launchctl", "kickstart", target],
             ["launchctl", "bootstrap", domain, str(plist_path)],
-            ["launchctl", "kickstart", target],
+            ["launchctl", "kickstart", "-k", target],
         ]
 
     def test_launchd_start_reloads_on_kickstart_exit_code_113(self, tmp_path, monkeypatch):
@@ -552,7 +570,7 @@ class TestLaunchdServiceRecovery:
         assert calls == [
             ["launchctl", "kickstart", target],
             ["launchctl", "bootstrap", domain, str(plist_path)],
-            ["launchctl", "kickstart", target],
+            ["launchctl", "kickstart", "-k", target],
         ]
 
     def test_launchd_restart_drains_running_gateway_before_kickstart(self, monkeypatch):
@@ -679,10 +697,64 @@ class TestLaunchdServiceRecovery:
         assert "stale" in output.lower()
         assert "not loaded" in output.lower()
 
-    def test_launchd_domain_uses_user_domain(self):
-        # The user/<uid> domain (not gui/<uid>) is the one reachable from
-        # non-Aqua/background sessions on macOS 26+ (issue #23387).
+    def test_launchd_domain_defaults_to_user_domain(self, monkeypatch):
+        # With no cache, no persisted choice, and no env override, the domain
+        # defaults to user/<uid> — the documented default reachable from
+        # non-Aqua/background sessions on macOS 26+ (issue #23387). The gui
+        # fallback only kicks in when a real bootstrap fails in the user domain.
+        monkeypatch.setattr(gateway_cli, "_LAUNCHD_DOMAIN_CACHE", None)
+        monkeypatch.delenv("HERMES_LAUNCHD_DOMAIN", raising=False)
+        monkeypatch.setattr(gateway_cli, "_read_cached_launchd_domain", lambda: None)
         assert gateway_cli._launchd_domain() == f"user/{os.getuid()}"
+
+    def test_launchd_domain_env_override_forces_gui(self, monkeypatch):
+        # HERMES_LAUNCHD_DOMAIN=gui forces the gui domain (for hosts where the
+        # user domain can't bootstrap).
+        monkeypatch.setattr(gateway_cli, "_LAUNCHD_DOMAIN_CACHE", None)
+        monkeypatch.setenv("HERMES_LAUNCHD_DOMAIN", "gui")
+        assert gateway_cli._launchd_domain() == f"gui/{os.getuid()}"
+
+    def test_launchd_domain_uses_persisted_choice(self, monkeypatch):
+        # A previously-resolved domain persisted to disk is honored on the next
+        # run without re-probing.
+        monkeypatch.setattr(gateway_cli, "_LAUNCHD_DOMAIN_CACHE", None)
+        monkeypatch.delenv("HERMES_LAUNCHD_DOMAIN", raising=False)
+        monkeypatch.setattr(
+            gateway_cli, "_read_cached_launchd_domain", lambda: f"gui/{os.getuid()}"
+        )
+        assert gateway_cli._launchd_domain() == f"gui/{os.getuid()}"
+
+    def test_bootstrap_falls_back_to_gui_when_user_domain_fails(self, tmp_path, monkeypatch):
+        # On hosts where `bootstrap user/<uid>` fails with exit 5 but
+        # `bootstrap gui/<uid>` works, _bootstrap_launchd_service should adopt
+        # the gui domain instead of giving up.
+        monkeypatch.setattr(gateway_cli, "_LAUNCHD_DOMAIN_CACHE", None)
+        monkeypatch.delenv("HERMES_LAUNCHD_DOMAIN", raising=False)
+        monkeypatch.setattr(gateway_cli, "_write_cached_launchd_domain", lambda d: None)
+        # Neither domain reports the service as already loaded.
+        monkeypatch.setattr(gateway_cli, "_launchd_service_is_loaded", lambda domain=None: False)
+
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        uid = os.getuid()
+
+        def fake_run(cmd, check=False, **kwargs):
+            if cmd[:2] == ["launchctl", "bootstrap"]:
+                domain = cmd[2]
+                if domain == f"user/{uid}":
+                    raise gateway_cli.subprocess.CalledProcessError(
+                        5, cmd, stderr="Input/output error"
+                    )
+                # gui domain succeeds
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        ok, rc = gateway_cli._bootstrap_launchd_service(plist_path)
+
+        assert ok is True
+        assert rc == 0
+        assert gateway_cli._launchd_domain() == f"gui/{uid}"
 
     def test_launchctl_domain_unsupported_recognizes_macos26_codes(self):
         # Codes that persist after a fresh bootstrap → launchd truly unavailable.
@@ -719,7 +791,7 @@ class TestLaunchdServiceRecovery:
         assert calls == [
             ["launchctl", "kickstart", target],
             ["launchctl", "bootstrap", domain, str(plist_path)],
-            ["launchctl", "kickstart", target],
+            ["launchctl", "kickstart", "-k", target],
         ]
 
     def test_launchd_start_falls_back_to_detached_when_rebootstrap_fails(self, tmp_path, monkeypatch, capsys):
@@ -731,6 +803,9 @@ class TestLaunchdServiceRecovery:
 
         monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
         monkeypatch.setattr(gateway_cli, "refresh_launchd_plist_if_needed", lambda: False)
+        # Service genuinely isn't loaded — so exit 5 means the domain is
+        # unmanageable and we must degrade to a detached process.
+        monkeypatch.setattr(gateway_cli, "_launchd_service_is_loaded", lambda domain=None: False)
 
         def fake_run(cmd, check=False, **kwargs):
             if cmd == ["launchctl", "kickstart", target]:
@@ -761,6 +836,8 @@ class TestLaunchdServiceRecovery:
         """macOS bootstrap error 5 should spawn a detached gateway, not crash."""
         plist_path = tmp_path / "ai.hermes.gateway.plist"
         monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        # Service genuinely isn't loaded → exit 5 means domain unmanageable.
+        monkeypatch.setattr(gateway_cli, "_launchd_service_is_loaded", lambda domain=None: False)
 
         def fake_run(cmd, check=False, **kwargs):
             if cmd[:2] == ["launchctl", "bootstrap"]:
@@ -780,6 +857,46 @@ class TestLaunchdServiceRecovery:
 
         assert spawned == [True]
         assert "Service installed and loaded" not in capsys.readouterr().out
+
+    def test_launchd_install_bootstrap_5_already_loaded_does_not_detach(self, tmp_path, monkeypatch, capsys):
+        """Bootstrap exit 5 with the service ALREADY loaded is benign.
+
+        On macOS 26+, `launchctl bootstrap` returns 5 ("Input/output error")
+        for an already-loaded service — the same code as a truly unmanageable
+        domain. When the service is in fact loaded we must NOT spawn a detached
+        process; instead we kickstart to apply the current plist.
+        """
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        # The probe reports the service IS loaded → exit 5 is benign.
+        monkeypatch.setattr(gateway_cli, "_launchd_service_is_loaded", lambda domain=None: True)
+
+        label = gateway_cli.get_launchd_label()
+        domain = gateway_cli._launchd_domain()
+        calls = []
+
+        def fake_run(cmd, check=False, **kwargs):
+            if cmd and cmd[0] == "launchctl":
+                calls.append(cmd)
+            if cmd[:2] == ["launchctl", "bootstrap"]:
+                raise gateway_cli.subprocess.CalledProcessError(
+                    5, cmd, stderr="Input/output error"
+                )
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        spawned = []
+        monkeypatch.setattr(
+            gateway_cli, "_spawn_detached_gateway", lambda: spawned.append(True) or True
+        )
+
+        gateway_cli.launchd_install(force=True)
+
+        # No detached fallback; a kickstart -k was issued to apply the plist.
+        assert spawned == []
+        assert ["launchctl", "kickstart", "-k", f"{domain}/{label}"] in calls
+        assert "Service installed and loaded" in capsys.readouterr().out
 
     def test_launchd_restart_falls_back_to_detached_on_error_5(self, monkeypatch, capsys):
         """kickstart -k error 5 (domain unmanageable) should relaunch detached."""
