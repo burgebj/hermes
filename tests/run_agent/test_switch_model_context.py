@@ -18,6 +18,10 @@ def _make_agent_with_compressor(config_context_length=None) -> AIAgent:
     agent.api_mode = "chat_completions"
     agent.client = MagicMock()
     agent.quiet_mode = True
+    agent._client_kwargs = {
+        "api_key": "sk-primary",
+        "base_url": "https://openrouter.ai/api/v1",
+    }
 
     # Store the initial config_context_length override used at agent construction.
     agent._config_context_length = config_context_length
@@ -73,3 +77,22 @@ def test_switch_model_without_config_context_length():
         mock_ctx_len.assert_called_once()
         call_kwargs = mock_ctx_len.call_args.kwargs
         assert call_kwargs.get("config_context_length") is None
+
+
+def test_switch_model_restores_provider_specific_headers():
+    """Provider-specific default_headers must survive runtime /model switches."""
+    agent = _make_agent_with_compressor(config_context_length=None)
+
+    with patch("agent.model_metadata.get_model_context_length", return_value=128_000), \
+         patch.object(agent, "_create_openai_client", return_value=MagicMock()) as mock_create:
+        agent.switch_model(
+            "kimi-k2",
+            "custom",
+            api_key="sk-kimi",
+            base_url="https://api.kimi.com/v1",
+            api_mode="chat_completions",
+        )
+
+    assert agent._client_kwargs["default_headers"] == {"User-Agent": "KimiCLI/1.30.0"}
+    create_kwargs = mock_create.call_args.args[0]
+    assert create_kwargs["default_headers"] == {"User-Agent": "KimiCLI/1.30.0"}

@@ -173,6 +173,47 @@ class TestResolveProviderClientNamedCustom:
         client, model = resolve_provider_client("coffee", "test")
         assert client is None
 
+    def test_named_custom_kimi_provider_gets_required_headers(self, tmp_path):
+        _write_config(tmp_path, {
+            "model": {"default": "test-model"},
+            "custom_providers": [
+                {"name": "kimi-local", "base_url": "https://api.kimi.com/v1", "api_key": "kimi-key"},
+            ],
+        })
+        with patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            from agent.auxiliary_client import resolve_provider_client
+
+            client, model = resolve_provider_client("kimi-local", "kimi-k2")
+
+        assert client is not None
+        assert model == "kimi-k2"
+        kwargs = mock_openai.call_args.kwargs
+        assert kwargs["default_headers"] == {"User-Agent": "KimiCLI/1.30.0"}
+
+    def test_named_custom_copilot_provider_gets_required_headers(self, tmp_path):
+        _write_config(tmp_path, {
+            "model": {"default": "test-model"},
+            "custom_providers": [
+                {
+                    "name": "copilot-proxy",
+                    "base_url": "https://api.githubcopilot.com/v1",
+                    "api_key": "copilot-key",
+                },
+            ],
+        })
+        with patch("hermes_cli.models.copilot_default_headers", return_value={"Editor-Version": "vscode/1.99.0"}), \
+             patch("agent.auxiliary_client.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            from agent.auxiliary_client import resolve_provider_client
+
+            client, model = resolve_provider_client("copilot-proxy", "gpt-5.4")
+
+        assert client is not None
+        assert model == "gpt-5.4"
+        kwargs = mock_openai.call_args.kwargs
+        assert kwargs["default_headers"] == {"Editor-Version": "vscode/1.99.0"}
+
 
 class TestResolveProviderClientModelNormalization:
     """Direct-provider auxiliary routing should normalize models like main runtime."""

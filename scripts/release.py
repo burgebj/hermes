@@ -783,16 +783,7 @@ AUTHOR_MAP = {
     "simon@simonmarcus.org": "simon-marcus",
     "xowiekk@gmail.com": "Xowiek",
     "1243352777@qq.com": "zons-zhaozhy",
-    "e.silacandmr@gmail.com": "Es1la",
-    "51599529+stephen0110@users.noreply.github.com": "stephen0110",
-    "265632032+sonic-netizen@users.noreply.github.com": "sonic-netizen",
-    "82531659+mwnickerson@users.noreply.github.com": "mwnickerson",
-    "sandrohub013@gmail.com": "SandroHub013",
-    "maciekczech@users.noreply.github.com": "maciekczech",
-    "h3057183414@gmail.com": "CoreyNoDream",
-    "franksong2702@gmail.com": "franksong2702",
-    "673088860@qq.com": "ambition0802",
-    "beibei1988@proton.me": "beibi9966",
+    "3483421977@qq.com": "xy200303",
     # ── bulk addition: 75 emails resolved via API, PR salvage bodies, noreply
     #    crossref, and GH contributor list matching (April 2026 audit) ──
     "1115117931@qq.com": "aaronlab",
