@@ -2592,6 +2592,25 @@ async def _connect_server(name: str, config: dict) -> MCPServerTask:
 # Handler / check-fn factories
 # ---------------------------------------------------------------------------
 
+def _extract_mcp_text_block(block) -> str:
+    """Extract model-visible text from an MCP content block.
+
+    Most MCP tools return TextContent blocks exposing ``.text`` directly. Some
+    servers, including QMD, return EmbeddedResource blocks whose payload lives
+    under ``.resource.text``. Treat both shapes as equivalent text sources so
+    wrapper formatting does not silently drop resource-style responses.
+    """
+    text = getattr(block, "text", None)
+    if isinstance(text, str) and text:
+        return text
+    resource = getattr(block, "resource", None)
+    if resource is not None:
+        resource_text = getattr(resource, "text", None)
+        if isinstance(resource_text, str) and resource_text:
+            return resource_text
+    return ""
+
+
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     """Return a sync handler that calls an MCP tool via the background loop.
 
@@ -2641,8 +2660,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             if result.isError:
                 error_text = ""
                 for block in (result.content or []):
-                    if hasattr(block, "text"):
-                        error_text += block.text
+                    error_text += _extract_mcp_text_block(block)
                 return json.dumps({
                     "error": _sanitize_error(
                         error_text or "MCP tool returned an error"
@@ -2662,8 +2680,9 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             # the two — plugs into existing infrastructure.
             parts: List[str] = []
             for block in (result.content or []):
-                if hasattr(block, "text") and block.text:
-                    parts.append(block.text)
+                text = _extract_mcp_text_block(block)
+                if text:
+                    parts.append(text)
                     continue
                 image_tag = _cache_mcp_image_block(block)
                 if image_tag:

@@ -18,6 +18,14 @@ class _FakeContentBlock:
         self.type = block_type
 
 
+class _FakeEmbeddedResourceBlock:
+    """Minimal EmbeddedResource-like block with text under .resource.text."""
+
+    def __init__(self, text: str):
+        self.type = "resource"
+        self.resource = SimpleNamespace(text=text, mimeType="text/markdown")
+
+
 class _FakeCallToolResult:
     """Minimal CallToolResult stand-in.
 
@@ -77,6 +85,33 @@ class TestStructuredContentPreservation:
         raw = handler({})
         data = json.loads(raw)
         assert data == {"result": "hello"}
+
+    def test_embedded_resource_text_result(self, _patch_mcp_server):
+        """EmbeddedResource.resource.text is forwarded as normal result text."""
+        session = _patch_mcp_server
+        session.call_tool = AsyncMock(
+            return_value=_FakeCallToolResult(
+                content=[_FakeEmbeddedResourceBlock("# Title\n")],
+            )
+        )
+        handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0)
+        raw = handler({})
+        data = json.loads(raw)
+        assert data == {"result": "# Title\n"}
+
+    def test_embedded_resource_error_text_result(self, _patch_mcp_server):
+        """EmbeddedResource.resource.text is preserved on MCP error results."""
+        session = _patch_mcp_server
+        session.call_tool = AsyncMock(
+            return_value=_FakeCallToolResult(
+                content=[_FakeEmbeddedResourceBlock("resource failed")],
+                is_error=True,
+            )
+        )
+        handler = mcp_tool._make_tool_handler("test-server", "my-tool", 30.0)
+        raw = handler({})
+        data = json.loads(raw)
+        assert data == {"error": "resource failed"}
 
     def test_both_content_and_structured(self, _patch_mcp_server):
         """When both content and structuredContent are present, combine them."""
