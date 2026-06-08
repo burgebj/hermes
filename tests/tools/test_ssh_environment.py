@@ -200,6 +200,108 @@ class TestSSHPreflight:
         assert env.host == "example.com"
         assert env.user == "alice"
 
+    def test_stale_public_key_sidecar_returns_warning(self, tmp_path, monkeypatch):
+        private_key = tmp_path / "id_ed25519"
+        private_key.write_text("private", encoding="utf-8")
+        private_key.with_name("id_ed25519.pub").write_text(
+            "ssh-ed25519 stale-key comment\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            ssh_env.subprocess,
+            "run",
+            lambda *a, **k: subprocess.CompletedProcess(
+                a[0], 0, stdout="ssh-ed25519 derived-key comment\n", stderr=""
+            ),
+        )
+
+        warning = ssh_env._check_stale_public_key_sidecar(str(private_key))
+
+        assert warning is not None
+        assert "id_ed25519.pub" in warning
+        assert "ssh-keygen -y -f" in warning
+
+    def test_public_key_sidecar_check_closes_stdin(self, tmp_path, monkeypatch):
+        private_key = tmp_path / "id_ed25519"
+        private_key.write_text("private", encoding="utf-8")
+        private_key.with_name("id_ed25519.pub").write_text(
+            "ssh-ed25519 stale-key comment\n",
+            encoding="utf-8",
+        )
+
+        def _fake_run(*args, **kwargs):
+            assert kwargs["input"] == ""
+            assert kwargs["timeout"] <= 3
+            return subprocess.CompletedProcess(
+                args[0], 0, stdout="ssh-ed25519 derived-key comment\n", stderr=""
+            )
+
+        monkeypatch.setattr(ssh_env.subprocess, "run", _fake_run)
+
+        assert ssh_env._check_stale_public_key_sidecar(str(private_key)) is not None
+
+    def test_matching_public_key_sidecar_ignores_comment(self, tmp_path, monkeypatch):
+        private_key = tmp_path / "id_ed25519"
+        private_key.write_text("private", encoding="utf-8")
+        private_key.with_name("id_ed25519.pub").write_text(
+            "ssh-ed25519 shared-key sidecar-comment\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(
+            ssh_env.subprocess,
+            "run",
+            lambda *a, **k: subprocess.CompletedProcess(
+                a[0], 0, stdout="ssh-ed25519 shared-key derived-comment\n", stderr=""
+            ),
+        )
+
+        assert ssh_env._check_stale_public_key_sidecar(str(private_key)) is None
+
+    def test_missing_public_key_sidecar_skips_keygen(self, tmp_path, monkeypatch):
+        private_key = tmp_path / "id_ed25519"
+        private_key.write_text("private", encoding="utf-8")
+
+        monkeypatch.setattr(
+            ssh_env.subprocess,
+            "run",
+            lambda *a, **k: pytest.fail("ssh-keygen should not run without a .pub sidecar"),
+        )
+
+        assert ssh_env._check_stale_public_key_sidecar(str(private_key)) is None
+
+    def test_invalid_public_key_sidecar_is_ignored(self, tmp_path, monkeypatch):
+        private_key = tmp_path / "id_ed25519"
+        private_key.write_text("private", encoding="utf-8")
+        private_key.with_name("id_ed25519.pub").write_bytes(b"\xff\xfe\x00")
+
+        monkeypatch.setattr(
+            ssh_env.subprocess,
+            "run",
+            lambda *a, **k: subprocess.CompletedProcess(
+                a[0], 0, stdout="ssh-ed25519 derived-key comment\n", stderr=""
+            ),
+        )
+
+        assert ssh_env._check_stale_public_key_sidecar(str(private_key)) is None
+
+    def test_connection_failure_includes_stale_public_key_warning(self, monkeypatch):
+        env = object.__new__(ssh_env.SSHEnvironment)
+        env.host = "example.com"
+        env.user = "alice"
+        env._key_sidecar_warning = "SSH public key sidecar /tmp/id.pub does not match private key /tmp/id"
+
+        monkeypatch.setattr(env, "_build_ssh_command", lambda: ["ssh", "alice@example.com"])
+        monkeypatch.setattr(
+            ssh_env.subprocess,
+            "run",
+            lambda *a, **k: subprocess.CompletedProcess(a[0], 255, stdout="", stderr="Permission denied"),
+        )
+
+        with pytest.raises(RuntimeError, match="public key sidecar"):
+            env._establish_connection()
+
 
 def _setup_ssh_env(monkeypatch, persistent: bool):
     monkeypatch.setenv("TERMINAL_ENV", "ssh")

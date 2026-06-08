@@ -33,6 +33,61 @@ def _ensure_ssh_available() -> None:
         )
 
 
+def _public_key_fields(key_text: str) -> tuple[str, str] | None:
+    fields = key_text.strip().split()
+    if len(fields) < 2:
+        return None
+    return fields[0], fields[1]
+
+
+def _check_stale_public_key_sidecar(key_path: str) -> str | None:
+    """Warn when an adjacent .pub file no longer matches the private key."""
+    if not key_path:
+        return None
+
+    private_key = Path(key_path).expanduser()
+    public_key = private_key.with_name(f"{private_key.name}.pub")
+    if not public_key.exists():
+        return None
+
+    try:
+        result = subprocess.run(
+            ["ssh-keygen", "-y", "-f", str(private_key)],
+            capture_output=True,
+            input="",
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.debug("Could not derive public key from %s: %s", private_key, exc)
+        return None
+
+    if result.returncode != 0:
+        logger.debug(
+            "Could not derive public key from %s: %s",
+            private_key,
+            result.stderr.strip() or result.stdout.strip(),
+        )
+        return None
+
+    derived_fields = _public_key_fields(result.stdout)
+    try:
+        sidecar_fields = _public_key_fields(public_key.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as exc:
+        logger.debug("Could not read SSH public key sidecar %s: %s", public_key, exc)
+        return None
+
+    if not derived_fields or not sidecar_fields or derived_fields == sidecar_fields:
+        return None
+
+    return (
+        f"SSH public key sidecar {public_key} does not match private key "
+        f"{private_key}. Regenerate the sidecar public key from the private key "
+        f"(for example, with ssh-keygen -y -f {shlex.quote(str(private_key))} > "
+        f"{shlex.quote(str(public_key))})."
+    )
+
+
 class SSHEnvironment(BaseEnvironment):
     """Run commands on a remote machine over SSH.
 
@@ -65,6 +120,9 @@ class SSHEnvironment(BaseEnvironment):
         ).hexdigest()[:16]
         self.control_socket = self.control_dir / f"{_socket_id}.sock"
         _ensure_ssh_available()
+        self._key_sidecar_warning = _check_stale_public_key_sidecar(self.key_path)
+        if self._key_sidecar_warning:
+            logger.warning(self._key_sidecar_warning)
         self._establish_connection()
         self._remote_home = self._detect_remote_home()
 
@@ -110,6 +168,8 @@ class SSHEnvironment(BaseEnvironment):
             )
             if result.returncode != 0:
                 error_msg = result.stderr.strip() or result.stdout.strip()
+                if getattr(self, "_key_sidecar_warning", None):
+                    error_msg = f"{error_msg}\n{self._key_sidecar_warning}"
                 raise RuntimeError(f"SSH connection failed: {error_msg}")
         except subprocess.TimeoutExpired:
             raise RuntimeError(f"SSH connection to {self.user}@{self.host} timed out")
