@@ -1,8 +1,10 @@
 """Shared utility functions for hermes-agent."""
 
+import errno
 import json
 import logging
 import os
+import shutil
 import stat
 import tempfile
 from pathlib import Path
@@ -75,11 +77,60 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
 
     Returns the resolved real path used for the replace, so callers that
     need to re-apply permissions can target it instead of the symlink.
+
+    When *target* is a symlink whose real file lives on a different
+    filesystem, ``tmp_path`` (staged next to the symlink) and ``real_path``
+    straddle a mount point.  ``os.replace`` cannot rename across devices and
+    raises ``EXDEV``; we fall back to re-staging the bytes on the target's own
+    filesystem and replacing there, so the write still lands atomically
+    (GitHub #36653).
     """
     target_str = str(target)
     real_path = os.path.realpath(target_str) if os.path.islink(target_str) else target_str
-    os.replace(str(tmp_path), real_path)
+    tmp_str = str(tmp_path)
+    try:
+        os.replace(tmp_str, real_path)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        _replace_across_devices(tmp_str, real_path)
     return real_path
+
+
+def _replace_across_devices(tmp_str: str, real_path: str) -> None:
+    """Atomically replace *real_path* with the contents of *tmp_str* when the
+    two live on different filesystems.
+
+    A plain ``os.replace`` rename is impossible across devices, so copy the
+    bytes into a fresh temp file *on the target's filesystem*, fsync it, then
+    ``os.replace`` within that filesystem (which is a real atomic rename).
+    The original cross-device temp is removed either way.
+
+    Atomicity matches the same-filesystem path: a reader sees either the old
+    file or the fully-written new one, never a partial write.  Directory-level
+    durability and permission restoration are the caller's responsibility,
+    exactly as for the same-device ``os.replace`` — callers re-apply mode via
+    the returned real path (see :func:`atomic_json_write`).
+    """
+    real_dir = os.path.dirname(real_path) or "."
+    fd, staged = tempfile.mkstemp(dir=real_dir, prefix=".atomic_xdev_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as dst, open(tmp_str, "rb") as src:
+            shutil.copyfileobj(src, dst)
+            dst.flush()
+            os.fsync(dst.fileno())
+        os.replace(staged, real_path)
+    except BaseException:
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass
+        raise
+    finally:
+        try:
+            os.unlink(tmp_str)
+        except OSError:
+            pass
 
 
 def atomic_json_write(

@@ -12,6 +12,7 @@ the codebase were migrated to the helper; these tests pin that invariant.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sys
@@ -158,3 +159,139 @@ def test_atomic_replace_broken_symlink_creates_target(tmp_path: Path) -> None:
     assert link.is_symlink(), "symlink must be preserved"
     assert missing.exists(), "real target should now exist"
     assert missing.read_text(encoding="utf-8") == "created-through-link\n"
+
+
+# ─── Cross-filesystem (EXDEV) fallback — GitHub #36653 ─────────────────────
+#
+# When ``target`` is a symlink whose real file lives on a *different*
+# filesystem, the temp file (created next to the symlink) and the resolved
+# real path straddle a mount point.  ``os.replace`` can't rename across
+# devices, so it raises ``OSError(EXDEV)``.  ``atomic_replace`` must fall back
+# to staging the bytes on the target's filesystem and replacing there, so the
+# write still lands atomically instead of blowing up.
+
+
+def _patch_exdev_once(monkeypatch) -> dict:
+    """Make ``os.replace`` raise EXDEV on its first call, then delegate to the
+    real implementation.  Simulates a cross-device symlink target without
+    needing two real mounts in the test environment.
+    """
+    real_replace = os.replace
+    state = {"calls": 0}
+
+    def fake_replace(src, dst):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", fake_replace)
+    return state
+
+
+def test_atomic_replace_exdev_fallback_preserves_symlink(
+    tmp_path: Path, monkeypatch
+) -> None:
+    real = tmp_path / "real.yaml"
+    link = tmp_path / "link.yaml"
+    real.write_text("original\n", encoding="utf-8")
+    link.symlink_to(real)
+
+    state = _patch_exdev_once(monkeypatch)
+    tmp = _write_tmp(tmp_path, "updated\n")
+    returned = atomic_replace(tmp, link)
+
+    assert state["calls"] >= 2, "EXDEV must trigger a retry on the target filesystem"
+    assert link.is_symlink(), "symlink must survive the cross-device fallback"
+    assert real.read_text(encoding="utf-8") == "updated\n"
+    assert Path(returned) == real
+    assert not Path(tmp).exists(), "the original cross-device temp must be cleaned up"
+
+
+def test_atomic_json_write_survives_cross_device_symlink(
+    tmp_path: Path, monkeypatch
+) -> None:
+    real = tmp_path / "real.json"
+    link = tmp_path / "link.json"
+    real.write_text("{}", encoding="utf-8")
+    link.symlink_to(real)
+
+    _patch_exdev_once(monkeypatch)
+    atomic_json_write(link, {"hello": "world"})
+
+    assert link.is_symlink()
+    assert json.loads(real.read_text(encoding="utf-8")) == {"hello": "world"}
+
+
+def test_atomic_replace_exdev_stages_on_target_filesystem(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The fallback must stage its temp in the *real target's* directory, not
+    next to the symlink — staging next to the symlink would just hit EXDEV
+    again.  Spy on mkstemp to pin where the staged file is created."""
+    import tempfile
+
+    real = tmp_path / "real.yaml"
+    link = tmp_path / "link.yaml"
+    real.write_text("original\n", encoding="utf-8")
+    link.symlink_to(real)
+
+    _patch_exdev_once(monkeypatch)
+    real_mkstemp = tempfile.mkstemp
+    seen: dict = {}
+
+    def spy_mkstemp(*args, **kwargs):
+        seen["dir"] = kwargs.get("dir")
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile, "mkstemp", spy_mkstemp)
+    tmp = _write_tmp(tmp_path, "updated\n")
+    atomic_replace(tmp, link)
+
+    assert seen["dir"] == os.path.dirname(str(real)), "staged temp must land on the target fs"
+    assert real.read_text(encoding="utf-8") == "updated\n"
+
+
+def test_atomic_replace_exdev_copy_failure_leaves_target_intact(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """If the cross-device copy fails mid-way, the target must be untouched and
+    no staged temp may leak."""
+    import shutil
+
+    real = tmp_path / "real.yaml"
+    link = tmp_path / "link.yaml"
+    real.write_text("original\n", encoding="utf-8")
+    link.symlink_to(real)
+
+    _patch_exdev_once(monkeypatch)
+
+    def boom(src, dst, *args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(shutil, "copyfileobj", boom)
+    tmp = _write_tmp(tmp_path, "updated\n")
+    with pytest.raises(RuntimeError, match="disk full"):
+        atomic_replace(tmp, link)
+
+    assert real.read_text(encoding="utf-8") == "original\n", "target must be untouched"
+    assert not list(tmp_path.glob(".atomic_xdev_*")), "staged temp must not leak"
+    assert not Path(tmp).exists(), "cross-device temp must still be cleaned up"
+
+
+def test_atomic_replace_reraises_non_exdev_oserror(tmp_path: Path, monkeypatch) -> None:
+    """Only EXDEV gets the fallback; other OSErrors must propagate unchanged
+    and leave the target untouched."""
+    target = tmp_path / "plain.yaml"
+    target.write_text("old\n", encoding="utf-8")
+
+    def boom(src, dst):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(os, "replace", boom)
+    tmp = _write_tmp(tmp_path, "fresh\n")
+    with pytest.raises(OSError) as exc_info:
+        atomic_replace(tmp, target)
+
+    assert exc_info.value.errno == errno.EACCES
+    assert target.read_text(encoding="utf-8") == "old\n", "target must be untouched"
