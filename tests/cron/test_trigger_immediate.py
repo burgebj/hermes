@@ -499,6 +499,44 @@ class TestRunJobImmediate:
 
         sched._shutdown_parallel_pool()
 
+    def test_action_run_queues_for_next_tick_when_live_delivery_context_is_required(self, monkeypatch):
+        """Jobs that require a live gateway adapter should queue instead of failing delivery."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job, resolve_job_ref
+        from tools.cronjob_tools import cronjob
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 1h",
+            name="queued-live-delivery-manual-run",
+            deliver="matrix",
+        )
+        job_id = job["id"]
+        original_next_run_at = resolve_job_ref(job_id)["next_run_at"]
+
+        monkeypatch.setattr(sched, "_job_requires_live_delivery_context", lambda _job: True)
+        monkeypatch.setattr(sched, "_resolve_live_delivery_context", lambda: (None, None))
+        monkeypatch.setattr(
+            sched,
+            "run_job_immediate",
+            lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("run_job_immediate should not be called")),
+        )
+
+        result = json.loads(cronjob(action="run", job_id=job_id))
+        queued_job = resolve_job_ref(job_id)
+
+        assert result["success"] is True
+        assert result["dispatched"] is False
+        assert "queued for the next gateway tick" in result["note"].lower()
+        assert queued_job["next_run_at"] != original_next_run_at
+        assert queued_job["manual_run_schedule_snapshot"]["next_run_at"] == original_next_run_at
+
+        sched._shutdown_parallel_pool()
+
     def test_run_job_immediate_cleans_up_on_job_failure(self, monkeypatch):
         """run_job_immediate removes job from _running_job_ids even if run_job fails."""
         import cron.scheduler as sched
@@ -541,6 +579,43 @@ class TestRunJobImmediate:
 
         sched._shutdown_parallel_pool()
 
+    def test_run_job_immediate_sweeps_mcp_orphans_after_completion(self, monkeypatch):
+        """Immediate runs should perform the same orphan sweep as tick()-driven runs."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 5m",
+            name="mcp-orphan-sweep-immediate"
+        )
+        job_id = job["id"]
+        sweeps = []
+
+        class _InlinePool:
+            def submit(self, fn):
+                fn()
+                return MagicMock()
+
+        monkeypatch.setattr(sched, "_get_parallel_pool", lambda *_a, **_kw: _InlinePool())
+        monkeypatch.setattr(sched, "run_job", lambda *_a, **_kw: (True, "output", "response", None))
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "_sweep_mcp_orphans", lambda: sweeps.append(job_id))
+
+        dispatched, error = sched.run_job_immediate(job_id)
+
+        assert dispatched is True
+        assert error is None
+        assert sweeps == [job_id]
+
+        sched._shutdown_parallel_pool()
+
     def test_run_job_immediate_releases_claim_if_pool_creation_fails(self, monkeypatch):
         """Pool-construction failures must not strand the per-job running lock."""
         import cron.scheduler as sched
@@ -563,6 +638,55 @@ class TestRunJobImmediate:
             sched.run_job_immediate(job_id)
 
         assert job_id not in sched._running_job_ids
+
+        sched._shutdown_parallel_pool()
+
+    def test_tick_restores_schedule_after_queued_manual_run(self, tmp_path, monkeypatch):
+        """Queued manual runs should restore the original schedule after the gateway tick."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job, resolve_job_ref, update_job
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 1h",
+            name="queued-manual-run-restore"
+        )
+        job_id = job["id"]
+        schedule_snapshot = {
+            "enabled": job.get("enabled", True),
+            "state": job.get("state"),
+            "paused_at": job.get("paused_at"),
+            "paused_reason": job.get("paused_reason"),
+            "next_run_at": job.get("next_run_at"),
+        }
+        update_job(
+            job_id,
+            {
+                "next_run_at": "2000-01-01T00:00:00+00:00",
+                "manual_run_schedule_snapshot": schedule_snapshot,
+            },
+        )
+        due_job = resolve_job_ref(job_id)
+        lock_dir = tmp_path / "cron"
+        lock_dir.mkdir()
+        tick_lock = lock_dir / ".tick.lock"
+
+        monkeypatch.setattr(sched, "get_due_jobs", lambda: [due_job])
+        monkeypatch.setattr(sched, "run_job", lambda *_a, **_kw: (True, "output", "response", None))
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
+
+        with patch("cron.scheduler._get_lock_paths", return_value=(lock_dir, tick_lock)):
+            dispatched_count = sched.tick(sync=True)
+
+        restored = resolve_job_ref(job_id)
+        assert dispatched_count == 1
+        assert restored["next_run_at"] == schedule_snapshot["next_run_at"]
+        assert restored.get("manual_run_schedule_snapshot") is None
 
         sched._shutdown_parallel_pool()
 

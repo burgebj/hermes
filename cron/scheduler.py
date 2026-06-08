@@ -1438,20 +1438,113 @@ def _job_requires_sequential_pool(job: dict) -> bool:
 
 def _restore_manual_run_schedule(job_id: str, schedule_snapshot: Optional[dict]) -> None:
     """Restore the pre-manual-run scheduling fields after a skipped/failed dispatch."""
-    if not schedule_snapshot:
-        return
+    from cron.jobs import update_job
+
+    updates = {
+        "manual_run_schedule_snapshot": None,
+    }
+    if schedule_snapshot:
+        updates.update(
+            {
+                "enabled": schedule_snapshot.get("enabled", True),
+                "state": schedule_snapshot.get("state"),
+                "paused_at": schedule_snapshot.get("paused_at"),
+                "paused_reason": schedule_snapshot.get("paused_reason"),
+                "next_run_at": schedule_snapshot.get("next_run_at"),
+            }
+        )
+
+    update_job(job_id, updates)
+
+
+def _queue_manual_run_for_tick(job_id: str, schedule_snapshot: Optional[dict]) -> None:
+    """Queue a manual run for the next gateway tick while preserving the schedule."""
     from cron.jobs import update_job
 
     update_job(
         job_id,
         {
-            "enabled": schedule_snapshot.get("enabled", True),
-            "state": schedule_snapshot.get("state"),
-            "paused_at": schedule_snapshot.get("paused_at"),
-            "paused_reason": schedule_snapshot.get("paused_reason"),
-            "next_run_at": schedule_snapshot.get("next_run_at"),
+            "enabled": True,
+            "state": "scheduled",
+            "paused_at": None,
+            "paused_reason": None,
+            "next_run_at": _hermes_now().isoformat(),
+            "manual_run_schedule_snapshot": schedule_snapshot,
         },
     )
+
+
+def _resolve_live_delivery_context():
+    """Return the best available live adapter context for cron delivery."""
+    global _live_delivery_adapters, _live_delivery_loop
+
+    adapters = _live_delivery_adapters
+    loop = _live_delivery_loop
+    if adapters is not None and loop is not None and getattr(loop, "is_running", lambda: False)():
+        return adapters, loop
+
+    try:
+        from gateway.run import _gateway_runner_ref
+
+        runner = _gateway_runner_ref()
+    except Exception:
+        runner = None
+
+    if runner is not None:
+        runner_adapters = getattr(runner, "adapters", None)
+        runner_loop = getattr(runner, "_gateway_loop", None)
+        if runner_adapters is not None and runner_loop is not None and getattr(runner_loop, "is_running", lambda: False)():
+            _live_delivery_adapters = runner_adapters
+            _live_delivery_loop = runner_loop
+            return runner_adapters, runner_loop
+
+    return adapters, loop
+
+
+def _job_requires_live_delivery_context(job: dict) -> bool:
+    """Return True when a job's delivery target cannot safely fall back standalone."""
+    targets = _resolve_delivery_targets(job)
+    if not targets:
+        return False
+
+    try:
+        from gateway.config import load_gateway_config, Platform
+
+        config = load_gateway_config()
+    except Exception:
+        return False
+
+    try:
+        from gateway.platform_registry import platform_registry
+    except Exception:
+        platform_registry = None
+
+    for target in targets:
+        platform_name = str(target.get("platform") or "").strip().lower()
+        if not platform_name:
+            continue
+        try:
+            platform = Platform(platform_name)
+        except (ValueError, KeyError):
+            platform = None
+        pconfig = config.platforms.get(platform) if platform is not None else None
+        if platform_name == "matrix" and bool(((getattr(pconfig, "extra", None) or {}).get("encryption"))):
+            return True
+        if platform_name not in _KNOWN_DELIVERY_PLATFORMS:
+            entry = platform_registry.get(platform_name) if platform_registry is not None else None
+            if entry is None or entry.standalone_sender_fn is None:
+                return True
+    return False
+
+
+def _sweep_mcp_orphans() -> None:
+    """Best-effort cleanup for orphaned MCP stdio subprocesses."""
+    try:
+        from tools.mcp_tool import _kill_orphaned_mcp_children
+
+        _kill_orphaned_mcp_children()
+    except Exception as _e:
+        logger.debug("Post-run MCP orphan cleanup failed: %s", _e)
 
 
 def run_job_immediate(job_id: str, schedule_snapshot: Optional[dict] = None) -> tuple[bool, Optional[str]]:
@@ -1485,8 +1578,7 @@ def run_job_immediate(job_id: str, schedule_snapshot: Optional[dict] = None) -> 
         _restore_manual_run_schedule(job["id"], schedule_snapshot)
         raise
     _ctx = contextvars.copy_context()
-    adapters = _live_delivery_adapters
-    loop = _live_delivery_loop
+    adapters, loop = _resolve_live_delivery_context()
 
     def _run_and_release(j=job, ctx=_ctx, job_lock=run_lock):
         try:
@@ -1519,6 +1611,7 @@ def run_job_immediate(job_id: str, schedule_snapshot: Optional[dict] = None) -> 
             _restore_manual_run_schedule(j["id"], schedule_snapshot)
         finally:
             _release_running_job(j["id"], job_lock)
+            _sweep_mcp_orphans()
 
     try:
         pool.submit(_run_and_release)
@@ -2260,6 +2353,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
 
         def _process_job(job: dict) -> bool:
             """Run one due job end-to-end: execute, save, deliver, mark."""
+            manual_schedule_snapshot = job.get("manual_run_schedule_snapshot")
             try:
                 success, output, final_response, error = run_job(job)
 
@@ -2295,11 +2389,15 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                     error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
                 mark_job_run(job["id"], success, error, delivery_error=delivery_error)
+                if manual_schedule_snapshot:
+                    _restore_manual_run_schedule(job["id"], manual_schedule_snapshot)
                 return True
 
             except Exception as e:
                 logger.error("Error processing job %s: %s", job['id'], e)
                 mark_job_run(job["id"], False, str(e))
+                if manual_schedule_snapshot:
+                    _restore_manual_run_schedule(job["id"], manual_schedule_snapshot)
                 return False
 
         # Partition due jobs: jobs with a per-job workdir and/or profile touch
@@ -2374,13 +2472,6 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         # (including live user chats) are never touched — only PIDs explicitly
         # detected as orphans in tools.mcp_tool._run_stdio's finally block are
         # reaped.
-        def _sweep_mcp_orphans() -> None:
-            try:
-                from tools.mcp_tool import _kill_orphaned_mcp_children
-                _kill_orphaned_mcp_children()
-            except Exception as _e:
-                logger.debug("Post-tick MCP orphan cleanup failed: %s", _e)
-
         if sync:
             # Sync mode (tests / manual ticks): wait for all dispatched jobs,
             # collect results, then sweep once.
