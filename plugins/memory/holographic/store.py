@@ -171,10 +171,23 @@ class MemoryStore:
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
             except sqlite3.IntegrityError:
-                # Duplicate content — return existing id
+                # Duplicate content — return existing id.
+                # Roll back the failed INSERT so the connection doesn't keep
+                # an open write transaction holding locks until the next commit.
+                try:
+                    self._conn.rollback()
+                except sqlite3.Error:
+                    pass
+                # Guard against the (rare) cross-process concurrent-delete case
+                # where the row is gone by the time we SELECT it.
                 row = self._conn.execute(
                     "SELECT fact_id FROM facts WHERE content = ?", (content,)
                 ).fetchone()
+                if row is None:
+                    raise RuntimeError(
+                        "Fact content violated UNIQUE constraint but the row "
+                        "could not be found; possible concurrent deletion."
+                    ) from None
                 return int(row["fact_id"])
 
             # Entity extraction and linking
@@ -225,7 +238,12 @@ class MemoryStore:
                 LIMIT ?
             """
 
-            rows = self._conn.execute(sql, params).fetchall()
+            try:
+                rows = self._conn.execute(sql, params).fetchall()
+            except sqlite3.OperationalError:
+                # FTS5 query syntax error (e.g. unclosed quote, bare boolean
+                # operator) — return empty rather than propagating a crash.
+                return []
             results = [self._row_to_dict(r) for r in rows]
 
             if results:
@@ -253,10 +271,12 @@ class MemoryStore:
         """
         with self._lock:
             row = self._conn.execute(
-                "SELECT fact_id, trust_score FROM facts WHERE fact_id = ?", (fact_id,)
+                "SELECT fact_id, trust_score, category FROM facts WHERE fact_id = ?",
+                (fact_id,),
             ).fetchone()
             if row is None:
                 return False
+            existing_category = row["category"]
 
             assignments: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
             params: list = []
@@ -295,10 +315,22 @@ class MemoryStore:
             # Recompute HRR vector if content changed
             if content is not None:
                 self._compute_hrr_vector(fact_id, content)
-            # Rebuild bank for relevant category
-            cat = category or self._conn.execute(
-                "SELECT category FROM facts WHERE fact_id = ?", (fact_id,)
-            ).fetchone()["category"]
+            # Rebuild bank for relevant category.
+            # Guard fetchone() — fact could be removed by a concurrent process
+            # between the initial existence check and this second SELECT.
+            # Fall back to the category captured in the initial existence query
+            # so a concurrent delete doesn't leave the original bank stale.
+            if category is not None:
+                cat = category
+            else:
+                _cat_row = self._conn.execute(
+                    "SELECT category FROM facts WHERE fact_id = ?", (fact_id,)
+                ).fetchone()
+                cat = (
+                    _cat_row["category"]
+                    if _cat_row is not None
+                    else existing_category
+                )
             self._rebuild_bank(cat)
 
             return True
