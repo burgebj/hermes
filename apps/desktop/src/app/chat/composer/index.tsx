@@ -1212,6 +1212,13 @@ export function ChatBar({
   }, [activeQueueSessionKey, editingQueuedPrompt, queueEdit]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const submitDraft = () => {
+    // Resolve the current draft text from the DOM rather than from React
+    // state. The React draft may be stale when Enter fires synchronously
+    // from the keydown handler, before the latest onInput has committed
+    // (see #38923).
+    const editor = editorRef.current
+    const currentText = editor ? composerPlainText(editor).trim() : ''
+
     if (queueEdit) {
       exitQueuedEdit('save')
     } else if (busy) {
@@ -1237,8 +1244,8 @@ export function ChatBar({
       }
     } else if (!hasComposerPayload && queuedPrompts.length > 0) {
       void drainNextQueued()
-    } else if (draft.trim() || attachments.length > 0) {
-      const submitted = draft
+    } else if (currentText || attachments.length > 0) {
+      const submitted = currentText
       triggerHaptic('submit')
       resetBrowseState(sessionId)
       clearDraft()
