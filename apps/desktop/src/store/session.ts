@@ -4,7 +4,7 @@ import type { ContextSuggestion } from '@/app/types'
 import type { HermesConnection } from '@/global'
 import type { ChatMessage } from '@/lib/chat-messages'
 import { persistString, storedString } from '@/lib/storage'
-import type { SessionInfo, UsageStats } from '@/types/hermes'
+import type { SessionInfo, SessionPresenceRecord, UsageStats } from '@/types/hermes'
 
 type Updater<T> = T | ((current: T) => T)
 
@@ -91,6 +91,7 @@ export const CRON_SECTION_LIMIT = 50
 // one. Empty for single-profile users (fall back to $sessionsTotal).
 export const $sessionProfileTotals = atom<Record<string, number>>({})
 export const $sessionsLoading = atom(true)
+export const $sessionPresence = atom<SessionPresenceRecord[]>([])
 export const $workingSessionIds = atom<string[]>([])
 export const $activeSessionId = atom<string | null>(null)
 export const $selectedStoredSessionId = atom<string | null>(null)
@@ -132,6 +133,7 @@ export const setCronSessions = (next: Updater<SessionInfo[]>) => updateAtom($cro
 export const setSessionProfileTotals = (next: Updater<Record<string, number>>) =>
   updateAtom($sessionProfileTotals, next)
 export const setSessionsLoading = (next: Updater<boolean>) => updateAtom($sessionsLoading, next)
+export const setSessionPresence = (next: Updater<SessionPresenceRecord[]>) => updateAtom($sessionPresence, next)
 export const setWorkingSessionIds = (next: Updater<string[]>) => updateAtom($workingSessionIds, next)
 export const setActiveSessionId = (next: Updater<string | null>) => updateAtom($activeSessionId, next)
 export const setSelectedStoredSessionId = (next: Updater<string | null>) => updateAtom($selectedStoredSessionId, next)
