@@ -17,6 +17,7 @@ Usage:
     hermes cron                # Manage cron jobs
     hermes cron list           # List cron jobs
     hermes cron status         # Check if cron scheduler is running
+    hermes workflow run "task" # Run local Dynamic Workflow MVP
     hermes doctor              # Check configuration and dependencies
     hermes honcho setup                    # Configure Honcho AI memory integration
     hermes honcho status                   # Show Honcho config and connection status
@@ -12514,6 +12515,17 @@ def cmd_logs(args):
         since=getattr(args, "since", None),
         component=getattr(args, "component", None),
     )
+
+
+def cmd_workflow(args):
+    """Run the local Dynamic Workflow orchestrator."""
+    from hermes_cli.workflow.cli import workflow_command
+
+    code = workflow_command(args)
+    if code:
+        sys.exit(code)
+
+
 # Top-level subcommands that argparse knows about WITHOUT running plugin
 # discovery.  Used to short-circuit eager plugin imports (which can take
 # 500ms+ pulling in google.cloud.pubsub_v1, aiohttp, grpc, etc.) when the
@@ -12534,7 +12546,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "prompt-size",
         "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
-        "version", "webhook", "whatsapp", "chat", "secrets", "security",
+        "version", "webhook", "whatsapp", "workflow", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
         # expensive eager import of every bundled plugin module.
@@ -13831,6 +13843,14 @@ def main():
 
     kanban_parser = _build_kanban_parser(subparsers)
     kanban_parser.set_defaults(func=cmd_kanban)
+
+    # =========================================================================
+    # workflow command - local Dynamic Workflow MVP
+    # =========================================================================
+    from hermes_cli.workflow.cli import add_parser as _add_workflow_parser
+
+    workflow_parser = _add_workflow_parser(subparsers)
+    workflow_parser.set_defaults(func=cmd_workflow)
 
     # =========================================================================
     # hooks command — shell-hook inspection and management

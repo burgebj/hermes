@@ -1,0 +1,112 @@
+version: 1
+
+execution:
+  mode: sequential
+  max_subtasks: 8
+  max_revision_cycles: 1
+  parallel_enabled: true
+  max_concurrency: 3
+  background_enabled: true
+  state_db: ""
+  default_permission_mode: read-only
+  contest_candidates: 3
+  contest_workers: [researcher, product_planner, reviewer]
+  cross_review_workers: [reviewer, tester]
+
+safety:
+  allow_background_execution: true
+  require_background_flag: true
+  allow_file_changes: false
+  require_destructive_confirmation: true
+  redact_credentials: true
+  allow_cross_project_access: false
+
+logging:
+  path: ""
+
+agents:
+  coder:
+    description: Implement narrowly scoped code changes when explicitly allowed.
+    provider: ""
+    model: ""
+    prompt: prompts/worker_coder.md
+    tools: []
+    toolsets: []
+    max_turns: 15
+    can_write_files: false
+  debugger:
+    description: Diagnose failures, root causes, and regression risks.
+    provider: ""
+    model: ""
+    prompt: prompts/worker_debugger.md
+    tools: []
+    toolsets: []
+    max_turns: 15
+    can_write_files: false
+  uiux_designer:
+    description: Design user flows, screens, interaction states, and UX tradeoffs.
+    provider: ""
+    model: ""
+    prompt: prompts/worker_uiux_designer.md
+    tools: []
+    toolsets: []
+    max_turns: 15
+    can_write_files: false
+  product_planner:
+    description: Turn product goals into MVP slices, requirements, and rollout steps.
+    provider: ""
+    model: ""
+    prompt: prompts/worker_product_planner.md
+    tools: []
+    toolsets: []
+    max_turns: 15
+    can_write_files: false
+  researcher:
+    description: Gather findings, compare options, and summarize sourced tradeoffs.
+    provider: ""
+    model: ""
+    prompt: prompts/worker_researcher.md
+    tools: []
+    toolsets: []
+    max_turns: 15
+    can_write_files: false
+  reviewer:
+    description: Check outputs for correctness, risks, contradictions, and gaps.
+    provider: ""
+    model: ""
+    prompt: prompts/worker_reviewer.md
+    tools: []
+    toolsets: []
+    max_turns: 15
+    can_write_files: false
+  tester:
+    description: Define and run verification steps, examples, and acceptance checks.
+    provider: ""
+    model: ""
+    prompt: prompts/worker_tester.md
+    tools: []
+    toolsets: []
+    max_turns: 15
+    can_write_files: false
+
+routing:
+  task_type:
+    code: coder
+    debug: debugger
+    UI/UX: uiux_designer
+    product design: product_planner
+    research: researcher
+    writing: researcher
+    planning: product_planner
+    review: reviewer
+  keywords:
+    - worker: tester
+      match: ["test", "tests", "verification", "example run"]
+    - worker: reviewer
+      match: ["review", "evaluate", "risk", "security", "acceptance"]
+    - worker: debugger
+      match: ["debug", "root cause", "failing", "error"]
+    - worker: uiux_designer
+      match: ["ui", "ux", "screen", "visual", "figma"]
+    - worker: product_planner
+      match: ["product", "scope", "mvp", "requirements", "phased"]
