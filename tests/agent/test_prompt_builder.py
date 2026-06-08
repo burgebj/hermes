@@ -508,6 +508,16 @@ class TestBuildContextFilesPrompt:
         assert "Ruff for linting" in result
         assert "Project Context" in result
 
+    def test_loads_agents_md_from_hermes_home_before_cwd(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes_home"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        (hermes_home / "AGENTS.md").write_text("Global gateway instructions.")
+        (tmp_path / "AGENTS.md").write_text("Project cwd instructions.")
+        result = build_context_files_prompt(cwd=str(tmp_path))
+        assert "Global gateway instructions." in result
+        assert "Project cwd instructions." not in result
+
     def test_loads_cursorrules(self, tmp_path):
         (tmp_path / ".cursorrules").write_text("Always use type hints.")
         result = build_context_files_prompt(cwd=str(tmp_path))

@@ -1450,18 +1450,20 @@ def _load_hermes_md(cwd_path: Path) -> str:
 
 
 def _load_agents_md(cwd_path: Path) -> str:
-    """AGENTS.md — top-level only (no recursive walk)."""
-    for name in ["AGENTS.md", "agents.md"]:
-        candidate = cwd_path / name
-        if candidate.exists():
-            try:
-                content = candidate.read_text(encoding="utf-8").strip()
-                if content:
-                    content = _scan_context_content(content, name)
-                    result = f"## {name}\n\n{content}"
-                    return _truncate_content(result, "AGENTS.md")
-            except Exception as e:
-                logger.debug("Could not read %s: %s", candidate, e)
+    """AGENTS.md — HERMES_HOME first, then cwd; no recursive walk."""
+    search_roots = [get_hermes_home(), cwd_path]
+    for root in search_roots:
+        for name in ["AGENTS.md", "agents.md"]:
+            candidate = root / name
+            if candidate.exists():
+                try:
+                    content = candidate.read_text(encoding="utf-8").strip()
+                    if content:
+                        content = _scan_context_content(content, name)
+                        result = f"## {name}\n\n{content}"
+                        return _truncate_content(result, "AGENTS.md")
+                except Exception as e:
+                    logger.debug("Could not read %s: %s", candidate, e)
     return ""
 
 
@@ -1516,7 +1518,7 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
 
     Priority (first found wins — only ONE project context type is loaded):
       1. .hermes.md / HERMES.md  (walk to git root)
-      2. AGENTS.md / agents.md   (cwd only)
+      2. AGENTS.md / agents.md   (HERMES_HOME first, then cwd)
       3. CLAUDE.md / claude.md   (cwd only)
       4. .cursorrules / .cursor/rules/*.mdc  (cwd only)
 
