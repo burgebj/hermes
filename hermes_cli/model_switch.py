@@ -1912,13 +1912,18 @@ def list_authenticated_providers(
             #   context-length overrides with the full live catalog.
             #   This is the Bifrost / aggregator-gateway case.
             # - Without an api_key but with an explicit ``models:`` list
-            #   (or top-level ``model:``), the user is narrowing a public
+            #   (2+ entries), the user is intentionally narrowing a public
             #   endpoint to a specific subset (e.g. ollama.com /v1/models
             #   returns 35 models but the user only wants 4). Preserve the
             #   explicit list and skip live discovery.
-            # - Without an api_key AND no explicit models, fall through to
-            #   live discovery so bare-endpoint custom providers (local
-            #   llama.cpp / Ollama servers) still appear populated.
+            # - Without an api_key and only the singular ``model:`` field
+            #   (1 entry), the user has not deliberately narrowed the
+            #   catalog. Probe live /v1/models so local Ollama / llama.cpp
+            #   endpoints show all available models, matching the CLI's
+            #   ``hermes model`` behaviour.
+            # - Without an api_key AND no explicit model or models, fall
+            #   through to live discovery so bare-endpoint custom providers
+            #   (local llama.cpp / Ollama servers) still appear populated.
             # - When discover_models: false is set, skip live discovery and
             #   keep the explicit ``models:`` list regardless of whether an
             #   api_key is present. This supports endpoints that expose a
@@ -1926,7 +1931,7 @@ def list_authenticated_providers(
             #   (parity with section 3's user ``providers:`` behaviour).
             should_probe = (
                 bool(api_url)
-                and (bool(api_key) or not grp["models"])
+                and (bool(api_key) or len(grp["models"]) <= 1)
                 and grp.get("discover_models", True)
             )
             if should_probe:
@@ -2021,3 +2026,4 @@ def list_picker_providers(
         filtered.append(p)
 
     return filtered
+
