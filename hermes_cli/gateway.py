@@ -7,10 +7,12 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 import asyncio
 import logging
 import os
+import plistlib
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
@@ -2136,6 +2138,278 @@ def get_launchd_plist_path() -> Path:
     return _launchd_user_home() / "Library" / "LaunchAgents" / f"{name}.plist"
 
 
+MACOS_APP_WRAPPER_DISPLAY_NAME = "Hermes Agent"
+MACOS_APP_WRAPPER_ENV_KEY = "HERMES_LAUNCHD_APP_WRAPPER"
+MACOS_APP_WRAPPER_SOURCE_INFO = "HermesPythonSource.plist"
+
+
+def get_launchd_bundle_identifier() -> str:
+    """Return the bundle identifier associated with the launchd gateway job."""
+    return get_launchd_label()
+
+
+def get_launchd_app_wrapper_path() -> Path:
+    """Return the macOS app bundle path used for the optional launchd wrapper."""
+    suffix = _profile_suffix()
+    bundle_name = (
+        f"{MACOS_APP_WRAPPER_DISPLAY_NAME} ({suffix}).app"
+        if suffix
+        else f"{MACOS_APP_WRAPPER_DISPLAY_NAME}.app"
+    )
+    return get_hermes_home() / "macos" / bundle_name
+
+
+def get_launchd_app_wrapper_executable_path() -> Path:
+    """Return the executable path inside the optional macOS app wrapper."""
+    return (
+        get_launchd_app_wrapper_path()
+        / "Contents"
+        / "MacOS"
+        / MACOS_APP_WRAPPER_DISPLAY_NAME
+    )
+
+
+def _python_home_from_path(python_path: str | Path | None = None, venv: Path | None = None) -> Path:
+    """Return the base Python distribution root for a venv/base executable."""
+    if venv is not None:
+        pyvenv_cfg = venv / "pyvenv.cfg"
+        if pyvenv_cfg.exists():
+            for line in pyvenv_cfg.read_text(encoding="utf-8", errors="ignore").splitlines():
+                key, sep, value = line.partition("=")
+                if sep and key.strip().lower() == "home" and value.strip():
+                    home = Path(value.strip()).expanduser()
+                    if home.name in {"bin", "Scripts"}:
+                        return home.parent
+                    return home
+    resolved = Path(python_path or get_python_path()).resolve()
+    return resolved.parent.parent
+
+
+def _venv_site_packages_path(venv: Path | None) -> Path | None:
+    """Return the best site-packages path for a virtualenv, if known."""
+    if venv is None:
+        return None
+    lib_dir = venv / "lib"
+    if lib_dir.exists():
+        candidates = sorted(lib_dir.glob("python*/site-packages"))
+        if candidates:
+            return candidates[0]
+    return venv / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+
+
+def _launchd_child_python_path(venv: Path | None) -> str:
+    """Return the real interpreter path child processes should use."""
+    if venv is not None:
+        candidate = venv / ("Scripts/python.exe" if is_windows() else "bin/python")
+        if candidate.exists():
+            return str(candidate)
+    return get_python_path()
+
+
+def _launchd_app_wrapper_pythonpath(venv: Path | None) -> str:
+    """Build a stable PYTHONPATH for the copied Python executable inside the app wrapper."""
+    parts: list[str] = []
+    site_packages = _venv_site_packages_path(venv)
+    if site_packages is not None:
+        parts.append(str(site_packages))
+    parts.append(str(PROJECT_ROOT))
+    return ":".join(dict.fromkeys(parts))
+
+
+def _launchd_app_wrapper_info() -> dict:
+    """Return Info.plist metadata for the optional macOS launchd app wrapper."""
+    from hermes_cli import __version__ as hermes_version
+
+    return {
+        "CFBundleIdentifier": get_launchd_bundle_identifier(),
+        "CFBundleName": MACOS_APP_WRAPPER_DISPLAY_NAME,
+        "CFBundleDisplayName": MACOS_APP_WRAPPER_DISPLAY_NAME,
+        "CFBundleExecutable": MACOS_APP_WRAPPER_DISPLAY_NAME,
+        "CFBundlePackageType": "APPL",
+        "CFBundleVersion": hermes_version,
+        "CFBundleShortVersionString": hermes_version,
+        # No Dock icon/window for this background helper when LaunchServices
+        # encounters it. launchd still executes the bundled binary directly.
+        "LSBackgroundOnly": True,
+    }
+
+
+def _launchd_app_wrapper_source_info(source_python: Path | None = None) -> dict:
+    """Return stable source metadata for deciding whether the wrapper is fresh."""
+    source = Path(source_python or get_python_path()).resolve()
+    stat = source.stat()
+    return {
+        "SourcePython": str(source),
+        "SourceSize": stat.st_size,
+        "SourceMTimeNs": stat.st_mtime_ns,
+    }
+
+
+def _launchd_app_wrapper_signature_is_valid(app_path: Path | None = None) -> bool:
+    """Return True when the macOS app wrapper has a valid code signature."""
+    target = app_path or get_launchd_app_wrapper_path()
+    try:
+        result = subprocess.run(
+            ["codesign", "--verify", "--deep", "--strict", str(target)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def launchd_app_wrapper_is_current() -> bool:
+    """Return True when the optional macOS app wrapper matches this install."""
+    app_path = get_launchd_app_wrapper_path()
+    executable_path = get_launchd_app_wrapper_executable_path()
+    info_path = app_path / "Contents" / "Info.plist"
+    source_info_path = app_path / "Contents" / "Resources" / MACOS_APP_WRAPPER_SOURCE_INFO
+    source_python = Path(get_python_path()).resolve()
+    if (
+        not executable_path.exists()
+        or not info_path.exists()
+        or not source_info_path.exists()
+        or not source_python.exists()
+    ):
+        return False
+    try:
+        info = plistlib.loads(info_path.read_bytes())
+        source_info = plistlib.loads(source_info_path.read_bytes())
+        expected_source_info = _launchd_app_wrapper_source_info(source_python)
+    except Exception:
+        return False
+    expected = _launchd_app_wrapper_info()
+    return (
+        all(info.get(key) == value for key, value in expected.items())
+        and all(source_info.get(key) == value for key, value in expected_source_info.items())
+        and _launchd_app_wrapper_signature_is_valid(app_path)
+    )
+
+
+def install_launchd_app_wrapper(force: bool = False) -> Path:
+    """Install/update the optional macOS app bundle used as launchd executable.
+
+    The bundle contains a *copy* of the active Python executable named
+    ``Hermes Agent``. launchd then starts that bundle executable instead of the
+    generic ``python3.13`` binary, giving macOS/TCC a Hermes-specific path and
+    bundle identity while still running Hermes through the existing venv.
+    """
+    app_path = get_launchd_app_wrapper_path()
+    if app_path.exists() and not force and launchd_app_wrapper_is_current():
+        return app_path
+
+    source_python = Path(get_python_path()).resolve()
+    if not source_python.exists():
+        raise FileNotFoundError(f"Python executable not found: {source_python}")
+    detected_venv = _detect_venv_dir()
+
+    app_parent = app_path.parent
+    app_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{app_path.name}.", dir=app_parent) as tmpdir:
+        staging_app_path = Path(tmpdir) / app_path.name
+        contents_dir = staging_app_path / "Contents"
+        macos_dir = contents_dir / "MacOS"
+        resources_dir = contents_dir / "Resources"
+        macos_dir.mkdir(parents=True, exist_ok=True)
+        resources_dir.mkdir(parents=True, exist_ok=True)
+        executable_path = macos_dir / get_launchd_app_wrapper_executable_path().name
+        shutil.copy2(source_python, executable_path)
+        executable_path.chmod(executable_path.stat().st_mode | 0o755)
+
+        info_path = contents_dir / "Info.plist"
+        info_path.write_bytes(plistlib.dumps(_launchd_app_wrapper_info(), sort_keys=False))
+        source_info_path = resources_dir / MACOS_APP_WRAPPER_SOURCE_INFO
+        source_info_path.write_bytes(
+            plistlib.dumps(_launchd_app_wrapper_source_info(source_python), sort_keys=False)
+        )
+
+        subprocess.run(
+            ["codesign", "--force", "--deep", "--sign", "-", str(staging_app_path)],
+            check=True,
+            timeout=30,
+        )
+        subprocess.run(
+            ["codesign", "--verify", "--deep", "--strict", str(staging_app_path)],
+            check=True,
+            timeout=30,
+        )
+        smoke_env = os.environ.copy()
+        smoke_env.update(
+            {
+                "PYTHONHOME": str(_python_home_from_path(source_python, detected_venv)),
+                "PYTHONPATH": _launchd_app_wrapper_pythonpath(detected_venv),
+                "PYTHONEXECUTABLE": _launchd_child_python_path(detected_venv),
+                "VIRTUAL_ENV": str(detected_venv) if detected_venv else "",
+                "HERMES_HOME": str(get_hermes_home().resolve()),
+                MACOS_APP_WRAPPER_ENV_KEY: "1",
+            }
+        )
+        if detected_venv:
+            smoke_env["PATH"] = f"{detected_venv / 'bin'}:{smoke_env.get('PATH', '')}"
+        subprocess.run(
+            [str(executable_path), "-c", "import encodings, sys; print(sys.executable)"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=smoke_env,
+        )
+
+        backup_path = app_parent / f".{app_path.name}.previous"
+        if backup_path.exists():
+            shutil.rmtree(backup_path)
+        try:
+            if app_path.exists():
+                app_path.rename(backup_path)
+            staging_app_path.rename(app_path)
+        except Exception:
+            if not app_path.exists() and backup_path.exists():
+                backup_path.rename(app_path)
+            raise
+        finally:
+            if backup_path.exists():
+                shutil.rmtree(backup_path)
+    return app_path
+
+
+def _installed_launchd_plist_uses_app_wrapper(plist_path: Path | None = None) -> bool:
+    """Return True when an installed launchd plist already targets the app wrapper."""
+    path = plist_path or get_launchd_plist_path()
+    if not path.exists():
+        return False
+    try:
+        data = plistlib.loads(path.read_bytes())
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    env = data.get("EnvironmentVariables") or {}
+    if env.get(MACOS_APP_WRAPPER_ENV_KEY) == "1":
+        return True
+    program = data.get("Program")
+    args = data.get("ProgramArguments") or []
+    first_arg = args[0] if args else None
+    app_exe = str(get_launchd_app_wrapper_executable_path())
+    return program == app_exe or first_arg == app_exe
+
+
+def _resolve_launchd_app_wrapper_mode(app_wrapper: bool | None = None) -> bool:
+    """Resolve target app-wrapper mode, preserving existing wrapper installs."""
+    if app_wrapper is not None:
+        return app_wrapper
+    return _installed_launchd_plist_uses_app_wrapper()
+
+
+def _drop_launchd_app_wrapper_python_env() -> None:
+    """Remove wrapper-only Python startup env so child processes inherit clean env."""
+    if os.environ.get(MACOS_APP_WRAPPER_ENV_KEY) == "1":
+        os.environ.pop("PYTHONHOME", None)
+        os.environ.pop("PYTHONPATH", None)
+        os.environ.pop("PYTHONEXECUTABLE", None)
+
+
 def _detect_venv_dir() -> Path | None:
     """Detect the active virtualenv directory.
 
@@ -3150,162 +3424,336 @@ def _launchd_fallback_to_detached(reason: str, *, exit_on_failure: bool = True) 
     return False
 
 
-def generate_launchd_plist() -> str:
-    python_path = get_python_path()
-    # Stable cwd anchor — never the volatile source checkout. See
-    # _stable_service_working_dir() for the rationale (same rot risk applies
-    # to launchd's WorkingDirectory as to systemd's).
-    working_dir = _stable_service_working_dir()
-    hermes_home = str(get_hermes_home().resolve())
+def _launchd_target() -> str:
+    return f"{_launchd_domain()}/{get_launchd_label()}"
+
+
+def _launchd_reload_pending_path(plist_path: Path | None = None) -> Path:
+    """Return the marker path used when a launchd plist reload was deferred."""
+    path = plist_path or get_launchd_plist_path()
+    return path.with_name(f"{path.name}.reload-pending")
+
+
+def _mark_launchd_reload_pending(plist_path: Path | None = None) -> None:
+    marker = _launchd_reload_pending_path(plist_path)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("launchd plist reload pending\n", encoding="utf-8")
+
+
+def _clear_launchd_reload_pending(plist_path: Path | None = None) -> None:
+    marker = _launchd_reload_pending_path(plist_path)
+    try:
+        marker.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _launchd_reload_is_pending(plist_path: Path | None = None) -> bool:
+    return _launchd_reload_pending_path(plist_path).exists()
+
+
+def _launchd_loaded_job_pid() -> int | None:
+    """Return the PID launchd has loaded for this gateway label, if known."""
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", _launchd_target()],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in (result.stdout or "").splitlines():
+        key, sep, value = line.strip().partition("=")
+        if sep and key.strip().lower() == "pid":
+            try:
+                pid = int(value.strip().rstrip(";"))
+            except ValueError:
+                return None
+            return pid if pid > 0 else None
+    return None
+
+
+def _reload_launchd_plist_now(plist_path: Path, label: str | None = None, *, check_bootstrap: bool = False) -> bool:
+    """Force launchd to re-read *plist_path* with bootout/bootstrap."""
+    target = f"{_launchd_domain()}/{label or get_launchd_label()}"
+    subprocess.run(["launchctl", "bootout", target], check=False, timeout=90)
+    result = subprocess.run(
+        ["launchctl", "bootstrap", _launchd_domain(), str(plist_path)],
+        check=check_bootstrap,
+        timeout=30,
+    )
+    if result.returncode == 0:
+        _clear_launchd_reload_pending(plist_path)
+        return True
+    print(f"⚠ launchd bootstrap failed with exit {result.returncode}; reload marker preserved")
+    return False
+
+
+def _is_running_inside_gateway_process_tree() -> bool:
+    """Return True when this command is executing under the live gateway process.
+
+    launchd ``bootout``/``kickstart -k`` kills the gateway process tree.  When a
+    tool subprocess invokes service management from inside that same tree, doing
+    the reload inline can kill the command before it has a chance to bootstrap
+    the updated plist again.
+    """
+    try:
+        from gateway.status import get_running_pid
+
+        pid = get_running_pid()
+    except Exception:
+        return False
+    if pid is None or not _is_pid_ancestor_of_current_process(pid):
+        return False
+    if is_macos():
+        launchd_pid = _launchd_loaded_job_pid()
+        if launchd_pid is not None and launchd_pid != pid:
+            return False
+    return True
+
+
+def _launchd_path_entry_exists(path: str) -> bool:
+    """Return True when a PATH entry exists and can be inherited by launchd."""
+    try:
+        return Path(path).exists()
+    except (OSError, ValueError):
+        return False
+
+
+def _launchd_logical_hermes_path(path: str | Path | None) -> Path | None:
+    """Map physical paths under HERMES_HOME back to the configured logical home."""
+    if path is None:
+        return None
+    hermes_home = get_hermes_home()
+    candidate = Path(path).expanduser()
+    candidate_paths = [candidate]
+    if not candidate.is_absolute():
+        candidate_paths.append(candidate.resolve())
+    try:
+        candidate_paths.append(candidate.resolve())
+    except OSError:
+        pass
+    home_paths = [hermes_home]
+    try:
+        home_paths.append(hermes_home.resolve())
+    except OSError:
+        pass
+    for candidate_path in candidate_paths:
+        for home_path in home_paths:
+            try:
+                relative = candidate_path.relative_to(home_path)
+            except ValueError:
+                continue
+            return hermes_home / relative
+    return candidate
+
+
+def _launchd_should_keep_inherited_path_entry(path: str) -> bool:
+    """Return True for inherited PATH entries worth preserving in launchd."""
+    entry = path.strip()
+    if not entry:
+        return False
+    lowered = entry.lower()
+    stale_markers = (
+        "/.codex/tmp/",
+        "/codex.system/bootstrap/",
+        "/applications/codex.app/",
+        "/opt/pkg/env/",
+        "/opt/pmk/env/",
+    )
+    if any(marker in lowered for marker in stale_markers):
+        return False
+    if entry == "/config" or entry.startswith("/config/"):
+        return False
+    if entry == "/share" or entry.startswith("/share/"):
+        return False
+    return _launchd_path_entry_exists(entry)
+
+
+def _append_launchd_path_entry(entries: list[str], path: str | Path | None) -> None:
+    """Append an existing launchd PATH entry once, preserving order."""
+    if path is None:
+        return
+    entry = str(path)
+    if _launchd_path_entry_exists(entry) and entry not in entries:
+        entries.append(entry)
+
+
+def generate_launchd_plist(app_wrapper: bool = False) -> str:
+    detected_venv = _detect_venv_dir()
+    launchd_project_root = _launchd_logical_hermes_path(PROJECT_ROOT) or PROJECT_ROOT
+    launchd_venv = _launchd_logical_hermes_path(detected_venv)
+    python_path = (
+        str(get_launchd_app_wrapper_executable_path())
+        if app_wrapper
+        else str(_launchd_logical_hermes_path(get_python_path()) or get_python_path())
+    )
+    # Preserve the configured logical home in the launchd environment. If
+    # HERMES_HOME points at a symlinked or synthetic path, resolving it here
+    # would silently replace the user-facing runtime path with its physical
+    # target.
+    hermes_home_path = get_hermes_home()
+    hermes_home = str(_launchd_logical_hermes_path(hermes_home_path) or hermes_home_path)
+    # Stable cwd anchor — prefer logical HERMES_HOME over the source checkout so
+    # launchd does not depend on a volatile worktree path.
+    working_dir = hermes_home if _launchd_path_entry_exists(hermes_home) else str(launchd_project_root)
     log_dir = get_hermes_home() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     label = get_launchd_label()
     profile_arg = _profile_arg(hermes_home)
-    # Build a sane PATH for the launchd plist.  launchd provides only a
-    # minimal default (/usr/bin:/bin:/usr/sbin:/sbin) which misses Homebrew,
-    # nvm, cargo, etc.  We prepend venv/bin and node_modules/.bin (matching
-    # the systemd unit), then capture the user's full shell PATH so every
-    # user-installed tool (node, ffmpeg, …) is reachable.
-    detected_venv = _detect_venv_dir()
-    venv_dir = str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
+    # Build a sane PATH for the launchd plist. launchd starts with only a
+    # minimal system PATH, while an interactive/dev environment may contain
+    # stale Codex/bootstrap entries. Prioritize Hermes' own venv and
+    # HERMES_HOME-local bin directories first, then keep only inherited entries
+    # that still exist.
+    venv_bin = str(launchd_venv / "bin") if launchd_venv else str(launchd_project_root / "venv" / "bin")
+    venv_dir = str(launchd_venv) if launchd_venv else str(launchd_project_root / "venv")
+    node_bin = str(launchd_project_root / "node_modules" / ".bin")
+    priority_dirs: list[str] = []
+    for candidate in (
+        venv_bin,
+        hermes_home_path / "bin",
+        hermes_home_path / ".go" / "bin",
+        node_bin,
+    ):
+        _append_launchd_path_entry(priority_dirs, candidate)
+
+    inherited_dirs = [
+        p for p in os.environ.get("PATH", "").split(":")
+        if _launchd_should_keep_inherited_path_entry(p)
+    ]
+
     # Resolve the directory containing the node binary (e.g. Homebrew, nvm)
     # so it's explicitly in PATH even if the user's shell PATH changes later.
-    priority_dirs = _build_service_path_dirs()
+    # Validate the resolved parent through the same stale-entry filter used for
+    # inherited PATH entries; otherwise a stale Codex/bootstrap node can sneak
+    # back into the launchd plist before the inherited PATH is filtered.
     resolved_node = shutil.which("node")
     if resolved_node:
         resolved_node_dir = str(Path(resolved_node).resolve().parent)
-        if resolved_node_dir not in priority_dirs:
-            priority_dirs.append(resolved_node_dir)
-    sane_path = ":".join(
-        dict.fromkeys(
-            priority_dirs + [p for p in os.environ.get("PATH", "").split(":") if p]
+        if _launchd_should_keep_inherited_path_entry(resolved_node_dir):
+            _append_launchd_path_entry(priority_dirs, resolved_node_dir)
+
+    system_fallback_dirs = ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    system_dirs = [p for p in system_fallback_dirs if _launchd_path_entry_exists(p)]
+    sane_path = ":".join(dict.fromkeys(priority_dirs + inherited_dirs + system_dirs))
+
+    environment = {
+        "PATH": sane_path,
+        "VIRTUAL_ENV": venv_dir,
+        "HERMES_HOME": hermes_home,
+    }
+    if app_wrapper:
+        environment.update(
+            {
+                "PYTHONHOME": str(_python_home_from_path(get_python_path(), detected_venv)),
+                "PYTHONPATH": _launchd_app_wrapper_pythonpath(detected_venv),
+                "PYTHONEXECUTABLE": _launchd_child_python_path(detected_venv),
+                MACOS_APP_WRAPPER_ENV_KEY: "1",
+            }
         )
-    )
 
     # Build ProgramArguments array, including --profile when using a named profile
-    prog_args = [
-        f"<string>{python_path}</string>",
-        "<string>-m</string>",
-        "<string>hermes_cli.main</string>",
-    ]
+    prog_args = [python_path, "-m", "hermes_cli.main"]
     if profile_arg:
-        for part in profile_arg.split():
-            prog_args.append(f"<string>{part}</string>")
-    prog_args.extend(
-        [
-            "<string>gateway</string>",
-            "<string>run</string>",
-            "<string>--replace</string>",
-        ]
-    )
-    prog_args_xml = "\n        ".join(prog_args)
+        prog_args.extend(profile_arg.split())
+    prog_args.extend(["gateway", "run", "--replace"])
 
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{label}</string>
+    plist_data = {
+        "Label": label,
+        "ProgramArguments": prog_args,
+        "WorkingDirectory": working_dir,
+        "EnvironmentVariables": environment,
+        "LimitLoadToSessionType": ["Aqua", "Background"],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "StandardOutPath": f"{log_dir}/gateway.log",
+        "StandardErrorPath": f"{log_dir}/gateway.error.log",
+    }
+    if app_wrapper:
+        plist_data["AssociatedBundleIdentifiers"] = get_launchd_bundle_identifier()
 
-    <key>ProgramArguments</key>
-    <array>
-        {prog_args_xml}
-    </array>
-    
-    <key>WorkingDirectory</key>
-    <string>{working_dir}</string>
-    
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>{sane_path}</string>
-        <key>VIRTUAL_ENV</key>
-        <string>{venv_dir}</string>
-        <key>HERMES_HOME</key>
-        <string>{hermes_home}</string>
-    </dict>
-
-    <key>LimitLoadToSessionType</key>
-    <array>
-        <string>Aqua</string>
-        <string>Background</string>
-    </array>
-    
-    <key>RunAtLoad</key>
-    <true/>
-    
-    <key>KeepAlive</key>
-    <true/>
-    
-    <key>StandardOutPath</key>
-    <string>{log_dir}/gateway.log</string>
-    
-    <key>StandardErrorPath</key>
-    <string>{log_dir}/gateway.error.log</string>
-</dict>
-</plist>
-"""
+    return plistlib.dumps(plist_data, sort_keys=False).decode("utf-8")
 
 
-def launchd_plist_is_current() -> bool:
+def launchd_plist_is_current(app_wrapper: bool | None = None) -> bool:
     """Check if the installed launchd plist matches the currently generated one."""
     plist_path = get_launchd_plist_path()
     if not plist_path.exists():
         return False
 
+    target_app_wrapper = _resolve_launchd_app_wrapper_mode(app_wrapper)
+    if target_app_wrapper and not launchd_app_wrapper_is_current():
+        return False
     installed = plist_path.read_text(encoding="utf-8")
-    expected = generate_launchd_plist()
-    return _normalize_launchd_plist_for_comparison(
-        installed
-    ) == _normalize_launchd_plist_for_comparison(expected)
+    expected = generate_launchd_plist(app_wrapper=target_app_wrapper)
+    return _normalize_launchd_plist_for_comparison(installed) == _normalize_launchd_plist_for_comparison(expected)
 
 
-def refresh_launchd_plist_if_needed() -> bool:
-    """Rewrite the installed launchd plist when the generated definition has changed.
-
-    Unlike systemd, launchd picks up plist changes on the next ``launchctl kill``/
-    ``launchctl kickstart`` cycle — no daemon-reload is needed. We still bootout/
-    bootstrap to make launchd re-read the updated plist immediately.
-    """
+def refresh_launchd_plist_if_needed(app_wrapper: bool | None = None) -> bool:
+    """Rewrite/reload the installed launchd plist when its definition changed."""
     plist_path = get_launchd_plist_path()
-    if not plist_path.exists() or launchd_plist_is_current():
+    if not plist_path.exists():
         return False
 
-    plist_path.write_text(generate_launchd_plist(), encoding="utf-8")
+    target_app_wrapper = _resolve_launchd_app_wrapper_mode(app_wrapper)
+    if target_app_wrapper and not launchd_app_wrapper_is_current():
+        install_launchd_app_wrapper(force=True)
+
     label = get_launchd_label()
-    # Bootout/bootstrap so launchd picks up the new definition
-    subprocess.run(
-        ["launchctl", "bootout", f"{_launchd_domain()}/{label}"],
-        check=False,
-        timeout=90,
-    )
-    subprocess.run(
-        ["launchctl", "bootstrap", _launchd_domain(), str(plist_path)],
-        check=False,
-        timeout=30,
-    )
-    print(
-        "↻ Updated gateway launchd service definition to match the current Hermes install"
-    )
+    reload_pending = _launchd_reload_is_pending(plist_path)
+    plist_current = launchd_plist_is_current(app_wrapper=target_app_wrapper)
+    if plist_current and not reload_pending:
+        return False
+
+    if not plist_current:
+        plist_path.write_text(generate_launchd_plist(app_wrapper=target_app_wrapper), encoding="utf-8")
+        reload_pending = True
+
+    if _is_running_inside_gateway_process_tree():
+        if reload_pending:
+            _mark_launchd_reload_pending(plist_path)
+        print("↻ Updated gateway launchd service definition to match the current Hermes install")
+        print("⚠ launchd reload deferred because this command is running inside the gateway process tree")
+        print("  Run 'hermes gateway start' from an external shell to make launchd re-read the plist")
+        return True
+
+    # Bootout/bootstrap so launchd picks up the new definition. This also
+    # consumes reload-pending markers from previous in-gateway refreshes.
+    _reload_launchd_plist_now(plist_path, label)
+    print("↻ Updated gateway launchd service definition to match the current Hermes install")
     return True
 
 
-def launchd_install(force: bool = False):
+def launchd_install(force: bool = False, app_wrapper: bool = False):
     plist_path = get_launchd_plist_path()
+    target_app_wrapper = app_wrapper or (
+        plist_path.exists() and not force and _installed_launchd_plist_uses_app_wrapper(plist_path)
+    )
+
+    if target_app_wrapper:
+        install_launchd_app_wrapper(force=force or not launchd_app_wrapper_is_current())
 
     if plist_path.exists() and not force:
-        if not launchd_plist_is_current():
+        if not launchd_plist_is_current(app_wrapper=target_app_wrapper):
             print(f"↻ Repairing outdated launchd service at: {plist_path}")
-            refresh_launchd_plist_if_needed()
+            refresh_launchd_plist_if_needed(app_wrapper=target_app_wrapper)
             print("✓ Service definition updated")
             return
         print(f"Service already installed at: {plist_path}")
+        if target_app_wrapper:
+            print(f"Using macOS app wrapper: {get_launchd_app_wrapper_path()}")
         print("Use --force to reinstall")
         return
 
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Installing launchd service to: {plist_path}")
-    plist_path.write_text(generate_launchd_plist())
+    if target_app_wrapper:
+        print(f"Using macOS app wrapper: {get_launchd_app_wrapper_path()}")
+    plist_path.write_text(generate_launchd_plist(app_wrapper=target_app_wrapper), encoding="utf-8")
 
     try:
         subprocess.run(
@@ -3354,12 +3802,13 @@ def launchd_start():
         print("↻ launchd plist missing; regenerating service definition")
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         plist_path.write_text(generate_launchd_plist(), encoding="utf-8")
+        if _is_running_inside_gateway_process_tree():
+            _mark_launchd_reload_pending(plist_path)
+            print("⚠ launchd bootstrap deferred because this command is running inside the gateway process tree")
+            print("  Run 'hermes gateway start' from an external shell to load the regenerated plist")
+            return
         try:
-            subprocess.run(
-                ["launchctl", "bootstrap", _launchd_domain(), str(plist_path)],
-                check=True,
-                timeout=30,
-            )
+            _reload_launchd_plist_now(plist_path, label, check_bootstrap=True)
             subprocess.run(
                 ["launchctl", "kickstart", f"{_launchd_domain()}/{label}"],
                 check=True,
@@ -3373,7 +3822,13 @@ def launchd_start():
         print("✓ Service started")
         return
 
-    refresh_launchd_plist_if_needed()
+    refreshed = refresh_launchd_plist_if_needed()
+    if _is_running_inside_gateway_process_tree():
+        if not refreshed:
+            print("✓ Gateway service is already running")
+        print("⚠ Not kickstarting launchd from inside the gateway process tree")
+        print("  Run 'hermes gateway start' from an external shell if launchd must be reloaded")
+        return
     try:
         subprocess.run(
             ["launchctl", "kickstart", f"{_launchd_domain()}/{label}"],
@@ -3490,6 +3945,8 @@ def _wait_for_gateway_exit(
 
 
 def launchd_restart():
+    if _installed_launchd_plist_uses_app_wrapper() and not launchd_app_wrapper_is_current():
+        install_launchd_app_wrapper(force=True)
     label = get_launchd_label()
     target = f"{_launchd_domain()}/{label}"
     drain_timeout = _get_restart_drain_timeout()
@@ -3634,6 +4091,8 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
     """
     _guard_official_docker_root_gateway()
     sys.path.insert(0, str(PROJECT_ROOT))
+
+    _drop_launchd_app_wrapper_python_env()
 
     # Detached Windows gateway runs must ignore console-control broadcasts
     # from sibling CLI processes, but foreground `hermes gateway run` still
@@ -6193,6 +6652,10 @@ def _gateway_command_inner(args):
         force = getattr(args, "force", False)
         system = getattr(args, "system", False)
         run_as_user = getattr(args, "run_as_user", None)
+        macos_app_wrapper = getattr(args, "macos_app_wrapper", False)
+        if macos_app_wrapper and not is_macos():
+            print_error("--macos-app-wrapper is only supported on macOS launchd services")
+            sys.exit(1)
         if is_termux():
             print("Gateway service installation is not supported on Termux.")
             print("Run manually: hermes gateway")
@@ -6220,7 +6683,7 @@ def _gateway_command_inner(args):
             if start_now:
                 systemd_start(system=system)
         elif is_macos():
-            launchd_install(force)
+            launchd_install(force=force, app_wrapper=macos_app_wrapper)
         elif is_windows():
             from hermes_cli import gateway_windows
 
