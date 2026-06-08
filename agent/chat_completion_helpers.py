@@ -104,6 +104,18 @@ def estimate_request_context_tokens(api_payload: Any) -> int:
 
 
 def _is_openai_codex_backend(agent) -> bool:
+    """Identify Codex-Responses backends that legitimately take >12s before
+    emitting their first SSE event on large prefills.
+
+    Includes:
+      * provider='openai-codex' (the canonical ChatGPT-account Codex path)
+      * chatgpt.com/backend-api/codex (same backend, different routing)
+      * provider='copilot' or api.githubcopilot.com (direct GitHub Copilot
+        on /v1/responses — same subscription/admission queue model;
+        large gpt-5.5 resumes can sit 30-60s waiting for the first byte;
+        the 12s TTFB watchdog was killing the stream before Copilot's
+        admission completed). See #34179.
+    """
     base_url_lower = str(getattr(agent, "_base_url_lower", "") or "")
     base_url_hostname = str(getattr(agent, "_base_url_hostname", "") or "")
     return (
@@ -112,6 +124,12 @@ def _is_openai_codex_backend(agent) -> bool:
             base_url_hostname == "chatgpt.com"
             and "/backend-api/codex" in base_url_lower
         )
+        # #34179: direct GitHub Copilot on /v1/responses also hits the same
+        # large-prefill admission queue. Treat as a codex-like backend so
+        # the TTFB exemption above HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS
+        # applies here too.
+        or getattr(agent, "provider", None) == "copilot"
+        or base_url_hostname == "api.githubcopilot.com"
     )
 
 
