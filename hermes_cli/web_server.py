@@ -510,6 +510,10 @@ _CATEGORY_MERGE: Dict[str, str] = {
     "prompt_caching": "agent",
     "goals": "agent",
     "updates": "general",
+    # `onboarding.profile_build` is the only schema-surfaced onboarding field
+    # (`onboarding.seen` is an internal latch dict, not a user setting), so fold
+    # it into the agent tab rather than spawning a one-field orphan category.
+    "onboarding": "agent",
     # Only `telegram.reactions` currently lives under telegram — fold it in
     # with the other messaging-platform config (discord) so it isn't an
     # orphan tab of one field.
@@ -790,6 +794,74 @@ def _probe_gateway_health() -> tuple[bool, dict | None]:
         except Exception:
             continue
     return False, None
+
+
+# Image MIME types this endpoint will serve. Extension-allowlisted so an
+# authenticated caller can't pull non-image files through it.
+_MEDIA_CONTENT_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".bmp": "image/bmp",
+    ".ico": "image/x-icon",
+}
+_MEDIA_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _media_serve_roots() -> list[Path]:
+    """Directories ``GET /api/media`` is allowed to read from.
+
+    Confined to where the agent and attach pipeline actually write media on the
+    gateway host — its images dir and cache subtree. This stops an authenticated
+    client from reading image-extension files anywhere on disk (e.g. a renamed
+    key or a screenshot outside the cache) merely because the suffix passes the
+    allowlist.
+    """
+    home = get_hermes_home()
+    roots = [home / "images", home / "screenshots", home / "cache"]
+    out: list[Path] = []
+    for root in roots:
+        try:
+            out.append(root.resolve())
+        except (OSError, RuntimeError):
+            continue
+    return out
+
+
+@app.get("/api/media")
+async def get_media(path: str):
+    """Return a gateway-local image file as a base64 data URL.
+
+    Lets remote clients (the desktop app over the network, or the web dashboard
+    in a browser) display images the agent wrote to *this* machine's filesystem
+    — they can't read the gateway's local disk directly.
+
+    Auth-gated by the session token like every other /api route. Restricted to
+    an image-extension allowlist, a size cap, AND the gateway's own media roots
+    (resolved, symlink-safe) so it can't be used to read arbitrary files.
+    """
+    try:
+        target = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    if target.suffix.lower() not in _MEDIA_CONTENT_TYPES:
+        raise HTTPException(status_code=415, detail="Unsupported media type")
+
+    roots = _media_serve_roots()
+    if not any(target == root or root in target.parents for root in roots):
+        raise HTTPException(status_code=403, detail="Path outside media roots")
+
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    if target.stat().st_size > _MEDIA_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File too large")
+
+    encoded = base64.b64encode(target.read_bytes()).decode("ascii")
+    return {"data_url": f"data:{_MEDIA_CONTENT_TYPES[target.suffix.lower()]};base64,{encoded}"}
 
 
 @app.get("/api/status")
@@ -1619,6 +1691,13 @@ async def get_action_status(name: str, lines: int = 200):
         exit_code = proc.poll()
         running = exit_code is None
         pid = proc.pid
+        if exit_code is not None:
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+            _ACTION_RESULTS[name] = {"exit_code": exit_code, "pid": pid}
+            _ACTION_PROCS.pop(name, None)
 
     return {
         "name": name,
@@ -3313,6 +3392,7 @@ def _write_platform_enabled(platform_id: str, enabled: bool) -> None:
 
 
 _TELEGRAM_ONBOARDING_DEFAULT_URL = "https://setup.hermes-agent.nousresearch.com"
+_TELEGRAM_ONBOARDING_USER_AGENT = f"HermesDashboard/{__version__}"
 _TELEGRAM_USER_ID_RE = re.compile(r"^\d+$")
 
 
@@ -3385,27 +3465,32 @@ def _telegram_onboarding_request_sync(
     body: dict[str, Any] | None = None,
     bearer_token: str | None = None,
 ) -> dict[str, Any]:
-    data = None
-    headers = {"Accept": "application/json"}
+    import httpx
+
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": _TELEGRAM_ONBOARDING_USER_AGENT,
+    }
+    request_kwargs: dict[str, Any] = {}
     if body is not None:
-        data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
+        request_kwargs["json"] = body
     if bearer_token:
         headers["Authorization"] = f"Bearer {bearer_token}"
 
-    request = urllib.request.Request(
-        f"{_telegram_onboarding_base_url()}{path}",
-        data=data,
-        headers=headers,
-        method=method,
-    )
+    url = f"{_telegram_onboarding_base_url()}{path}"
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            payload = response.read()
-    except urllib.error.HTTPError as exc:
-        payload = exc.read()
+        with httpx.Client(timeout=httpx.Timeout(10.0)) as client:
+            response = client.request(
+                method,
+                url,
+                headers=headers,
+                **request_kwargs,
+            )
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
         try:
-            parsed = json.loads(payload.decode("utf-8"))
+            parsed = exc.response.json()
         except Exception:
             parsed = {}
         error = str(parsed.get("error") or parsed.get("status") or "")
@@ -3413,10 +3498,15 @@ def _telegram_onboarding_request_sync(
             error,
             "Telegram setup service returned an error.",
         )
-        status_code = 404 if exc.code == 404 else 502
+        status_code = 404 if exc.response.status_code == 404 else 502
         if error in {"expired", "claimed"}:
             status_code = 410
         raise HTTPException(status_code=status_code, detail=detail) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Telegram setup service is unavailable. Try again shortly.",
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -3424,7 +3514,7 @@ def _telegram_onboarding_request_sync(
         ) from exc
 
     try:
-        parsed = json.loads(payload.decode("utf-8"))
+        parsed = response.json()
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -5380,6 +5470,7 @@ async def get_session_messages(session_id: str, profile: Optional[str] = None):
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
+        sid = db.resolve_resume_session_id(sid)
         messages = db.get_messages(sid)
         return {"session_id": sid, "messages": messages}
     finally:

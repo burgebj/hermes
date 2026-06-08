@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -52,6 +53,7 @@ def test_planned_restart_notification_pending_roundtrip(tmp_path, monkeypatch):
 async def test_restart_command_writes_notify_file(tmp_path, monkeypatch):
     """When /restart fires, the requester's routing info is persisted to disk."""
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(sys, "platform", "linux")
 
     runner, _adapter = make_restart_runner()
     runner.request_restart = MagicMock(return_value=True)
@@ -81,6 +83,7 @@ async def test_restart_command_writes_notify_file(tmp_path, monkeypatch):
 async def test_restart_command_uses_service_restart_under_systemd(tmp_path, monkeypatch):
     """Under systemd (INVOCATION_ID set), /restart uses via_service=True."""
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setenv("INVOCATION_ID", "abc123")
 
     runner, _adapter = make_restart_runner()
@@ -102,6 +105,7 @@ async def test_restart_command_uses_service_restart_under_systemd(tmp_path, monk
 async def test_restart_command_uses_detached_without_systemd(tmp_path, monkeypatch):
     """Without systemd, /restart uses the detached subprocess approach."""
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delenv("INVOCATION_ID", raising=False)
 
     runner, _adapter = make_restart_runner()
@@ -123,6 +127,7 @@ async def test_restart_command_uses_detached_without_systemd(tmp_path, monkeypat
 async def test_restart_command_preserves_thread_id(tmp_path, monkeypatch):
     """Thread ID is saved when the requester is in a threaded chat."""
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(sys, "platform", "linux")
 
     runner, _adapter = make_restart_runner()
     runner.request_restart = MagicMock(return_value=True)
@@ -153,6 +158,10 @@ async def test_restart_command_uses_atomic_json_writes_for_marker_files(tmp_path
     def _fake_atomic_json_write(path, payload, **kwargs):
         calls.append((Path(path).name, payload, kwargs))
 
+    # _handle_restart_command lives in gateway/slash_commands.py (extracted from
+    # run.py); it uses that module's top-level atomic_json_write import.
+    import gateway.slash_commands as gateway_slash
+    monkeypatch.setattr(gateway_slash, "atomic_json_write", _fake_atomic_json_write)
     monkeypatch.setattr(gateway_run, "atomic_json_write", _fake_atomic_json_write)
 
     runner, _adapter = make_restart_runner()
