@@ -150,3 +150,186 @@ def test_picker_path_falls_back_to_model_info_when_resolver_empty(monkeypatch):
     assert "1,050,000" in ctx_line, (
         f"resolver-empty path should fall back to ModelInfo, got: {ctx_line!r}"
     )
+
+
+
+def test_global_model_switch_persists_complete_runtime_state(monkeypatch):
+    """Regression for #25106: --global must persist base_url and api_mode."""
+    import cli as cli_mod
+
+    result = ModelSwitchResult(
+        success=True,
+        new_model="kimi-k2.6",
+        target_provider="kimi-coding",
+        provider_changed=True,
+        api_key="sk-kimi-test",
+        base_url="https://api.kimi.com/coding",
+        api_mode="anthropic_messages",
+        warning_message="",
+        provider_label="Kimi Coding",
+        resolved_via_alias=False,
+        capabilities=None,
+        model_info=None,
+        is_global=True,
+    )
+    saved = {}
+    monkeypatch.setattr(cli_mod, "_cprint", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.config.is_managed", lambda: False)
+    monkeypatch.setattr(
+        "hermes_cli.config.read_raw_config",
+        lambda: {"model": {"default": "old", "provider": "openrouter", "base_url": "https://openrouter.ai/api/v1"}},
+    )
+    monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: saved.update(cfg))
+
+    cli_mod.HermesCLI._apply_model_switch_result(_StubCLI(), result, True)
+
+    assert saved["model"]["default"] == "kimi-k2.6"
+    assert saved["model"]["provider"] == "kimi-coding"
+    assert saved["model"]["base_url"] == "https://api.kimi.com/coding"
+    assert saved["model"]["api_mode"] == "anthropic_messages"
+
+
+def test_global_model_switch_clears_stale_runtime_fields(monkeypatch):
+    """Regression for #25106: provider switches must remove stale runtime URL/mode."""
+    import cli as cli_mod
+
+    result = ModelSwitchResult(
+        success=True,
+        new_model="gpt-5.5",
+        target_provider="openai-codex",
+        provider_changed=True,
+        api_key="",
+        base_url="",
+        api_mode="",
+        warning_message="",
+        provider_label="Codex",
+        resolved_via_alias=False,
+        capabilities=None,
+        model_info=None,
+        is_global=True,
+    )
+    saved = {}
+    monkeypatch.setattr(cli_mod, "_cprint", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.config.is_managed", lambda: False)
+    monkeypatch.setattr(
+        "hermes_cli.config.read_raw_config",
+        lambda: {"model": {"default": "old", "provider": "custom", "base_url": "https://stale.example/v1", "api_mode": "anthropic_messages"}},
+    )
+    monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: saved.update(cfg))
+
+    cli_mod.HermesCLI._apply_model_switch_result(_StubCLI(), result, True)
+
+    assert saved["model"]["default"] == "gpt-5.5"
+    assert saved["model"]["provider"] == "openai-codex"
+    assert "base_url" not in saved["model"]
+    assert "api_mode" not in saved["model"]
+
+
+
+def test_global_model_switch_does_not_claim_saved_when_persistence_fails(monkeypatch):
+    """A failed --global write must not print the success confirmation."""
+    import cli as cli_mod
+
+    result = ModelSwitchResult(
+        success=True,
+        new_model="gpt-5.5",
+        target_provider="openai-codex",
+        provider_changed=True,
+        api_key="",
+        base_url="",
+        api_mode="",
+        warning_message="",
+        provider_label="Codex",
+        resolved_via_alias=False,
+        capabilities=None,
+        model_info=None,
+        is_global=True,
+    )
+    printed = []
+    monkeypatch.setattr(cli_mod, "_cprint", lambda s, *a, **k: printed.append(str(s)))
+    monkeypatch.setattr("hermes_cli.config.is_managed", lambda: False)
+    monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: {"model": {}})
+
+    def _raise(_cfg):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("hermes_cli.config.save_config", _raise)
+
+    cli_mod.HermesCLI._apply_model_switch_result(_StubCLI(), result, True)
+
+    assert any("Failed to save" in line for line in printed)
+    assert not any("Saved to config.yaml" in line for line in printed)
+
+
+def test_global_model_switch_does_not_claim_saved_in_managed_mode(monkeypatch):
+    """save_config() returns None in managed mode; detect that before success output."""
+    import cli as cli_mod
+
+    result = ModelSwitchResult(
+        success=True,
+        new_model="gpt-5.5",
+        target_provider="openai-codex",
+        provider_changed=True,
+        api_key="",
+        base_url="",
+        api_mode="",
+        warning_message="",
+        provider_label="Codex",
+        resolved_via_alias=False,
+        capabilities=None,
+        model_info=None,
+        is_global=True,
+    )
+    printed = []
+    monkeypatch.setattr(cli_mod, "_cprint", lambda s, *a, **k: printed.append(str(s)))
+    monkeypatch.setattr("hermes_cli.config.is_managed", lambda: True)
+    monkeypatch.setattr(
+        "hermes_cli.config.save_config",
+        lambda _cfg: (_ for _ in ()).throw(AssertionError("save_config should not be called")),
+    )
+
+    cli_mod.HermesCLI._apply_model_switch_result(_StubCLI(), result, True)
+
+    assert any("Failed to save" in line for line in printed)
+    assert not any("Saved to config.yaml" in line for line in printed)
+
+
+def test_typed_global_model_switch_persists_complete_runtime_state(monkeypatch):
+    """Regression for #25106: typed /model <name> --global uses the same helper."""
+    import cli as cli_mod
+
+    result = ModelSwitchResult(
+        success=True,
+        new_model="kimi-k2.6",
+        target_provider="kimi-coding",
+        provider_changed=True,
+        api_key="sk-kimi-test",
+        base_url="https://api.kimi.com/coding",
+        api_mode="anthropic_messages",
+        warning_message="",
+        provider_label="Kimi Coding",
+        resolved_via_alias=False,
+        capabilities=None,
+        model_info=None,
+        is_global=True,
+    )
+    saved = {}
+    monkeypatch.setattr(cli_mod, "_cprint", lambda *a, **k: None)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {})
+    monkeypatch.setattr("hermes_cli.config.get_compatible_custom_providers", lambda _cfg: [])
+    monkeypatch.setattr("hermes_cli.config.is_managed", lambda: False)
+    monkeypatch.setattr(
+        "hermes_cli.config.read_raw_config",
+        lambda: {"model": {"default": "old", "provider": "custom", "base_url": "https://stale.example/v1"}},
+    )
+    monkeypatch.setattr("hermes_cli.config.save_config", lambda cfg: saved.update(cfg))
+    monkeypatch.setattr("hermes_cli.model_switch.switch_model", lambda **_kwargs: result)
+    monkeypatch.setattr("hermes_cli.model_switch.resolve_display_context_length", lambda *a, **k: None)
+
+    cli_mod.HermesCLI._handle_model_switch(_StubCLI(), "/model kimi-k2.6 --provider kimi-coding --global")
+
+    assert saved["model"]["default"] == "kimi-k2.6"
+    assert saved["model"]["provider"] == "kimi-coding"
+    assert saved["model"]["base_url"] == "https://api.kimi.com/coding"
+    assert saved["model"]["api_mode"] == "anthropic_messages"
+    assert "agent" not in saved

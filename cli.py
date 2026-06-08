@@ -3021,9 +3021,9 @@ def _parse_skills_argument(skills: str | list[str] | tuple[str, ...] | None) -> 
     return parsed
 
 
-def save_config_value(key_path: str, value: any) -> bool:
+def save_config_value(key_path: str, value):
     """
-    Save a value to the active config file at the specified key path.
+    Save a configuration value to the config file.
     
     Respects the same lookup order as load_cli_config():
     1. ~/.hermes/config.yaml (user config - preferred, used if it exists)
@@ -3062,6 +3062,48 @@ def save_config_value(key_path: str, value: any) -> bool:
         return False
 
 
+def _persist_model_switch_runtime_state(result) -> bool:
+    """Persist the complete model runtime tuple for /model --global.
+
+    Read the raw on-disk config instead of load_config()'s merged defaults so a
+    model switch does not expand a minimal user config into a full generated
+    config file. Returns True only when a write was actually attempted and did
+    not raise.
+    """
+    try:
+        from hermes_cli.config import is_managed, read_raw_config, save_config
+
+        if is_managed():
+            logger.warning("Cannot persist model switch while Hermes config is managed")
+            return False
+
+        cfg = read_raw_config() or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        model_cfg = cfg.get("model")
+        if isinstance(model_cfg, dict):
+            model_cfg = dict(model_cfg)
+        elif isinstance(model_cfg, str) and model_cfg.strip():
+            model_cfg = {"default": model_cfg.strip()}
+        else:
+            model_cfg = {}
+
+        model_cfg["default"] = result.new_model
+        model_cfg["provider"] = result.target_provider
+        if result.base_url:
+            model_cfg["base_url"] = result.base_url
+        else:
+            model_cfg.pop("base_url", None)
+        if result.api_mode:
+            model_cfg["api_mode"] = result.api_mode
+        else:
+            model_cfg.pop("api_mode", None)
+        cfg["model"] = model_cfg
+        save_config(cfg)
+        return True
+    except Exception as exc:
+        logger.warning("Failed to persist model switch: %s", exc)
+        return False
 
 
 # ============================================================================
@@ -7992,10 +8034,10 @@ class HermesCLI:
         if result.warning_message:
             _cprint(f"    ⚠ {result.warning_message}")
         if persist_global:
-            save_config_value("model.default", result.new_model)
-            if result.provider_changed:
-                save_config_value("model.provider", result.target_provider)
-            _cprint("    Saved to config.yaml (--global)")
+            if _persist_model_switch_runtime_state(result):
+                _cprint("    Saved to config.yaml (--global)")
+            else:
+                _cprint("    ⚠ Failed to save to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")
 
@@ -8241,10 +8283,10 @@ class HermesCLI:
 
         # Persistence
         if persist_global:
-            save_config_value("model.default", result.new_model)
-            if result.provider_changed:
-                save_config_value("model.provider", result.target_provider)
-            _cprint("    Saved to config.yaml (--global)")
+            if _persist_model_switch_runtime_state(result):
+                _cprint("    Saved to config.yaml (--global)")
+            else:
+                _cprint("    ⚠ Failed to save to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")
 
