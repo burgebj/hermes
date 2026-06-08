@@ -329,3 +329,110 @@ class TestVideoToolsetRegistration:
         from toolsets import TOOLSETS
         assert "video" in TOOLSETS
         assert "video_analyze" in TOOLSETS["video"]["tools"]
+
+
+# ---------------------------------------------------------------------------
+# Anthropic protocol content block format
+# ---------------------------------------------------------------------------
+
+
+class TestVideoAnalyzeAnthropicFormat:
+    """Verify that Anthropic-protocol providers get input_video content blocks."""
+
+    def _run(self, coro):
+        return asyncio.get_event_loop().run_until_complete(coro)
+
+    def test_anthropic_provider_uses_input_video_format(self, tmp_path, monkeypatch):
+        """When provider is minimax-cn (Anthropic transport), content block
+        should be input_video with source.base64, not video_url."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\\x00" * 1024)
+
+        captured_kwargs = {}
+
+        async def capture_llm(**kwargs):
+            captured_kwargs.update(kwargs)
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "OK"
+            return mock_response
+
+        with patch("tools.vision_tools.async_call_llm", side_effect=capture_llm):
+            with patch("tools.vision_tools.extract_content_or_reasoning", return_value="OK"):
+                with patch("agent.auxiliary_client._read_main_provider", return_value="minimax-cn"):
+                    self._run(video_analyze_tool(str(video), "Describe this"))
+
+        messages = captured_kwargs["messages"]
+        content = messages[0]["content"]
+        assert len(content) == 2
+        assert content[0]["type"] == "text"
+
+        video_block = content[1]
+        assert video_block["type"] == "input_video"
+        assert "source" in video_block
+        assert video_block["source"]["type"] == "base64"
+        assert video_block["source"]["media_type"] == "video/mp4"
+        assert "data" in video_block["source"]
+        # Should be raw base64, not a data: URL
+        assert not video_block["source"]["data"].startswith("data:")
+
+    def test_openai_provider_uses_video_url_format(self, tmp_path, monkeypatch):
+        """When provider is openrouter (OpenAI-style), content block should
+        remain video_url with data: URL."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\\x00" * 1024)
+
+        captured_kwargs = {}
+
+        async def capture_llm(**kwargs):
+            captured_kwargs.update(kwargs)
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "OK"
+            return mock_response
+
+        with patch("tools.vision_tools.async_call_llm", side_effect=capture_llm):
+            with patch("tools.vision_tools.extract_content_or_reasoning", return_value="OK"):
+                with patch("agent.auxiliary_client._read_main_provider", return_value="openrouter"):
+                    self._run(video_analyze_tool(str(video), "Describe this"))
+
+        messages = captured_kwargs["messages"]
+        content = messages[0]["content"]
+        assert len(content) == 2
+        assert content[0]["type"] == "text"
+
+        video_block = content[1]
+        assert video_block["type"] == "video_url"
+        assert "video_url" in video_block
+        assert video_block["video_url"]["url"].startswith("data:video/mp4;base64,")
+
+    def test_anthropic_provider_detection_minimax(self):
+        """minimax provider should be detected as Anthropic protocol."""
+        from tools.vision_tools import _is_anthropic_protocol_provider
+        assert _is_anthropic_protocol_provider("minimax") is True
+
+    def test_anthropic_provider_detection_minimax_cn(self):
+        """minimax-cn provider should be detected as Anthropic protocol."""
+        from tools.vision_tools import _is_anthropic_protocol_provider
+        assert _is_anthropic_protocol_provider("minimax-cn") is True
+
+    def test_anthropic_provider_detection_anthropic(self):
+        """anthropic provider should be detected as Anthropic protocol."""
+        from tools.vision_tools import _is_anthropic_protocol_provider
+        assert _is_anthropic_protocol_provider("anthropic") is True
+
+    def test_openai_provider_not_anthropic(self):
+        """openai provider should NOT be detected as Anthropic protocol."""
+        from tools.vision_tools import _is_anthropic_protocol_provider
+        assert _is_anthropic_protocol_provider("openai") is False
+
+    def test_openrouter_provider_not_anthropic(self):
+        """openrouter provider should NOT be detected as Anthropic protocol."""
+        from tools.vision_tools import _is_anthropic_protocol_provider
+        assert _is_anthropic_protocol_provider("openrouter") is False
+
+    def test_empty_provider_not_anthropic(self):
+        """Empty provider should NOT be detected as Anthropic protocol."""
+        from tools.vision_tools import _is_anthropic_protocol_provider
+        assert _is_anthropic_protocol_provider("") is False
+        assert _is_anthropic_protocol_provider(None) is False

@@ -1261,6 +1261,31 @@ def _video_to_base64_data_url(video_path: Path, mime_type: Optional[str] = None)
     return f"data:{mime};base64,{encoded}"
 
 
+
+def _is_anthropic_protocol_provider(provider: str) -> bool:
+    """Check if a provider uses the Anthropic Messages API protocol.
+
+    Returns True for providers whose transport is ``anthropic_messages``
+    (e.g. ``anthropic``, ``minimax``, ``minimax-cn``, ``bedrock``).
+    """
+    if not isinstance(provider, str):
+        return False
+    p = provider.strip().lower()
+    if not p:
+        return False
+    try:
+        from hermes_cli.providers import get_provider
+        pdef = get_provider(p)
+        if pdef is not None:
+            return getattr(pdef, "transport", "") == "anthropic_messages"
+    except Exception:
+        pass
+    # Fallback: check known Anthropic-protocol provider names
+    return p in {"anthropic", "claude", "anthropic-direct",
+                 "minimax", "minimax-oauth", "minimax-cn",
+                 "bedrock"}
+
+
 async def _download_video(video_url: str, destination: Path, max_retries: int = 3) -> Path:
     """Download video from URL with SSRF protection and retry."""
     import asyncio
@@ -1416,6 +1441,38 @@ async def video_analyze_tool(
 
         debug_call_data["video_size_bytes"] = video_size_bytes
 
+        # Detect provider protocol to choose correct content block format.
+        # Anthropic Messages API expects ``input_video`` with raw base64 in
+        # ``source.data``, while OpenAI-style providers expect ``video_url``
+        # with a ``data:`` URL.
+        _use_anthropic_format = False
+        try:
+            from agent.auxiliary_client import _read_main_provider
+            _prov = _read_main_provider()
+            _use_anthropic_format = _is_anthropic_protocol_provider(_prov)
+        except Exception:
+            pass
+
+        if _use_anthropic_format:
+            # Anthropic Messages API format: input_video with raw base64
+            _raw_b64 = video_data_url.split(",", 1)[1] if "," in video_data_url else video_data_url
+            video_content_block = {
+                "type": "input_video",
+                "source": {
+                    "type": "base64",
+                    "media_type": detected_mime,
+                    "data": _raw_b64,
+                },
+            }
+        else:
+            # OpenAI / OpenRouter / Gemini format: video_url with data: URL
+            video_content_block = {
+                "type": "video_url",
+                "video_url": {
+                    "url": video_data_url,
+                },
+            }
+
         messages = [
             {
                 "role": "user",
@@ -1424,12 +1481,7 @@ async def video_analyze_tool(
                         "type": "text",
                         "text": user_prompt,
                     },
-                    {
-                        "type": "video_url",
-                        "video_url": {
-                            "url": video_data_url,
-                        },
-                    },
+                    video_content_block,
                 ],
             }
         ]
