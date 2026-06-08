@@ -115,6 +115,41 @@ def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str
     )
 
 
+def _flush_synthesized_final_to_stream(agent: Any, text: str) -> None:
+    """Push synthesized final text + close sentinel through ``stream_delta_callback``.
+
+    Used by recovery / fallback break sites where ``final_response`` was
+    assigned from text not (fully) streamed this turn (#31449).  Without this
+    flush the SSE writer drains an empty queue and emits a finish chunk with
+    zero content delta, indistinguishable from a crash for Open WebUI clients.
+
+    The close sentinel is best-effort and runs in a ``finally`` so it still
+    fires when ``callback(text)`` raises — guaranteeing the SSE writer can
+    drain.  Both emit and close are guarded individually so a single bad
+    callback can't break the surrounding turn-exit flow.
+    """
+    callback = getattr(agent, "stream_delta_callback", None)
+    if not callback or not text:
+        return
+    try:
+        try:
+            callback(text)
+        except Exception:
+            logger.debug(
+                "stream_delta_callback raised while emitting synthesized "
+                "final text",
+                exc_info=True,
+            )
+    finally:
+        try:
+            callback(None)
+        except Exception:
+            logger.debug(
+                "stream_delta_callback raised while closing stream",
+                exc_info=True,
+            )
+
+
 def _ra():
     """Lazy reference to ``run_agent`` so callers can patch
     ``run_agent.handle_function_call`` / ``run_agent._set_interrupt`` /
@@ -3837,6 +3872,11 @@ def run_conversation(
                             "as final response"
                         )
                         final_response = _recovered
+                        # Push the recovered text through the streaming
+                        # callback so SSE/TUI clients see it before the
+                        # finish chunk lands (#31449, mirrors the
+                        # guardrail-halt site in #31448).
+                        _flush_synthesized_final_to_stream(agent, final_response)
                         agent._response_was_previewed = True
                         break
 
@@ -3863,6 +3903,11 @@ def run_conversation(
                         # poisoned the conversation history.  Just use the
                         # fallback text as the final response and break.
                         final_response = agent._strip_think_blocks(fallback).strip()
+                        # Push the prior-turn content through the streaming
+                        # callback so SSE/TUI clients see it before the
+                        # finish chunk lands (#31449, mirrors the
+                        # guardrail-halt site in #31448).
+                        _flush_synthesized_final_to_stream(agent, final_response)
                         agent._response_was_previewed = True
                         break
 
