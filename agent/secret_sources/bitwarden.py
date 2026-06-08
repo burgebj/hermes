@@ -494,7 +494,21 @@ def fetch_bitwarden_secrets(
             "`hermes secrets bitwarden setup`."
         )
 
-    secrets, warnings = _run_bws_list(bws, access_token, project_id, server_url)
+    try:
+        secrets, warnings = _run_bws_list(bws, access_token, project_id, server_url)
+    except RuntimeError:
+        # Live BWS call failed (DNS, transient network outage, etc.).
+        # Fall back to a stale disk cache if one exists — better to start
+        # with slightly old secrets than no secrets at all.  Pass
+        # ``float("inf")`` as TTL so any cached entry counts as fresh.
+        stale = _read_disk_cache(cache_key, float("inf"), home_path)
+        if stale is not None:
+            _CACHE[cache_key] = stale
+            return stale.secrets, [
+                "warning: BWS network call failed; using stale disk cache"
+            ]
+        raise  # No stale cache available — propagate the original error.
+
     entry = _CachedFetch(secrets=secrets, fetched_at=time.time())
     _CACHE[cache_key] = entry
     if use_cache:
