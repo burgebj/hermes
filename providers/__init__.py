@@ -34,6 +34,7 @@ import importlib
 import importlib.util
 import logging
 import sys
+import threading
 from pathlib import Path
 
 from providers.base import OMIT_TEMPERATURE, ProviderProfile  # noqa: F401
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 _REGISTRY: dict[str, ProviderProfile] = {}
 _ALIASES: dict[str, str] = {}
 _discovered = False
+_discover_lock = threading.Lock()
 
 # Repo-root ``plugins/model-providers/`` — populated at discovery time.
 _BUNDLED_PLUGINS_DIR = (
@@ -151,41 +153,45 @@ def _discover_providers() -> None:
     global _discovered
     if _discovered:
         return
-    _discovered = True
+    with _discover_lock:
+        if _discovered:
+            return
 
-    # 1. Bundled plugins — shipped with hermes-agent.
-    if _BUNDLED_PLUGINS_DIR.is_dir():
-        for child in sorted(_BUNDLED_PLUGINS_DIR.iterdir()):
-            if not child.is_dir() or child.name.startswith(("_", ".")):
-                continue
-            _import_plugin_dir(child, "bundled")
+        # 1. Bundled plugins — shipped with hermes-agent.
+        if _BUNDLED_PLUGINS_DIR.is_dir():
+            for child in sorted(_BUNDLED_PLUGINS_DIR.iterdir()):
+                if not child.is_dir() or child.name.startswith(("_", ".")):
+                    continue
+                _import_plugin_dir(child, "bundled")
 
-    # 2. User plugins — under $HERMES_HOME/plugins/model-providers/<name>/.
-    #    These can override any bundled profile of the same name (last-writer-wins
-    #    in register_provider()).
-    user_dir = _user_plugins_dir()
-    if user_dir is not None:
-        for child in sorted(user_dir.iterdir()):
-            if not child.is_dir() or child.name.startswith(("_", ".")):
-                continue
-            _import_plugin_dir(child, "user")
+        # 2. User plugins — under $HERMES_HOME/plugins/model-providers/<name>/.
+        #    These can override any bundled profile of the same name (last-writer-wins
+        #    in register_provider()).
+        user_dir = _user_plugins_dir()
+        if user_dir is not None:
+            for child in sorted(user_dir.iterdir()):
+                if not child.is_dir() or child.name.startswith(("_", ".")):
+                    continue
+                _import_plugin_dir(child, "user")
 
-    # 3. Legacy single-file profiles at providers/<name>.py. Kept for
-    #    back-compat — if someone drops a ``providers/foo.py`` into an
-    #    editable install, it still works without the plugin layout.
-    try:
-        import pkgutil
+        # 3. Legacy single-file profiles at providers/<name>.py. Kept for
+        #    back-compat — if someone drops a ``providers/foo.py`` into an
+        #    editable install, it still works without the plugin layout.
+        try:
+            import pkgutil
 
-        import providers as _pkg
+            import providers as _pkg
 
-        for _importer, modname, _ispkg in pkgutil.iter_modules(_pkg.__path__):
-            if modname.startswith("_") or modname == "base":
-                continue
-            try:
-                importlib.import_module(f"providers.{modname}")
-            except ImportError as exc:
-                logger.warning(
-                    "Failed to import legacy provider module %s: %s", modname, exc
-                )
-    except Exception:
-        pass
+            for _importer, modname, _ispkg in pkgutil.iter_modules(_pkg.__path__):
+                if modname.startswith("_") or modname == "base":
+                    continue
+                try:
+                    importlib.import_module(f"providers.{modname}")
+                except ImportError as exc:
+                    logger.warning(
+                        "Failed to import legacy provider module %s: %s", modname, exc
+                    )
+        except Exception:
+            pass
+
+        _discovered = True

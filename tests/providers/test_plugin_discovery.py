@@ -9,6 +9,8 @@ Verifies that:
 from __future__ import annotations
 
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -153,3 +155,71 @@ def test_general_plugin_manager_skips_model_provider_kind(tmp_path, monkeypatch)
     # No import means the module must NOT be in the plugins list as a loaded one.
     # We check that the general loader didn't crash and didn't raise from the
     # broken __init__.py.
+
+
+class TestDiscoverProvidersToctouRace:
+    """Regression tests for the TOCTOU race in _discover_providers().
+
+    Before the fix, _discovered was set to True before the discovery work
+    ran, so a second thread could enter _discover_providers(), see
+    _discovered=False, then race the first thread and observe a partially
+    populated registry (or observe _discovered=True with an empty registry
+    because the flag was published before the work finished).
+    """
+
+    def test_concurrent_calls_consistent(self, monkeypatch):
+        """50 threads calling _discover_providers() concurrently must all
+        observe the same final _discovered state with no torn reads."""
+        import providers as prov_mod
+
+        monkeypatch.setattr(prov_mod, "_discovered", False)
+        monkeypatch.setattr(prov_mod, "_REGISTRY", {})
+        monkeypatch.setattr(prov_mod, "_ALIASES", {})
+
+        n = 50
+        barrier = threading.Barrier(n)
+        results: list[bool] = []
+        lock = threading.Lock()
+
+        def worker():
+            barrier.wait()
+            prov_mod._discover_providers()
+            with lock:
+                results.append(prov_mod._discovered)
+
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            futures = [ex.submit(worker) for _ in range(n)]
+            for f in futures:
+                f.result()
+
+        assert all(results), "Every thread must see _discovered=True after discovery"
+        assert len(results) == n
+
+    def test_flag_set_after_registry_populated(self, monkeypatch):
+        """_discovered must not become True before the registry work completes.
+
+        We interpose on _import_plugin_dir to record whether _discovered was
+        already True when the first plugin was being imported — if so the
+        flag was published too early.
+        """
+        import providers as prov_mod
+
+        monkeypatch.setattr(prov_mod, "_discovered", False)
+        monkeypatch.setattr(prov_mod, "_REGISTRY", {})
+        monkeypatch.setattr(prov_mod, "_ALIASES", {})
+
+        flag_during_import: list[bool] = []
+        original_import = prov_mod._import_plugin_dir
+
+        def spying_import(plugin_dir, source):
+            flag_during_import.append(prov_mod._discovered)
+            return original_import(plugin_dir, source)
+
+        monkeypatch.setattr(prov_mod, "_import_plugin_dir", spying_import)
+        prov_mod._discover_providers()
+
+        # If any plugin directory was found, the flag must have been False
+        # during its import (flag set last, after all work).
+        assert all(
+            not v for v in flag_during_import
+        ), "_discovered was True during plugin import — flag published too early"
