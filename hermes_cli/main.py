@@ -425,6 +425,7 @@ _apply_profile_override()
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.config import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
+from tools.environments.local import hermes_subprocess_env
 
 load_hermes_dotenv(project_env=PROJECT_ROOT / ".env")
 
@@ -1495,7 +1496,7 @@ def _ensure_tui_node() -> None:
                 "-c",
                 f'source "{helper}" >&2 && ensure_node >&2 && command -v node',
             ],
-            env={**os.environ, "HERMES_HOME": hermes_home},
+            env={**hermes_subprocess_env(inherit_credentials=False), "HERMES_HOME": hermes_home},
             capture_output=True,
             text=True,
             check=False,
@@ -1618,7 +1619,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env={**os.environ, "CI": "1"},
+            env={**hermes_subprocess_env(inherit_credentials=False), "CI": "1"},
         )
         if result.returncode != 0:
             combined = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
@@ -1800,7 +1801,10 @@ def _launch_tui(
 
     import tempfile
 
-    env = os.environ.copy()
+    # TUI needs provider credentials for model calls, but still must flow
+    # through the central helper so Tier-1 secrets (GitHub auth, gateway
+    # tokens, infra secrets) never propagate to the Node subprocess.
+    env = hermes_subprocess_env(inherit_credentials=True)
     active_session_fd, active_session_file = tempfile.mkstemp(
         prefix="hermes-tui-active-session-", suffix=".json"
     )
@@ -1892,7 +1896,7 @@ def _launch_tui(
         _tokens.append(f"--max-old-space-size={_resolve_tui_heap_mb()}")
     env["NODE_OPTIONS"] = " ".join(_tokens)
     # HERMES_TUI_RESUME is an internal hand-off from the Python wrapper to the
-    # Ink app.  Because we start from os.environ.copy(), an exported/stale value
+    # Ink app.  Because we start from the parent environment, an exported/stale value
     # in the user's shell would otherwise make a plain `hermes --tui` try to
     # resume a non-existent session and leave the UI at "error: session not
     # found" with no live session.  Only forward a resume id that argparse
@@ -8183,7 +8187,8 @@ def _update_via_zip(args):
     if not uv_bin:
         uv_bin = _ensure_uv_for_termux(pip_cmd)
     if uv_bin:
-        uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
+        uv_env = hermes_subprocess_env(inherit_credentials=False)
+        uv_env["VIRTUAL_ENV"] = str(PROJECT_ROOT / "venv")
         if _is_termux_env(uv_env):
             uv_env.pop("PYTHONPATH", None)
             uv_env.pop("PYTHONHOME", None)

@@ -270,6 +270,7 @@ class _CuaDriverSession:
         from contextlib import AsyncExitStack
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
+        from tools.environments.local import hermes_subprocess_env
 
         if not cua_driver_binary_available():
             raise RuntimeError(cua_driver_install_hint())
@@ -277,7 +278,7 @@ class _CuaDriverSession:
         params = StdioServerParameters(
             command=_CUA_DRIVER_CMD,
             args=_CUA_DRIVER_ARGS,
-            env={**os.environ},
+            env=hermes_subprocess_env(inherit_credentials=False),
         )
         stack = AsyncExitStack()
         read, write = await stack.enter_async_context(stdio_client(params))

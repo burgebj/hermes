@@ -31,6 +31,7 @@ from hermes_cli.nous_subscription import (
 from hermes_cli.nous_account import format_nous_portal_entitlement_message
 from tools.tool_backend_helpers import fal_key_is_configured
 from utils import base_url_hostname, is_truthy_value
+from tools.environments.local import hermes_subprocess_env
 
 logger = logging.getLogger(__name__)
 
@@ -603,7 +604,8 @@ def _pip_install(
     (or the last failure for the caller to inspect).
     """
     venv_root = Path(sys.executable).parent.parent
-    uv_env = {**os.environ, "VIRTUAL_ENV": str(venv_root)}
+    uv_env = hermes_subprocess_env(inherit_credentials=False)
+    uv_env["VIRTUAL_ENV"] = str(venv_root)
 
     uv_bin = shutil.which("uv")
     if uv_bin:
@@ -625,7 +627,7 @@ def _pip_install(
         # Probe for pip; bootstrap via ensurepip if missing (uv venv lacks it).
         probe = subprocess.run(
             pip_cmd + ["--version"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=15, env=uv_env,
         )
         if probe.returncode != 0:
             raise FileNotFoundError("pip not in venv")
@@ -633,7 +635,7 @@ def _pip_install(
         try:
             subprocess.run(
                 [sys.executable, "-m", "ensurepip", "--upgrade", "--default-pip"],
-                capture_output=True, text=True, timeout=120, check=True,
+                capture_output=True, text=True, timeout=120, check=True, env=uv_env,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             # Synthesize a result so callers see a clean failure path.
@@ -644,7 +646,7 @@ def _pip_install(
 
     return subprocess.run(
         pip_cmd + ["install", *args],
-        capture_output=capture_output, text=True, timeout=timeout,
+        capture_output=capture_output, text=True, timeout=timeout, env=uv_env,
     )
 
 
