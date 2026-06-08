@@ -1,0 +1,5 @@
+name: lcm
+version: 1.0.0
+description: "LCM — self-hosted long-term context memory with auto-capture, hybrid search (BM25 + vector), cross-encoder reranking, and multiple embedding providers (Ollama, OpenAI, Azure, Bedrock)."
+pip_dependencies:
+  - httpx
