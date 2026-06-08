@@ -1369,7 +1369,13 @@ class SignalAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
 
     async def _stop_typing_indicator(self, chat_id: str) -> None:
-        """Stop a typing indicator loop for a chat."""
+        """Stop a typing indicator loop for a chat.
+
+        Cancels the local refresh task *and* sends an explicit ``sendTyping``
+        stop request to signal-cli so that remote Signal clients clear their
+        "typing…" / "writing…" bubble immediately instead of waiting for the
+        normal timeout to expire.
+        """
         task = self._typing_tasks.pop(chat_id, None)
         if task:
             task.cancel()
@@ -1377,6 +1383,28 @@ class SignalAdapter(BasePlatformAdapter):
                 await task
             except asyncio.CancelledError:
                 pass
+
+        # Tell signal-cli to clear the typing indicator on remote clients.
+        # Best-effort: swallow failures (e.g. signal-cli offline, chat_id
+        # unresolved) so that cleanup never raises.
+        try:
+            params: Dict[str, Any] = {
+                "account": self.account,
+                "stop": True,
+            }
+            if chat_id.startswith("group:"):
+                params["groupId"] = chat_id[6:]
+            else:
+                params["recipient"] = [await self._resolve_recipient(chat_id)]
+            await self._rpc(
+                "sendTyping",
+                params,
+                rpc_id="typing-stop",
+                log_failures=False,
+            )
+        except Exception:
+            pass
+
         # Reset per-chat typing backoff state so the next agent turn starts
         # fresh rather than inheriting a cooldown from a prior conversation.
         self._typing_failures.pop(chat_id, None)

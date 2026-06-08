@@ -1016,6 +1016,77 @@ class TestSignalTypingBackoff:
         assert "+155****4567" not in adapter._typing_failures
         assert "+155****4567" not in adapter._typing_skip_until
 
+    @pytest.mark.asyncio
+    async def test_stop_typing_indicator_sends_stop_signal_to_signal_cli(
+        self, monkeypatch
+    ):
+        """_stop_typing_indicator must send sendTyping(stop=True) so that
+        remote Signal clients clear their typing bubble immediately."""
+        adapter = _make_signal_adapter(monkeypatch)
+        # Pre-populate recipient cache to avoid listContacts RPC in _resolve_recipient
+        adapter._recipient_uuid_by_number["+155****4567"] = "+155****4567"
+        rpc_calls = []
+
+        async def _capture_rpc(method, params, rpc_id=None, *, log_failures=True):
+            rpc_calls.append({"method": method, "params": dict(params)})
+            return {"ok": True}
+
+        adapter._rpc = _capture_rpc
+
+        await adapter._stop_typing_indicator("+155****4567")
+
+        # Must have sent exactly one sendTyping stop RPC
+        stop_calls = [c for c in rpc_calls if c["method"] == "sendTyping"]
+        assert len(stop_calls) == 1
+        assert stop_calls[0]["params"]["stop"] is True
+        assert "account" in stop_calls[0]["params"]
+        assert "recipient" in stop_calls[0]["params"]
+        assert isinstance(stop_calls[0]["params"]["recipient"], list)
+
+    @pytest.mark.asyncio
+    async def test_stop_typing_indicator_sends_stop_for_group(self, monkeypatch):
+        """Group chats must use groupId instead of recipient."""
+        adapter = _make_signal_adapter(monkeypatch)
+        rpc_calls = []
+
+        async def _capture_rpc(method, params, rpc_id=None, *, log_failures=True):
+            rpc_calls.append({"method": method, "params": dict(params)})
+            return {"ok": True}
+
+        adapter._rpc = _capture_rpc
+
+        await adapter._stop_typing_indicator("group:abc123")
+
+        stop_calls = [c for c in rpc_calls if c["method"] == "sendTyping"]
+        assert len(stop_calls) == 1
+        assert stop_calls[0]["params"]["stop"] is True
+        assert stop_calls[0]["params"]["groupId"] == "abc123"
+        assert "recipient" not in stop_calls[0]["params"]
+
+    @pytest.mark.asyncio
+    async def test_stop_typing_indicator_stop_failure_does_not_raise(
+        self, monkeypatch
+    ):
+        """If the stop RPC fails (e.g. signal-cli offline), cleanup must
+        not raise — the typing state should still be cleared."""
+        adapter = _make_signal_adapter(monkeypatch)
+        # Pre-populate recipient cache to avoid listContacts RPC
+        adapter._recipient_uuid_by_number["+155****4567"] = "+155****4567"
+
+        async def _fail_rpc(method, params, rpc_id=None, *, log_failures=True):
+            raise ConnectionError("signal-cli offline")
+
+        adapter._rpc = _fail_rpc
+        adapter._typing_failures["+155****4567"] = 3
+        adapter._typing_skip_until["+155****4567"] = 999.0
+
+        # Must not raise despite RPC failure
+        await adapter._stop_typing_indicator("+155****4567")
+
+        # Backoff state must still be cleared
+        assert "+155****4567" not in adapter._typing_failures
+        assert "+155****4567" not in adapter._typing_skip_until
+
 
 # ---------------------------------------------------------------------------
 # Reply quote extraction
