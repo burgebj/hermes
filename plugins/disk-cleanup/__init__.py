@@ -70,19 +70,24 @@ def _drain(task_id: str, session_id: str) -> Set[str]:
 
 
 def _attempt_track(path_str: str, task_id: str, session_id: str) -> None:
-    """Best-effort auto-track. Never raises."""
+    """Best-effort auto-track. Never raises.
+
+    Terminal output can contain paths owned by other service users (for example
+    OpenClaw backup/cache paths).  The cleanup hook should ignore unreadable or
+    out-of-scope paths, not surface PermissionError through the plugin manager.
+    """
     try:
         p = Path(path_str).expanduser()
-    except Exception:
+        if not p.exists():
+            return
+        category = dg.guess_category(p)
+        if category is None:
+            return
+        newly = dg.track(str(p), category, silent=True)
+        if newly:
+            _record_track(task_id, session_id, p, category)
+    except (OSError, ValueError):
         return
-    if not p.exists():
-        return
-    category = dg.guess_category(p)
-    if category is None:
-        return
-    newly = dg.track(str(p), category, silent=True)
-    if newly:
-        _record_track(task_id, session_id, p, category)
 
 
 def _extract_paths_from_write_file(args: Dict[str, Any]) -> Set[str]:
@@ -222,7 +227,7 @@ def _fmt_summary(summary: Dict[str, Any]) -> str:
 
 def _handle_slash(raw_args: str) -> Optional[str]:
     argv = raw_args.strip().split()
-    if not argv or argv[0] in {"help", "-h", "--help"}:
+    if not argv or argv[0] in ("help", "-h", "--help"):
         return _HELP_TEXT
 
     sub = argv[0]

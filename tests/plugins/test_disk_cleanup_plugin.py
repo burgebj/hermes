@@ -127,6 +127,27 @@ class TestGuessCategory:
         # Even though it matches test_* pattern, logs/ is excluded.
         assert dg.guess_category(p) is None
 
+    def test_skips_profile_project_tests(self, _isolate_env):
+        dg = _load_lib()
+        p = _isolate_env / "profiles" / "coach" / "coach-data" / "tests" / "test_coach_memory.py"
+        p.parent.mkdir(parents=True)
+        p.write_text("x")
+        assert dg.guess_category(p) is None
+
+    def test_skips_maintenance_worktree_tests(self, _isolate_env):
+        dg = _load_lib()
+        p = _isolate_env / "maintenance" / "hermes-worktrees" / "candidate" / "tests" / "test_disk_cleanup.py"
+        p.parent.mkdir(parents=True)
+        p.write_text("x")
+        assert dg.guess_category(p) is None
+
+    def test_skips_scripts_tree_tests(self, _isolate_env):
+        dg = _load_lib()
+        p = _isolate_env / "scripts" / "test_helper.py"
+        p.parent.mkdir(parents=True)
+        p.write_text("x")
+        assert dg.guess_category(p) is None
+
     def test_cron_subtree_categorised(self, _isolate_env):
         dg = _load_lib()
         # Only files under ``cron/output/`` are disposable run artifacts.
@@ -433,6 +454,24 @@ class TestPostToolCallHook:
         tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
         data = json.loads(tracked_file.read_text())
         assert any(Path(i["path"]) == p.resolve() for i in data)
+
+    def test_terminal_permission_denied_path_is_ignored(self, _isolate_env, monkeypatch):
+        pi = _load_plugin_init()
+        unreadable = _isolate_env / "test_unreadable.py"
+        unreadable.write_text("x")
+
+        def raise_permission(_path):
+            raise PermissionError("permission denied")
+
+        monkeypatch.setattr(pi.dg, "guess_category", raise_permission)
+        pi._on_post_tool_call(
+            tool_name="terminal",
+            args={"command": "true"},
+            result=f"artifact {unreadable}\n",
+            task_id="tperm", session_id="sperm",
+        )
+        tracked_file = _isolate_env / "disk-cleanup" / "tracked.json"
+        assert not tracked_file.exists() or tracked_file.read_text().strip() == "[]"
 
     def test_ignores_unrelated_tool(self, _isolate_env):
         pi = _load_plugin_init()

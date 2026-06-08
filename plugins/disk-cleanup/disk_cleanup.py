@@ -535,6 +535,10 @@ def guess_category(path: Path) -> Optional[str]:
             "disk-cleanup", "logs", "memories", "sessions", "config.yaml",
             "skills", "plugins", ".env", "USER.md", "MEMORY.md", "SOUL.md",
             "auth.json", "hermes-agent",
+            # Persistent project/profile trees can contain real source files named
+            # test_*.py.  The cleanup plugin only owns throwaway artifacts, not
+            # durable repo/profile code.
+            "profiles", "maintenance", "scripts", "backups", "lsp",
         }:
             return None
         if top == "cron" or top == "cronjobs":
