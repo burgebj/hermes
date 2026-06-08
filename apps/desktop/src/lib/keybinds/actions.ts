@@ -82,7 +82,12 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   // ⌘\ — the backslash reads like a mirror line flipping the layout.
   { id: 'view.flipPanes', category: 'view', defaults: ['mod+\\'] },
   { id: 'appearance.toggleMode', category: 'view', defaults: ['shift+x'] },
-  { id: 'keybinds.openPanel', category: 'view', defaults: ['mod+/'] }
+  { id: 'keybinds.openPanel', category: 'view', defaults: ['mod+/'] },
+
+  // ── Voice ────────────────────────────────────────────────────────────────
+  // Push-to-talk toggle. Shipped unbound to avoid colliding with mod+b
+  // (view.toggleSidebar); user assigns a combo in the shortcuts panel.
+  { id: 'voice.toggleRecord', category: 'view', defaults: [] }
 ]
 
 export const KEYBIND_ACTION_IDS: readonly string[] = KEYBIND_ACTIONS.map(action => action.id)

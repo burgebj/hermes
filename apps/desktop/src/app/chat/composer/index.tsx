@@ -1325,6 +1325,15 @@ export function ChatBar({
     pendingResponse
   })
 
+  // Push-to-talk: the voice.toggleRecord keybind (use-keybinds.ts) dispatches
+  // this event; flip voice mode exactly as the mic button does.
+  useEffect(() => {
+    const onToggle = () => setVoiceConversationActive(active => !active)
+    window.addEventListener('hermes:voice-toggle-record', onToggle)
+
+    return () => window.removeEventListener('hermes:voice-toggle-record', onToggle)
+  }, [])
+
   const contextMenu = (
     <ContextMenu
       onInsertText={insertText}
