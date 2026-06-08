@@ -25,6 +25,7 @@ from hermes_constants import (
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
 from tui_gateway.transport import (
+    FanoutTransport,
     StdioTransport,
     Transport,
     bind_transport,
@@ -208,6 +209,58 @@ sys.stdout = sys.stderr
 _stdio_transport = StdioTransport(lambda: _real_stdout, _stdout_lock)
 
 
+def _session_has_live_transport(session: dict | None) -> bool:
+    if not session or session.get("_finalized"):
+        return False
+    transport = session.get("transport")
+    if isinstance(transport, FanoutTransport):
+        return transport.has_transports(excluding={id(_stdio_transport)})
+    return transport is not None and transport is not _stdio_transport
+
+
+def _attach_session_transport(session: dict | None, transport: Transport | None) -> None:
+    if not session or transport is None:
+        return
+    current = session.get("transport")
+    if current is transport:
+        return
+    if isinstance(current, FanoutTransport):
+        current.attach(transport)
+        return
+    if current is None or current is _stdio_transport:
+        session["transport"] = transport
+        return
+    fanout = FanoutTransport(current)
+    fanout.attach(transport)
+    session["transport"] = fanout
+
+
+def _detach_session_transport(session: dict | None, transport: Transport | None) -> bool:
+    if not session or transport is None:
+        return False
+    current = session.get("transport")
+    if current is transport:
+        session["transport"] = _stdio_transport
+        return True
+    if isinstance(current, FanoutTransport) and current.detach(transport):
+        if not current.has_transports():
+            session["transport"] = _stdio_transport
+        return True
+    return False
+
+
+def _detach_transport_from_sessions(transport: Transport | None) -> list[str]:
+    if transport is None:
+        return []
+    detached: list[str] = []
+    with _sessions_lock:
+        snapshot = list(_sessions.items())
+    for sid, session in snapshot:
+        if _detach_session_transport(session, transport):
+            detached.append(sid)
+    return detached
+
+
 class _SlashWorker:
     """Persistent HermesCLI subprocess for slash commands."""
 
@@ -383,16 +436,17 @@ def _teardown_session(session: dict | None) -> None:
 def _ws_session_is_orphaned(session: dict | None) -> bool:
     """True if a WS session has no live transport and no in-flight turn.
 
-    After ``handle_ws`` detaches a disconnected client it points the session
-    at ``_stdio_transport``. In the dashboard's in-process gateway there is no
-    real stdio peer reading those frames, so a session left on the stdio
-    transport (and not mid-turn) is genuinely orphaned and safe to reap.
+    After ``handle_ws`` detaches a disconnected client the session may either
+    fall back to ``_stdio_transport`` or keep a fanout with other live clients.
+    In the dashboard's in-process gateway there is no real stdio peer reading
+    those frames, so only sessions with no live non-stdio transport are safe
+    to reap.
     """
     if not session or session.get("_finalized"):
         return False
     if session.get("running"):
         return False
-    return session.get("transport") is _stdio_transport
+    return not _session_has_live_transport(session)
 
 
 def _schedule_ws_orphan_reap(sid: str) -> None:
@@ -3524,8 +3578,7 @@ def _live_session_payload(
     with session["history_lock"]:
         if cols is not None:
             session["cols"] = cols
-        if transport is not None:
-            session["transport"] = transport
+        _attach_session_transport(session, transport)
         if touch:
             session["last_active"] = time.time()
         history = list(session.get("display_history_prefix") or []) + list(
@@ -3584,7 +3637,12 @@ def _(rid, params: dict) -> dict:
 
     return _ok(
         rid,
-        _live_session_payload(sid, session, touch=True),
+        _live_session_payload(
+            sid,
+            session,
+            touch=True,
+            transport=current_transport() or _stdio_transport,
+        ),
     )
 
 
@@ -4346,11 +4404,11 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
-    # Re-bind to the current client transport for this request. This keeps
-    # streaming events on the active websocket even if an earlier disconnect
-    # or fallback moved the session transport to stdio.
+    # Attach the current client transport for this request. Session events fan
+    # out to every live client attached to this session instead of letting the
+    # newest client steal the stream from earlier clients.
     if (t := current_transport()) is not None:
-        session["transport"] = t
+        _attach_session_transport(session, t)
     with session["history_lock"]:
         if session.get("running"):
             return _err(rid, 4009, "session busy")
