@@ -55,3 +55,17 @@ class TestContextFileCwd:
     def test_configured_dir_when_terminal_cwd_set(self, monkeypatch, tmp_path):
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         assert _captured_context_cwd(_make_agent()) == tmp_path
+
+    def test_steer_note_is_resolved_when_prompt_is_built(self):
+        agent = _make_agent(valid_tool_names=["terminal"])
+
+        with (
+            patch("run_agent.load_soul_md", return_value=""),
+            patch("run_agent.build_nous_subscription_prompt", return_value=""),
+            patch("run_agent.build_environment_hints", return_value=""),
+            patch("run_agent.build_context_files_prompt", return_value=""),
+            patch("agent.prompt_builder.STEER_CHANNEL_NOTE", "LAZY_STEER_NOTE"),
+        ):
+            parts = build_system_prompt_parts(agent)
+
+        assert "LAZY_STEER_NOTE" in parts["stable"]
