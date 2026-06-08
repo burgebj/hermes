@@ -203,12 +203,48 @@ def _get_capability_backend(capability: str) -> str:
 
     Reads ``web.{capability}_backend`` from config; if set and available,
     uses it. Otherwise falls through to the shared ``_get_backend()``.
+
+    ``_is_backend_available`` only knows the built-in backends. A backend
+    provided by a plugin registers in the web provider registry but is absent
+    from that hardcoded list, so an explicitly configured plugin backend is
+    honored here too — as long as it actually supports this capability.
+    Without this, ``extract_backend: <plugin>`` would be silently dropped in
+    favor of ``web.backend`` (often a search-only backend, producing a
+    dead-end "search-only" error at extract time).
     """
     cfg = _load_web_config()
     specific = (cfg.get(f"{capability}_backend") or "").lower().strip()
-    if specific and _is_backend_available(specific):
+    if specific and (
+        _is_backend_available(specific)
+        or _registered_provider_supports(specific, capability)
+    ):
         return specific
     return _get_backend()
+
+
+def _registered_provider_supports(backend: str, capability: str) -> bool:
+    """True when *backend* is a registered, available web provider that
+    supports *capability*.
+
+    Lets plugin-provided backends be selected via ``web.{capability}_backend``
+    without being added to the built-in ``_is_backend_available`` list. The
+    ``is_available()`` gate is required so a registered-but-unconfigured
+    backend (e.g. ``exa`` with no API key) does NOT silently win over the
+    configured ``web.backend`` fallback — matching the availability filter the
+    registry's own active-provider resolution applies.
+    """
+    try:
+        from agent.web_search_registry import get_provider
+        provider = get_provider(backend)
+        if provider is None or not provider.is_available():
+            return False
+        if capability == "extract":
+            return bool(provider.supports_extract())
+        if capability == "search":
+            return bool(provider.supports_search())
+        return False
+    except Exception:
+        return False
 
 
 def _is_backend_available(backend: str) -> bool:
@@ -990,13 +1026,22 @@ async def web_extract_tool(
 
             provider = _wsp_get_provider(backend) if backend else None
             if provider is None or not provider.supports_extract():
-                # When the configured name IS registered but doesn't support
-                # extract (search-only providers like brave-free / ddgs /
-                # searxng), surface that as a typed "search-only" error
-                # rather than silently switching backends. When the name
-                # isn't registered at all (typo / uninstalled plugin), fall
-                # through to the active-provider walk.
-                if provider is not None and not provider.supports_extract():
+                # The pre-selected backend is missing or search-only (e.g.
+                # brave-free / ddgs / searxng, or a search-only fallback the
+                # legacy pre-selector chose when web.backend points at one).
+                # Before failing, consult the registry's active extract
+                # provider — an explicitly configured extract backend
+                # (including plugin-provided ones) resolves here even when the
+                # pre-selector picked a search-only backend. This avoids a
+                # dead-end error when a working extract backend is configured
+                # (see issue #32698).
+                search_only = provider is not None and not provider.supports_extract()
+                # get_active_extract_provider() only ever returns an
+                # extract-capable provider, so no re-check is needed here.
+                registry_provider = get_active_extract_provider()
+                if registry_provider is not None:
+                    provider = registry_provider
+                elif search_only:
                     return json.dumps(
                         {
                             "success": False,
@@ -1004,20 +1049,21 @@ async def web_extract_tool(
                                 f"{provider.display_name} is a search-only "
                                 "backend and cannot extract URL content. "
                                 "Set web.extract_backend to firecrawl, "
-                                "tavily, exa, or parallel."
+                                "tavily, exa, or parallel, or an "
+                                "extract-compatible backend."
                             ),
                         },
                         ensure_ascii=False,
                     )
-                provider = get_active_extract_provider()
-                if provider is None:
+                else:
                     return json.dumps(
                         {
                             "success": False,
                             "error": (
                                 "No web extract provider configured. "
                                 "Set web.extract_backend to firecrawl, "
-                                "tavily, exa, or parallel."
+                                "tavily, exa, or parallel, or an "
+                                "extract-compatible backend."
                             ),
                         },
                         ensure_ascii=False,
