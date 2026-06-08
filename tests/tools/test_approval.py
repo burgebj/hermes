@@ -59,6 +59,37 @@ class TestDetectDangerousRm:
         assert "delete" in desc.lower()
 
 
+class TestDenylistShellEscapeBypass:
+    """Regression: shell-level encodings of a blocked keyword must not slip
+    past the denylist. bash removes backslash/quote escapes and performs
+    command substitution before exec, so ``r\\m``, ``r''m``, ``$(echo rm)``
+    and backticks all run ``rm`` while evading a literal regex on the raw
+    string.
+    """
+
+    BYPASSES = [
+        r"r\m -rf /home/victim",
+        "r''m -rf /home/victim",
+        "$(echo rm) -rf /home/victim",
+        "`echo rm` -rf /home/victim",
+    ]
+
+    def test_escaped_rm_is_still_detected(self):
+        from tools.approval import detect_hardline_command
+
+        for cmd in self.BYPASSES:
+            is_dangerous, _, _ = detect_dangerous_command(cmd)
+            assert is_dangerous is True, f"denylist bypass not caught: {cmd!r}"
+        # the hardline root-delete guard must also survive escaping
+        is_hardline, _ = detect_hardline_command(r"r\m -rf /")
+        assert is_hardline is True
+
+    def test_benign_commands_not_false_flagged(self):
+        for cmd in ["ls -la", 'echo "hello world"', "git status", "cat file.txt"]:
+            is_dangerous, _, _ = detect_dangerous_command(cmd)
+            assert is_dangerous is False, f"false positive on benign command: {cmd!r}"
+
+
 class TestDetectDangerousSudo:
     def test_shell_via_c_flag(self):
         is_dangerous, key, desc = detect_dangerous_command("bash -c 'echo pwned'")

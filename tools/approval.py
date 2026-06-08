@@ -12,6 +12,7 @@ import contextvars
 import logging
 import os
 import re
+import shlex
 import sys
 import threading
 import time
@@ -323,10 +324,10 @@ def detect_hardline_command(command: str) -> tuple:
     Returns:
         (is_hardline, description) or (False, None)
     """
-    normalized = _normalize_command_for_detection(command).lower()
-    for pattern_re, description in HARDLINE_PATTERNS_COMPILED:
-        if pattern_re.search(normalized):
-            return (True, description)
+    for candidate in _detection_candidates(command):
+        for pattern_re, description in HARDLINE_PATTERNS_COMPILED:
+            if pattern_re.search(candidate):
+                return (True, description)
     return (False, None)
 
 
@@ -544,17 +545,49 @@ def _normalize_command_for_detection(command: str) -> str:
     return command
 
 
+def _detection_candidates(command: str) -> list:
+    """Return normalised forms of a command to match the denylist against.
+
+    The regex denylist matches a raw string, but bash performs backslash and
+    quote removal plus command substitution *before* executing, so shell-level
+    encodings of a blocked keyword (``r\\m``, ``r''m``, ``$(echo rm)``,
+    backticks) slip past a literal regex.  We additionally match against forms
+    with those encodings neutralised.  This only ever *adds* detections -- it
+    never suppresses an existing match -- so it cannot create a new bypass.
+
+    Note: bash parameter-expansion substitution (e.g. ``${0/x/r}m``) cannot be
+    resolved statically without invoking a shell and is not covered here; the
+    robust long-term fix is structural argv parsing of the executed command.
+    """
+    base = _normalize_command_for_detection(command).lower()
+    candidates = [base]
+    # Unwrap command substitution so $(echo rm) / `echo rm` expose the keyword.
+    unwrapped = re.sub(r"\$\(([^()]*)\)", r" \1 ", base)
+    unwrapped = re.sub(r"`([^`]*)`", r" \1 ", unwrapped)
+    for cand in (base, unwrapped):
+        # shlex (POSIX) removes backslash escapes and empty-quote splits:
+        # r\m -> rm, r''m -> rm.
+        try:
+            tokens = shlex.split(cand)
+        except ValueError:
+            tokens = None
+        if tokens:
+            joined = " ".join(tokens)
+            if joined not in candidates:
+                candidates.append(joined)
+    return candidates
+
+
 def detect_dangerous_command(command: str) -> tuple:
     """Check if a command matches any dangerous patterns.
 
     Returns:
         (is_dangerous, pattern_key, description) or (False, None, None)
     """
-    command_lower = _normalize_command_for_detection(command).lower()
-    for pattern_re, description in DANGEROUS_PATTERNS_COMPILED:
-        if pattern_re.search(command_lower):
-            pattern_key = description
-            return (True, pattern_key, description)
+    for candidate in _detection_candidates(command):
+        for pattern_re, description in DANGEROUS_PATTERNS_COMPILED:
+            if pattern_re.search(candidate):
+                return (True, description, description)
     return (False, None, None)
 
 
