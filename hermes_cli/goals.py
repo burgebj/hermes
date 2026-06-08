@@ -60,12 +60,19 @@ DEFAULT_JUDGE_MAX_TOKENS = 4096
 _JUDGE_RESPONSE_SNIPPET_CHARS = 4000
 # After this many consecutive judge *parse* failures (empty output / non-JSON),
 # the loop auto-pauses and points the user at the goal_judge config. API /
-# transport errors do NOT count toward this — those are transient. This guards
-# against small models (e.g. deepseek-v4-flash) that cannot follow the strict
-# JSON reply contract; without it the loop runs until the turn budget is
-# exhausted with every reply shaped like `judge returned empty response` or
-# `judge reply was not JSON`.
+# transport errors do NOT count toward this — those are tracked separately via
+# consecutive_api_errors. This guards against small models (e.g.
+# deepseek-v4-flash) that cannot follow the strict JSON reply contract; without
+# it the loop runs until the turn budget is exhausted with every reply shaped
+# like `judge returned empty response` or `judge reply was not JSON`.
 DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES = 3
+
+# After this many consecutive judge *API/transport* errors (network timeouts,
+# 429 rate limits, provider outages), the loop auto-pauses so the user is
+# alerted instead of silently cycling until the turn budget is exhausted. This
+# prevents the spam described in #27585 where the agent has already produced a
+# terminal response but the broken judge keeps returning ``continue``.
+DEFAULT_MAX_CONSECUTIVE_API_ERRORS = 5
 
 
 CONTINUATION_PROMPT_TEMPLATE = (
@@ -153,6 +160,7 @@ class GoalState:
     last_reason: Optional[str] = None
     paused_reason: Optional[str] = None       # why we auto-paused (budget, etc.)
     consecutive_parse_failures: int = 0       # judge-output parse failures in a row
+    consecutive_api_errors: int = 0          # judge API/transport errors in a row
     # User-added criteria appended mid-loop via the /subgoal command.
     # When non-empty the judge prompt and continuation prompt both
     # include them so the agent works toward them and the judge factors
@@ -181,6 +189,7 @@ class GoalState:
             last_reason=data.get("last_reason"),
             paused_reason=data.get("paused_reason"),
             consecutive_parse_failures=int(data.get("consecutive_parse_failures", 0) or 0),
+            consecutive_api_errors=int(data.get("consecutive_api_errors", 0) or 0),
             subgoals=subgoals,
         )
 
@@ -374,47 +383,50 @@ def judge_goal(
     *,
     timeout: float = DEFAULT_JUDGE_TIMEOUT,
     subgoals: Optional[List[str]] = None,
-) -> Tuple[str, str, bool]:
+) -> Tuple[str, str, bool, bool]:
     """Ask the auxiliary model whether the goal is satisfied.
 
-    Returns ``(verdict, reason, parse_failed)`` where verdict is ``"done"``,
-    ``"continue"``, or ``"skipped"`` (when the judge couldn't be reached).
+    Returns ``(verdict, reason, parse_failed, api_error)`` where verdict is
+    ``"done"``, ``"continue"``, or ``"skipped"`` (when the judge couldn't be
+    reached).
 
     ``parse_failed`` is True only when the judge call succeeded but its output
-    was unusable (empty or non-JSON). API/transport errors return False — they
-    are transient and should fail-open silently. Callers use this flag to
-    auto-pause after N consecutive parse failures (see
-    ``DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES``).
+    was unusable (empty or non-JSON). API/transport errors return False.
+
+    ``api_error`` is True when the judge call itself failed (network timeout,
+    429, provider outage, etc.). Callers use this flag to auto-pause after N
+    consecutive API errors (see ``DEFAULT_MAX_CONSECUTIVE_API_ERRORS``).
 
     ``subgoals`` is an optional list of user-added criteria (from
     ``/subgoal``) that the judge must also factor into its DONE/CONTINUE
     decision. When non-empty the prompt switches to the with-subgoals
     template; otherwise behavior is identical to the original judge.
 
-    This is deliberately fail-open: any error returns ``("continue", "...", False)``
-    so a broken judge doesn't wedge progress — the turn budget and the
-    consecutive-parse-failures auto-pause are the backstops.
+    This is deliberately fail-open: any error returns
+    ``("continue", "...", False, True)`` so a broken judge doesn't wedge
+    progress — the turn budget, consecutive-parse-failures, and
+    consecutive-api-errors auto-pauses are the backstops.
     """
     if not goal.strip():
-        return "skipped", "empty goal", False
+        return "skipped", "empty goal", False, False
     if not last_response.strip():
         # No substantive reply this turn — almost certainly not done yet.
-        return "continue", "empty response (nothing to evaluate)", False
+        return "continue", "empty response (nothing to evaluate)", False, False
 
     try:
         from agent.auxiliary_client import get_auxiliary_extra_body, get_text_auxiliary_client
     except Exception as exc:
         logger.debug("goal judge: auxiliary client import failed: %s", exc)
-        return "continue", "auxiliary client unavailable", False
+        return "continue", "auxiliary client unavailable", False, True
 
     try:
         client, model = get_text_auxiliary_client("goal_judge")
     except Exception as exc:
         logger.debug("goal judge: get_text_auxiliary_client failed: %s", exc)
-        return "continue", "auxiliary client unavailable", False
+        return "continue", "auxiliary client unavailable", False, True
 
     if client is None or not model:
-        return "continue", "no auxiliary client configured", False
+        return "continue", "no auxiliary client configured", False, True
 
     # Build the prompt — pick the with-subgoals variant when applicable.
     clean_subgoals = [s.strip() for s in (subgoals or []) if s and s.strip()]
@@ -450,7 +462,7 @@ def judge_goal(
         )
     except Exception as exc:
         logger.info("goal judge: API call failed (%s) — falling through to continue", exc)
-        return "continue", f"judge error: {type(exc).__name__}", False
+        return "continue", f"judge error: {type(exc).__name__}", False, True
 
     try:
         raw = resp.choices[0].message.content or ""
@@ -460,7 +472,7 @@ def judge_goal(
     done, reason, parse_failed = _parse_judge_response(raw)
     verdict = "done" if done else "continue"
     logger.info("goal judge: verdict=%s reason=%s", verdict, _truncate(reason, 120))
-    return verdict, reason, parse_failed
+    return verdict, reason, parse_failed, False
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -652,7 +664,7 @@ class GoalManager:
         state.turns_used += 1
         state.last_turn_at = time.time()
 
-        verdict, reason, parse_failed = judge_goal(
+        verdict, reason, parse_failed, api_error = judge_goal(
             state.goal, last_response, subgoals=state.subgoals or None
         )
         state.last_verdict = verdict
@@ -665,6 +677,15 @@ class GoalManager:
             state.consecutive_parse_failures += 1
         else:
             state.consecutive_parse_failures = 0
+
+        # Track consecutive judge API/transport errors. Reset when the judge
+        # call succeeds (api_error=False). This prevents the spam described
+        # in #27585 where a broken judge keeps returning "continue" on every
+        # API error, causing the agent to repeat its terminal response.
+        if api_error:
+            state.consecutive_api_errors += 1
+        else:
+            state.consecutive_api_errors = 0
 
         if verdict == "done":
             state.status = "done"
@@ -705,6 +726,30 @@ class GoalManager:
                     "      provider: openrouter\n"
                     "      model: google/gemini-3-flash-preview\n"
                     "Then /goal resume to continue."
+                ),
+            }
+
+        # Auto-pause when the judge API is unreachable N turns in a row.
+        # This prevents the spam loop described in #27585: the agent has
+        # already produced a terminal response but the judge API keeps
+        # failing, so the loop keeps queuing continuation prompts.
+        if state.consecutive_api_errors >= DEFAULT_MAX_CONSECUTIVE_API_ERRORS:
+            state.status = "paused"
+            state.paused_reason = (
+                f"judge API unreachable {state.consecutive_api_errors} turns in a row"
+            )
+            save_goal(self.session_id, state)
+            return {
+                "status": "paused",
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "continue",
+                "reason": reason,
+                "message": (
+                    f"⏸ Goal paused — the judge API has been unreachable for "
+                    f"{state.consecutive_api_errors} turns ({reason}). "
+                    "Check your auxiliary goal_judge config in ~/.hermes/config.yaml "
+                    "and run /goal resume when the provider is back."
                 ),
             }
 
