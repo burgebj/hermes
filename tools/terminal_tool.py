@@ -257,10 +257,11 @@ from tools.approval import (
 )
 
 
-def _check_all_guards(command: str, env_type: str) -> dict:
+def _check_all_guards(command: str, env_type: str, cwd: str | None = None) -> dict:
     """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
     return _check_all_guards_impl(command, env_type,
-                                  approval_callback=_get_approval_callback())
+                                  approval_callback=_get_approval_callback(),
+                                  cwd=cwd)
 
 
 # Allowlist: characters that can legitimately appear in directory paths.
@@ -1976,8 +1977,13 @@ def terminal_tool(
         # Pre-exec security checks (tirith + dangerous command detection)
         # Skip check if force=True (user has confirmed they want to run it)
         approval_note = None
+        effective_cwd = _resolve_command_cwd(
+            workdir=workdir,
+            env=env,
+            default_cwd=cwd,
+        )
         if not force:
-            approval = _check_all_guards(command, env_type)
+            approval = _check_all_guards(command, env_type, cwd=effective_cwd)
             if not approval["approved"]:
                 # Check if this is an approval_required (gateway ask mode)
                 if approval.get("status") == "pending_approval":
@@ -2044,11 +2050,6 @@ def terminal_tool(
             from tools.process_registry import process_registry
 
             session_key = get_current_session_key(default="")
-            effective_cwd = _resolve_command_cwd(
-                workdir=workdir,
-                env=env,
-                default_cwd=cwd,
-            )
             try:
                 if env_type == "local":
                     proc_session = process_registry.spawn_local(
