@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   stopPreviewFileWatch: id => ipcRenderer.invoke('hermes:stopPreviewFileWatch', id),
   setTitleBarTheme: payload => ipcRenderer.send('hermes:titlebar-theme', payload),
   setPreviewShortcutActive: active => ipcRenderer.send('hermes:previewShortcutActive', Boolean(active)),
+  zoomAdjust: delta => ipcRenderer.send('hermes:zoom:adjust', delta),
   openExternal: url => ipcRenderer.invoke('hermes:openExternal', url),
   fetchLinkTitle: url => ipcRenderer.invoke('hermes:fetchLinkTitle', url),
   settings: {

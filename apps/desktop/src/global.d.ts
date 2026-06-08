@@ -49,6 +49,7 @@ declare global {
       stopPreviewFileWatch: (id: string) => Promise<boolean>
       setTitleBarTheme?: (payload: HermesTitleBarTheme) => void
       setPreviewShortcutActive?: (active: boolean) => void
+      zoomAdjust?: (delta: number) => void
       openExternal: (url: string) => Promise<void>
       fetchLinkTitle: (url: string) => Promise<string>
       settings: {

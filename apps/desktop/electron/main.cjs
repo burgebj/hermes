@@ -3244,6 +3244,41 @@ function installZoomShortcuts(window) {
   })
 }
 
+function installWheelZoom(window) {
+  // Ctrl/Cmd + mouse-wheel zoom: the standard desktop/browser gesture.
+  // Wheel events are DOM events, so before-input-event cannot intercept
+  // them.  We inject a lightweight listener into the renderer that sends
+  // delta messages over IPC; the main process adjusts webContents zoom.
+  const ZOOM_STEP = 0.1
+
+  ipcMain.on('hermes:zoom:adjust', (_event, delta) => {
+    const wc = window.webContents
+    const next = Math.max(-9, Math.min(9, wc.getZoomLevel() + delta))
+    wc.setZoomLevel(next)
+  })
+
+  const injectWheelZoom = () => {
+    window.webContents.executeJavaScript(`
+      if (!window.__hermesWheelZoomInstalled) {
+        window.__hermesWheelZoomInstalled = true;
+        var ZOOM_STEP = 0.1;
+        window.addEventListener('wheel', function(e) {
+          var mod = navigator.platform.indexOf('Mac') !== -1 ? e.metaKey : e.ctrlKey;
+          if (!mod) return;
+          e.preventDefault();
+          var delta = e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP;
+          if (window.hermesDesktop && window.hermesDesktop.zoomAdjust) {
+            window.hermesDesktop.zoomAdjust(delta);
+          }
+        }, { passive: false });
+      }
+    `).catch(() => {})
+  }
+
+  window.webContents.on('dom-ready', injectWheelZoom)
+  window.webContents.on('did-finish-load', injectWheelZoom)
+}
+
 function installContextMenu(window) {
   window.webContents.on('context-menu', (_event, params) => {
     const template = []
@@ -4663,6 +4698,7 @@ function createWindow() {
   installPreviewShortcut(mainWindow)
   installDevToolsShortcut(mainWindow)
   installZoomShortcuts(mainWindow)
+  installWheelZoom(mainWindow)
   installContextMenu(mainWindow)
   mainWindow.webContents.setWindowOpenHandler(details => {
     openExternalUrl(details.url)
