@@ -519,6 +519,7 @@ class TestRunJobImmediate:
         original_next_run_at = resolve_job_ref(job_id)["next_run_at"]
 
         monkeypatch.setattr(sched, "_job_requires_live_delivery_context", lambda _job: True)
+        monkeypatch.setattr(sched, "_job_has_required_live_delivery_context", lambda *_a, **_kw: False)
         monkeypatch.setattr(sched, "_resolve_live_delivery_context", lambda: (None, None))
         monkeypatch.setattr(
             sched,
@@ -550,6 +551,119 @@ class TestRunJobImmediate:
         assert queued_again["manual_run_schedule_snapshot"]["next_run_at"] == original_next_run_at
 
         sched._shutdown_parallel_pool()
+
+    def test_action_run_queues_when_required_live_adapter_is_missing(self, monkeypatch):
+        """A running loop without the target adapter must still queue live-only manual runs."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job
+        from tools.cronjob_tools import cronjob
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        class _Loop:
+            def is_running(self):
+                return True
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 1h",
+            name="missing-live-adapter-manual-run",
+            deliver="matrix",
+        )
+
+        monkeypatch.setattr(sched, "_job_requires_live_delivery_context", lambda _job: True)
+        monkeypatch.setattr(sched, "_job_has_required_live_delivery_context", lambda *_a, **_kw: False)
+        monkeypatch.setattr(sched, "_resolve_live_delivery_context", lambda: ({}, _Loop()))
+        monkeypatch.setattr(
+            sched,
+            "run_job_immediate",
+            lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("run_job_immediate should not be called")),
+        )
+
+        result = json.loads(cronjob(action="run", job_id=job["id"]))
+
+        assert result["success"] is True
+        assert result["dispatched"] is False
+        assert "queued for the next gateway tick" in result["note"].lower()
+
+        sched._shutdown_parallel_pool()
+
+    def test_action_run_queues_when_explicit_plugin_target_lacks_live_adapter(self, monkeypatch):
+        """Explicit plugin targets must queue if the gateway lacks that live-only adapter."""
+        import cron.scheduler as sched
+        import gateway.config as gateway_config
+        import gateway.platform_registry as gateway_platform_registry
+        from cron.jobs import create_job
+        from tools.cronjob_tools import cronjob
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        class _Loop:
+            def is_running(self):
+                return True
+
+        class _PluginEntry:
+            standalone_sender_fn = None
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 1h",
+            name="missing-plugin-adapter-manual-run",
+            deliver="reviewplugin:room42",
+        )
+
+        monkeypatch.setattr(gateway_config, "load_gateway_config", lambda: type("Cfg", (), {"platforms": {}})())
+        monkeypatch.setattr(gateway_platform_registry.platform_registry, "is_registered", lambda name: name == "reviewplugin")
+        monkeypatch.setattr(
+            gateway_platform_registry.platform_registry,
+            "get",
+            lambda name: _PluginEntry() if name == "reviewplugin" else None,
+        )
+        monkeypatch.setattr(sched, "_resolve_live_delivery_context", lambda: ({}, _Loop()))
+        monkeypatch.setattr(
+            sched,
+            "run_job_immediate",
+            lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("run_job_immediate should not be called")),
+        )
+
+        result = json.loads(cronjob(action="run", job_id=job["id"]))
+
+        assert result["success"] is True
+        assert result["dispatched"] is False
+        assert "queued for the next gateway tick" in result["note"].lower()
+
+        sched._shutdown_parallel_pool()
+
+    def test_live_delivery_checks_use_runtime_gateway_config(self, monkeypatch):
+        """Live-delivery checks should keep working if config reload fails after gateway boot."""
+        import cron.scheduler as sched
+        import gateway.config as gateway_config
+
+        class _Loop:
+            def is_running(self):
+                return True
+
+        class _MatrixConfig:
+            extra = {"encryption": True}
+
+        runtime_config = type("Cfg", (), {"platforms": {gateway_config.Platform.MATRIX: _MatrixConfig()}})()
+        sched._live_delivery_config = runtime_config
+        monkeypatch.setattr(gateway_config, "load_gateway_config", lambda: (_ for _ in ()).throw(RuntimeError("reload failed")))
+
+        try:
+            job = {"deliver": "matrix:!roomid:example.org"}
+            assert sched._job_requires_live_delivery_context(job) is True
+            assert sched._job_has_required_live_delivery_context(
+                job,
+                adapters={gateway_config.Platform.MATRIX: object()},
+                loop=_Loop(),
+            ) is True
+        finally:
+            sched._live_delivery_config = None
 
     def test_run_job_immediate_cleans_up_on_job_failure(self, monkeypatch):
         """run_job_immediate removes job from _running_job_ids even if run_job fails."""
@@ -682,6 +796,7 @@ class TestRunJobImmediate:
             {
                 "next_run_at": "2000-01-01T00:00:00+00:00",
                 "manual_run_schedule_snapshot": schedule_snapshot,
+                "manual_run_gateway_only": True,
             },
         )
         due_job = resolve_job_ref(job_id)
@@ -690,6 +805,7 @@ class TestRunJobImmediate:
         tick_lock = lock_dir / ".tick.lock"
 
         monkeypatch.setattr(sched, "get_due_jobs", lambda: [due_job])
+        monkeypatch.setattr(sched, "_job_has_required_live_delivery_context", lambda *_a, **_kw: True)
         monkeypatch.setattr(sched, "run_job", lambda *_a, **_kw: (True, "output", "response", None))
         monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: None)
         monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
@@ -701,6 +817,187 @@ class TestRunJobImmediate:
         assert dispatched_count == 1
         assert restored["next_run_at"] == schedule_snapshot["next_run_at"]
         assert restored.get("manual_run_schedule_snapshot") is None
+
+        sched._shutdown_parallel_pool()
+
+    def test_tick_leaves_gateway_only_manual_run_pending_without_live_context(self, tmp_path, monkeypatch):
+        """Standalone/manual ticks must not consume gateway-only queued manual runs."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job, resolve_job_ref, update_job
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 1h",
+            name="gateway-only-manual-run-pending"
+        )
+        job_id = job["id"]
+        schedule_snapshot = {
+            "enabled": job.get("enabled", True),
+            "state": job.get("state"),
+            "paused_at": job.get("paused_at"),
+            "paused_reason": job.get("paused_reason"),
+            "next_run_at": job.get("next_run_at"),
+        }
+        update_job(
+            job_id,
+            {
+                "next_run_at": "2000-01-01T00:00:00+00:00",
+                "manual_run_schedule_snapshot": schedule_snapshot,
+                "manual_run_gateway_only": True,
+            },
+        )
+        due_job = resolve_job_ref(job_id)
+        lock_dir = tmp_path / "cron"
+        lock_dir.mkdir()
+        tick_lock = lock_dir / ".tick.lock"
+
+        monkeypatch.setattr(sched, "get_due_jobs", lambda: [due_job])
+        monkeypatch.setattr(sched, "_job_has_required_live_delivery_context", lambda *_a, **_kw: False)
+        monkeypatch.setattr(
+            sched,
+            "run_job",
+            lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("run_job should not be called")),
+        )
+
+        with patch("cron.scheduler._get_lock_paths", return_value=(lock_dir, tick_lock)):
+            dispatched_count = sched.tick(sync=True)
+
+        pending = resolve_job_ref(job_id)
+        assert dispatched_count == 0
+        assert pending.get("manual_run_schedule_snapshot") == schedule_snapshot
+        assert pending.get("manual_run_gateway_only") is True
+
+        sched._shutdown_parallel_pool()
+
+    def test_tick_keeps_queued_manual_run_pending_when_claimed_elsewhere(self, tmp_path, monkeypatch):
+        """A queued manual run must survive ticks that lose the cross-process run claim."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job, resolve_job_ref, update_job
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 1h",
+            name="queued-manual-run-claimed-elsewhere",
+        )
+        job_id = job["id"]
+        schedule_snapshot = {
+            "enabled": job.get("enabled", True),
+            "state": job.get("state"),
+            "paused_at": job.get("paused_at"),
+            "paused_reason": job.get("paused_reason"),
+            "next_run_at": job.get("next_run_at"),
+        }
+        queued_due_at = "2000-01-01T00:00:00+00:00"
+        update_job(
+            job_id,
+            {
+                "next_run_at": queued_due_at,
+                "manual_run_schedule_snapshot": schedule_snapshot,
+                "manual_run_gateway_only": True,
+            },
+        )
+        due_job = resolve_job_ref(job_id)
+        lock_dir = tmp_path / "cron"
+        lock_dir.mkdir()
+        tick_lock = lock_dir / ".tick.lock"
+
+        monkeypatch.setattr(sched, "get_due_jobs", lambda: [due_job])
+        monkeypatch.setattr(sched, "_job_has_required_live_delivery_context", lambda *_a, **_kw: True)
+        monkeypatch.setattr(
+            sched,
+            "run_job",
+            lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("run_job should not be called")),
+        )
+
+        with patch("cron.scheduler._get_lock_paths", return_value=(lock_dir, tick_lock)):
+            foreign_lock = open(sched._get_job_run_lock_path(job_id), "a+", encoding="utf-8")
+            assert sched._try_lock_file(foreign_lock) is True
+            try:
+                dispatched_count = sched.tick(sync=True)
+            finally:
+                sched._unlock_file(foreign_lock)
+                foreign_lock.close()
+
+        pending = resolve_job_ref(job_id)
+        assert dispatched_count == 0
+        assert pending.get("next_run_at") == queued_due_at
+        assert pending.get("manual_run_schedule_snapshot") == schedule_snapshot
+        assert pending.get("manual_run_gateway_only") is True
+
+        sched._shutdown_parallel_pool()
+
+    def test_tick_uses_resolved_live_context_for_gateway_only_delivery(self, tmp_path, monkeypatch):
+        """tick() should deliver queued gateway-only manual runs with the same live context it used to admit them."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job, resolve_job_ref, update_job
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 1h",
+            name="gateway-only-manual-run-delivery-context",
+        )
+        job_id = job["id"]
+        schedule_snapshot = {
+            "enabled": job.get("enabled", True),
+            "state": job.get("state"),
+            "paused_at": job.get("paused_at"),
+            "paused_reason": job.get("paused_reason"),
+            "next_run_at": job.get("next_run_at"),
+        }
+        update_job(
+            job_id,
+            {
+                "next_run_at": "2000-01-01T00:00:00+00:00",
+                "manual_run_schedule_snapshot": schedule_snapshot,
+                "manual_run_gateway_only": True,
+            },
+        )
+        due_job = resolve_job_ref(job_id)
+        lock_dir = tmp_path / "cron"
+        lock_dir.mkdir()
+        tick_lock = lock_dir / ".tick.lock"
+        adapter_sentinel = {"matrix": object()}
+
+        class _Loop:
+            def is_running(self):
+                return True
+
+        delivered = {}
+        monkeypatch.setattr(sched, "get_due_jobs", lambda: [due_job])
+        monkeypatch.setattr(sched, "_resolve_live_delivery_context", lambda: (adapter_sentinel, _Loop()))
+        monkeypatch.setattr(
+            sched,
+            "_job_has_required_live_delivery_context",
+            lambda _job, adapters=None, loop=None: adapters is adapter_sentinel and isinstance(loop, _Loop),
+        )
+        monkeypatch.setattr(sched, "run_job", lambda *_a, **_kw: (True, "output", "response", None))
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: None)
+
+        def fake_deliver(_job, _content, adapters=None, loop=None):
+            delivered["adapters"] = adapters
+            delivered["loop"] = loop
+            return None
+
+        monkeypatch.setattr(sched, "_deliver_result", fake_deliver)
+
+        with patch("cron.scheduler._get_lock_paths", return_value=(lock_dir, tick_lock)):
+            dispatched_count = sched.tick(sync=True)
+
+        assert dispatched_count == 1
+        assert delivered["adapters"] is adapter_sentinel
+        assert isinstance(delivered["loop"], _Loop)
 
         sched._shutdown_parallel_pool()
 

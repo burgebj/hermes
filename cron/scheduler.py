@@ -168,6 +168,7 @@ _running_job_ids: set = set()
 _running_lock = threading.Lock()
 _live_delivery_adapters = None
 _live_delivery_loop = None
+_live_delivery_config = None
 
 # Sequential (env/context-mutating) cron jobs — workdir/profile jobs that touch
 # process-global runtime state — must run one at a time, but must NOT block the
@@ -1442,6 +1443,7 @@ def _restore_manual_run_schedule(job_id: str, schedule_snapshot: Optional[dict])
 
     updates = {
         "manual_run_schedule_snapshot": None,
+        "manual_run_gateway_only": None,
     }
     if schedule_snapshot:
         updates.update(
@@ -1470,13 +1472,14 @@ def _queue_manual_run_for_tick(job_id: str, schedule_snapshot: Optional[dict]) -
             "paused_reason": None,
             "next_run_at": _hermes_now().isoformat(),
             "manual_run_schedule_snapshot": schedule_snapshot,
+            "manual_run_gateway_only": True,
         },
     )
 
 
 def _resolve_live_delivery_context():
     """Return the best available live adapter context for cron delivery."""
-    global _live_delivery_adapters, _live_delivery_loop
+    global _live_delivery_adapters, _live_delivery_loop, _live_delivery_config
 
     adapters = _live_delivery_adapters
     loop = _live_delivery_loop
@@ -1493,12 +1496,42 @@ def _resolve_live_delivery_context():
     if runner is not None:
         runner_adapters = getattr(runner, "adapters", None)
         runner_loop = getattr(runner, "_gateway_loop", None)
+        runner_config = getattr(runner, "config", None)
         if runner_adapters is not None and runner_loop is not None and getattr(runner_loop, "is_running", lambda: False)():
             _live_delivery_adapters = runner_adapters
             _live_delivery_loop = runner_loop
+            if runner_config is not None:
+                _live_delivery_config = runner_config
             return runner_adapters, runner_loop
 
     return adapters, loop
+
+
+def _resolve_live_delivery_runtime_config():
+    """Return the best available gateway config for live-delivery checks."""
+    global _live_delivery_config
+    if _live_delivery_config is not None:
+        return _live_delivery_config
+
+    try:
+        from gateway.run import _gateway_runner_ref
+
+        runner = _gateway_runner_ref()
+    except Exception:
+        runner = None
+
+    if runner is not None:
+        runner_config = getattr(runner, "config", None)
+        if runner_config is not None:
+            _live_delivery_config = runner_config
+            return runner_config
+
+    try:
+        from gateway.config import load_gateway_config
+
+        return load_gateway_config()
+    except Exception:
+        return None
 
 
 def _job_requires_live_delivery_context(job: dict) -> bool:
@@ -1508,10 +1541,11 @@ def _job_requires_live_delivery_context(job: dict) -> bool:
         return False
 
     try:
-        from gateway.config import load_gateway_config, Platform
-
-        config = load_gateway_config()
+        from gateway.config import Platform
     except Exception:
+        return False
+    config = _resolve_live_delivery_runtime_config()
+    if config is None:
         return False
 
     try:
@@ -1520,21 +1554,82 @@ def _job_requires_live_delivery_context(job: dict) -> bool:
         platform_registry = None
 
     for target in targets:
+        if _target_requires_live_delivery_context(target, config=config, platform_registry=platform_registry):
+            return True
+    return False
+
+
+def _target_requires_live_delivery_context(target: dict, config=None, platform_registry=None) -> bool:
+    """Return True when one resolved delivery target requires a live adapter."""
+    platform_name = str((target or {}).get("platform") or "").strip().lower()
+    if not platform_name:
+        return False
+
+    try:
+        from gateway.config import Platform
+    except Exception:
+        return False
+
+    try:
+        platform = Platform(platform_name)
+    except (ValueError, KeyError):
+        platform = None
+    pconfig = config.platforms.get(platform) if config is not None and platform is not None else None
+    if platform_name == "matrix" and bool(((getattr(pconfig, "extra", None) or {}).get("encryption"))):
+        return True
+    if platform_name not in _KNOWN_DELIVERY_PLATFORMS:
+        entry = platform_registry.get(platform_name) if platform_registry is not None else None
+        if entry is None or entry.standalone_sender_fn is None:
+            return True
+    return False
+
+
+def _adapter_for_delivery_platform(adapters, platform_name: str):
+    """Return the live adapter registered for one concrete delivery platform."""
+    if not adapters:
+        return None
+    try:
+        from gateway.config import Platform
+
+        return adapters.get(Platform(platform_name)) or adapters.get(platform_name)
+    except Exception:
+        return adapters.get(platform_name)
+
+
+def _job_has_required_live_delivery_context(job: dict, adapters=None, loop=None) -> bool:
+    """Return True when all live-delivery-only targets have an active adapter."""
+    targets = _resolve_delivery_targets(job)
+    if not targets:
+        return True
+
+    config = _resolve_live_delivery_runtime_config()
+    if config is None:
+        return False
+
+    try:
+        from gateway.platform_registry import platform_registry
+    except Exception:
+        platform_registry = None
+
+    live_targets = [
+        target for target in targets
+        if _target_requires_live_delivery_context(target, config=config, platform_registry=platform_registry)
+    ]
+    if not live_targets:
+        return True
+
+    if adapters is None or loop is None:
+        adapters, loop = _resolve_live_delivery_context()
+    if adapters is None or loop is None or not getattr(loop, "is_running", lambda: False)():
+        return False
+
+    for target in live_targets:
         platform_name = str(target.get("platform") or "").strip().lower()
         if not platform_name:
             continue
-        try:
-            platform = Platform(platform_name)
-        except (ValueError, KeyError):
-            platform = None
-        pconfig = config.platforms.get(platform) if platform is not None else None
-        if platform_name == "matrix" and bool(((getattr(pconfig, "extra", None) or {}).get("encryption"))):
-            return True
-        if platform_name not in _KNOWN_DELIVERY_PLATFORMS:
-            entry = platform_registry.get(platform_name) if platform_registry is not None else None
-            if entry is None or entry.standalone_sender_fn is None:
-                return True
-    return False
+        if _adapter_for_delivery_platform(adapters, platform_name) is None:
+            return False
+    return True
 
 
 def _sweep_mcp_orphans() -> None:
@@ -2323,7 +2418,18 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         return 0
 
     try:
+        delivery_adapters = adapters
+        delivery_loop = loop
+        if delivery_adapters is None or delivery_loop is None:
+            delivery_adapters, delivery_loop = _resolve_live_delivery_context()
         due_jobs = get_due_jobs()
+        due_jobs = [
+            job for job in due_jobs
+            if not (
+                job.get("manual_run_gateway_only")
+                and not _job_has_required_live_delivery_context(job, adapters=delivery_adapters, loop=delivery_loop)
+            )
+        ]
 
         if verbose and not due_jobs:
             logger.info("%s - No jobs due", _hermes_now().strftime('%H:%M:%S'))
@@ -2338,6 +2444,8 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         # bumping next_run_at forward so the grace window never expires.
         # mark_job_run() overwrites next_run_at on completion.
         for job in due_jobs:
+            if job.get("manual_run_schedule_snapshot"):
+                continue
             advance_next_run(job["id"])
 
         # Resolve max parallel workers: env var > config.yaml > unbounded.
@@ -2376,7 +2484,7 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
                 delivery_error = None
                 if should_deliver:
                     try:
-                        delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
+                        delivery_error = _deliver_result(job, deliver_content, adapters=delivery_adapters, loop=delivery_loop)
                     except Exception as de:
                         delivery_error = str(de)
                         logger.error("Delivery failed for job %s: %s", job["id"], de)

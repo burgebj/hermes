@@ -642,6 +642,7 @@ def cronjob(
             )
             try:
                 from cron.scheduler import (
+                    _job_has_required_live_delivery_context,
                     _job_requires_live_delivery_context,
                     _queue_manual_run_for_tick,
                     _resolve_live_delivery_context,
@@ -649,10 +650,10 @@ def cronjob(
                 )
 
                 live_adapters, live_loop = _resolve_live_delivery_context()
-                has_live_context = bool(
-                    live_adapters is not None
-                    and live_loop is not None
-                    and getattr(live_loop, "is_running", lambda: False)()
+                has_live_context = _job_has_required_live_delivery_context(
+                    updated or job,
+                    adapters=live_adapters,
+                    loop=live_loop,
                 )
                 if _job_requires_live_delivery_context(updated or job) and not has_live_context:
                     _queue_manual_run_for_tick(job_id, schedule_snapshot)
