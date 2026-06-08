@@ -1313,17 +1313,41 @@ class SessionStore:
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages from a session's transcript.
 
-        state.db is the canonical store. The legacy JSONL fallback was removed
-        in spec 002 — pre-DB sessions on existing disks have already been
-        migrated (their DB row holds the full message history).
+        state.db is the canonical store.  The optional per-session JSON
+        snapshot is a fail-open replay source for installs where the DB row is
+        empty/unavailable but the same session's snapshot is intact.
         """
-        if not self._db:
+        if not session_id:
             return []
+        if self._db:
+            try:
+                messages = self._db.get_messages_as_conversation(session_id)
+                if messages:
+                    return messages
+            except Exception as e:
+                logger.debug("Could not load messages from DB: %s", e)
+        return self._load_transcript_snapshot(session_id)
+
+    def _load_transcript_snapshot(self, session_id: str) -> List[Dict[str, Any]]:
+        """Load a same-session JSON snapshot when SQLite has no replay rows."""
+        snapshot_path = self.sessions_dir / f"session_{session_id}.json"
         try:
-            return self._db.get_messages_as_conversation(session_id)
+            data = json.loads(snapshot_path.read_text(encoding="utf-8"))
         except Exception as e:
-            logger.debug("Could not load messages from DB: %s", e)
+            logger.debug("Could not load session snapshot %s: %s", snapshot_path, e)
             return []
+        if isinstance(data, dict):
+            messages = data.get("messages", [])
+        elif isinstance(data, list):
+            messages = data
+        else:
+            return []
+        if not isinstance(messages, list):
+            return []
+        return [
+            msg for msg in messages
+            if isinstance(msg, dict) and msg.get("role")
+        ]
 
     def rewind_session(self, session_id: str, n: int = 1) -> Optional[Dict[str, Any]]:
         """Back up ``n`` user turns via soft-delete, keeping rows for audit.

@@ -545,10 +545,10 @@ class TestSessionStoreRewriteTranscript:
         assert reloaded == []
 
 
-class TestLoadTranscriptDBOnly:
-    """After spec 002, load_transcript reads only from state.db."""
+class TestLoadTranscript:
+    """Transcript replay prefers state.db and can salvage same-session snapshots."""
 
-    def test_db_only_returns_empty_for_nonexistent(self, tmp_path, monkeypatch):
+    def test_returns_empty_for_nonexistent(self, tmp_path, monkeypatch):
         import hermes_state
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
         config = GatewayConfig()
@@ -556,7 +556,7 @@ class TestLoadTranscriptDBOnly:
         result = store.load_transcript("nonexistent")
         assert result == []
 
-    def test_db_only_returns_messages(self, tmp_path, monkeypatch):
+    def test_returns_db_messages(self, tmp_path, monkeypatch):
         import hermes_state
         monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
         config = GatewayConfig()
@@ -570,6 +570,58 @@ class TestLoadTranscriptDBOnly:
         assert len(result) == 2
         assert result[0]["content"] == "db-q"
         assert result[1]["content"] == "db-a"
+
+    def test_db_messages_win_over_json_snapshot(self, tmp_path, monkeypatch):
+        import hermes_state
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        config = GatewayConfig()
+        store = SessionStore(sessions_dir=tmp_path, config=config)
+        sid = "db_primary_session"
+        store._db.create_session(session_id=sid, source="gateway", model="m")
+        store._db.append_message(session_id=sid, role="user", content="db-q")
+        store._db.append_message(session_id=sid, role="assistant", content="db-a")
+        (tmp_path / f"session_{sid}.json").write_text(
+            json.dumps({
+                "session_id": sid,
+                "messages": [
+                    {"role": "user", "content": "snapshot-q"},
+                    {"role": "assistant", "content": "snapshot-a"},
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        result = store.load_transcript(sid)
+
+        assert [msg["content"] for msg in result] == ["db-q", "db-a"]
+
+    def test_loads_json_snapshot_when_db_history_empty(self, tmp_path, monkeypatch):
+        import hermes_state
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        config = GatewayConfig()
+        store = SessionStore(sessions_dir=tmp_path, config=config)
+        sid = "snapshot_salvage_session"
+        store._db.create_session(session_id=sid, source="gateway", model="m")
+        (tmp_path / f"session_{sid}.json").write_text(
+            json.dumps({
+                "session_id": sid,
+                "messages": [
+                    {"role": "system", "content": "ignored by gateway replay later"},
+                    {"role": "user", "content": "snapshot-q"},
+                    {"role": "assistant", "content": "snapshot-a"},
+                    {"content": "missing role"},
+                ],
+            }),
+            encoding="utf-8",
+        )
+
+        result = store.load_transcript(sid)
+
+        assert [msg["content"] for msg in result] == [
+            "ignored by gateway replay later",
+            "snapshot-q",
+            "snapshot-a",
+        ]
 
 
 class TestSessionStoreSwitchSession:
