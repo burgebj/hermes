@@ -104,6 +104,14 @@ class TestIsThinkingOnlyAssistant:
         }
         assert AIAgent._is_thinking_only_assistant(msg)
 
+    def test_codex_reasoning_items_list_form_detected(self):
+        msg = {
+            "role": "assistant",
+            "content": "",
+            "codex_reasoning_items": [{"type": "reasoning", "encrypted_content": "enc_blob"}],
+        }
+        assert AIAgent._is_thinking_only_assistant(msg)
+
     def test_user_message_never_thinking_only(self):
         assert not AIAgent._is_thinking_only_assistant({"role": "user", "content": ""})
 

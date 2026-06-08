@@ -63,6 +63,15 @@ def agent_runtime_owns_post_tool_hook(agent: Any, function_name: str) -> bool:
     return bool(memory_manager and memory_manager.has_tool(function_name))
 
 
+def _debug_request_suffix(api_mode: str | None) -> str:
+    """Return the request path suffix used in debug dump URLs."""
+    if api_mode == "codex_responses":
+        return "/responses"
+    if api_mode == "anthropic_messages":
+        return "/messages"
+    return "/chat/completions"
+
+
 def convert_to_trajectory_format(agent, messages: List[Dict[str, Any]], user_query: str, completed: bool) -> List[Dict[str, Any]]:
     """
     Convert internal message format to trajectory format for saving.
@@ -1101,7 +1110,7 @@ def dump_api_request_debug(
             "reason": reason,
             "request": {
                 "method": "POST",
-                "url": f"{agent.base_url.rstrip('/')}{'/responses' if agent.api_mode == 'codex_responses' else '/chat/completions'}",
+                "url": f"{agent.base_url.rstrip('/')}{_debug_request_suffix(agent.api_mode)}",
                 "headers": {
                     "Authorization": f"Bearer {agent._mask_api_key_for_logs(api_key)}",
                     "Content-Type": "application/json",

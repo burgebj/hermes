@@ -3227,6 +3227,13 @@ class AIAgent:
         rd = msg.get("reasoning_details")
         if isinstance(rd, list) and rd:
             return True
+        # Codex Responses replay payload: encrypted reasoning items persisted
+        # for continuity. These should be treated as internal reasoning-only
+        # state (same drop behavior as reasoning/reasoning_details) when
+        # there is no visible assistant output.
+        cri = msg.get("codex_reasoning_items")
+        if isinstance(cri, list) and cri:
+            return True
         return False
 
     @staticmethod

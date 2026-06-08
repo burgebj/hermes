@@ -1811,6 +1811,33 @@ def test_dump_api_request_debug_uses_chat_completions_url(monkeypatch, tmp_path)
     assert payload["request"]["url"] == "http://127.0.0.1:9208/v1/chat/completions"
 
 
+def test_dump_api_request_debug_uses_messages_url_for_anthropic(monkeypatch, tmp_path):
+    """Debug dumps should show /messages URL for anthropic_messages mode."""
+    import json
+    from types import SimpleNamespace
+    from agent.agent_runtime_helpers import dump_api_request_debug
+
+    agent = SimpleNamespace(
+        api_mode="anthropic_messages",
+        base_url="http://127.0.0.1:9208/v1",
+        logs_dir=tmp_path,
+        session_id="test-session",
+        client=SimpleNamespace(api_key="test-key"),
+        _mask_api_key_for_logs=lambda key: key,
+        _vprint=lambda *_args, **_kwargs: None,
+        log_prefix="",
+        verbose_logging=False,
+    )
+    dump_file = dump_api_request_debug(
+        agent,
+        {"model": "claude-sonnet-4-20250514", "messages": [{"role": "user", "content": "hi"}]},
+        reason="preflight",
+    )
+
+    payload = json.loads(dump_file.read_text())
+    assert payload["request"]["url"] == "http://127.0.0.1:9208/v1/messages"
+
+
 # --- Reasoning-only response tests (fix for empty content retry loop) ---
 
 
