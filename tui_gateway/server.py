@@ -1517,6 +1517,7 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
             api_key=result.api_key,
             base_url=result.base_url,
             api_mode=result.api_mode,
+            default_headers=result.default_headers,
         )
         _restart_slash_worker(session)
         _emit("session.info", sid, _session_info(agent, session))
@@ -1541,6 +1542,7 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
             "base_url": result.base_url,
             "api_key": result.api_key,
             "api_mode": result.api_mode,
+            "default_headers": result.default_headers,
         }
     if persist_global:
         _persist_model_switch(result)
@@ -2418,6 +2420,7 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         "platform": "tui",
         "session_db": _get_db(),
         "fallback_model": getattr(agent, "_fallback_model", None),
+        "default_headers": getattr(agent, "_default_headers", None),
     }
 
 
@@ -2630,6 +2633,7 @@ def _make_agent(
         override_base_url = model_override.get("base_url")
         override_api_key = model_override.get("api_key")
         override_api_mode = model_override.get("api_mode")
+        override_default_headers = model_override.get("default_headers")
         runtime = resolve_runtime_provider(
             requested=requested_provider,
             target_model=model or None,
@@ -2643,12 +2647,16 @@ def _make_agent(
             runtime["api_key"] = override_api_key
         if override_api_mode:
             runtime["api_mode"] = override_api_mode
+        if override_default_headers:
+            runtime["default_headers"] = override_default_headers
     else:
         model, requested_provider = _resolve_startup_runtime()
         runtime = resolve_runtime_provider(
             requested=requested_provider,
             target_model=model or None,
         )
+    # Resolve provider-level default_headers (e.g. custom_providers[].custom_headers)
+    _default_headers = runtime.get("default_headers")
     return AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
@@ -2672,6 +2680,7 @@ def _make_agent(
         session_id=session_id or key,
         session_db=session_db if session_db is not None else _get_db(),
         ephemeral_system_prompt=system_prompt or None,
+        default_headers=_default_headers,
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
@@ -4891,6 +4900,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             ):
                 try:
                     from agent.title_generator import maybe_auto_title
+                    agent = session.get("agent")
 
                     maybe_auto_title(
                         _get_db(),
@@ -4898,6 +4908,14 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                         text,
                         raw,
                         session.get("history", []),
+                        main_runtime={
+                            "model": getattr(agent, "model", None),
+                            "provider": getattr(agent, "provider", None),
+                            "base_url": getattr(agent, "base_url", None),
+                            "api_key": getattr(agent, "api_key", None),
+                            "api_mode": getattr(agent, "api_mode", None),
+                            "default_headers": getattr(agent, "_default_headers", None),
+                        } if agent else None,
                     )
                 except Exception:
                     pass

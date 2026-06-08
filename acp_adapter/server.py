@@ -1601,6 +1601,7 @@ class HermesACPAgent(acp.Agent):
         if final_response and not suppress_interrupt_response:
             try:
                 from agent.title_generator import maybe_auto_title
+                agent = state.agent
 
                 def _notify_title_update(_title: str) -> None:
                     if conn:
@@ -1615,6 +1616,14 @@ class HermesACPAgent(acp.Agent):
                     user_text,
                     final_response,
                     state.history,
+                    main_runtime={
+                        "model": getattr(agent, "model", None),
+                        "provider": getattr(agent, "provider", None),
+                        "base_url": getattr(agent, "base_url", None),
+                        "api_key": getattr(agent, "api_key", None),
+                        "api_mode": getattr(agent, "api_mode", None),
+                        "default_headers": getattr(agent, "_default_headers", None),
+                    } if agent else None,
                     title_callback=_notify_title_update,
                 )
             except Exception:

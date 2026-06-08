@@ -1729,6 +1729,7 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
     _api_key = None
     _base_url = None
     _api_mode = None
+    _default_headers = None
     _resolved_provider = None
     _model_name = ""
     try:
@@ -1746,6 +1747,7 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
         _api_key = _rp.get("api_key")
         _base_url = _rp.get("base_url")
         _api_mode = _rp.get("api_mode")
+        _default_headers = _rp.get("default_headers")
         _resolved_provider = _rp.get("provider") or _provider
     except Exception as e:
         logger.debug("Curator provider resolution failed: %s", e, exc_info=True)
@@ -1761,6 +1763,7 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
             api_key=_api_key,
             base_url=_base_url,
             api_mode=_api_mode,
+            default_headers=_default_headers,
             # Umbrella-building over a large skill collection is worth a
             # high iteration ceiling — the pass typically takes 50-100
             # API calls against hundreds of candidate skills. The

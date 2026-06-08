@@ -408,6 +408,7 @@ def _run_review_in_thread(
                 api_mode=_parent_api_mode,
                 base_url=_parent_runtime.get("base_url") or None,
                 api_key=_parent_runtime.get("api_key") or None,
+                default_headers=_parent_runtime.get("default_headers") or None,
                 credential_pool=getattr(agent, "_credential_pool", None),
                 parent_session_id=agent.session_id,
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),

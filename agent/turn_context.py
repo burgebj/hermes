@@ -92,9 +92,15 @@ def build_turn_context(
     # Tell auxiliary_client what the live main provider/model are for this turn.
     try:
         from agent.auxiliary_client import set_runtime_main
+        _runtime_headers = None
+        try:
+            _runtime_headers = (getattr(agent, "_current_main_runtime")() or {}).get("default_headers")
+        except Exception:
+            _runtime_headers = getattr(agent, "_default_headers", None)
         set_runtime_main(
             getattr(agent, "provider", "") or "",
             getattr(agent, "model", "") or "",
+            default_headers=_runtime_headers,
             base_url=getattr(agent, "base_url", "") or "",
             api_key=getattr(agent, "api_key", "") or "",
             api_mode=getattr(agent, "api_mode", "") or "",

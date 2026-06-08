@@ -3705,7 +3705,7 @@ def _normalize_custom_provider_entry(
     _KNOWN_KEYS = {
         "name", "api", "url", "base_url", "api_key", "key_env", "api_key_env",
         "api_mode", "transport", "model", "default_model", "models",
-        "context_length", "rate_limit_delay",
+        "context_length", "rate_limit_delay", "custom_headers",
         "request_timeout_seconds", "stale_timeout_seconds",
         "discover_models", "extra_body",
     }
@@ -3798,6 +3798,10 @@ def _normalize_custom_provider_entry(
     if isinstance(rate_limit_delay, (int, float)) and rate_limit_delay >= 0:
         normalized["rate_limit_delay"] = rate_limit_delay
 
+    custom_headers = entry.get("custom_headers")
+    if isinstance(custom_headers, dict) and custom_headers:
+        normalized["custom_headers"] = custom_headers
+
     discover_models = entry.get("discover_models")
     if isinstance(discover_models, bool):
         normalized["discover_models"] = discover_models
@@ -3833,6 +3837,7 @@ def _custom_provider_entry_to_provider_config(
         "rate_limit_delay",
         "discover_models",
         "extra_body",
+        "custom_headers",
     ):
         if field in normalized:
             provider_entry[field] = normalized[field]
@@ -4033,7 +4038,7 @@ _KNOWN_ROOT_KEYS = {
 # Valid fields inside a custom_providers list entry
 _VALID_CUSTOM_PROVIDER_FIELDS = {
     "name", "base_url", "api_key", "api_mode", "model", "models",
-    "context_length", "rate_limit_delay", "extra_body",
+    "context_length", "rate_limit_delay", "extra_body", "custom_headers",
     # key_env is read at runtime by runtime_provider.py and auxiliary_client.py
     # — include it here so the set accurately describes the supported schema.
     "key_env",
