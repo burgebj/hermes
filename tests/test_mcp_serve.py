@@ -1168,6 +1168,70 @@ class TestEventBridgePollE2E:
         assert db.call_count == first_calls, \
             "Second poll should skip DB queries when files unchanged"
 
+    def test_poll_detects_sessions_index_change_without_db_write(self, tmp_path, monkeypatch):
+        """A sessions.json change must be processed even when state.db mtime is unchanged."""
+        import mcp_serve
+
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: sessions_dir)
+
+        db_path = tmp_path / "state.db"
+        session_a = "20260329_150000_idx_a"
+        session_b = "20260329_150000_idx_b"
+        sessions_file = sessions_dir / "sessions.json"
+
+        sessions_data = {
+            "agent:main:telegram:dm:index-a": {
+                "session_key": "agent:main:telegram:dm:index-a",
+                "session_id": session_a,
+                "platform": "telegram",
+                "updated_at": "2026-03-29T15:00:05",
+                "origin": {"platform": "telegram", "chat_id": "index-a"},
+            }
+        }
+        sessions_file.write_text(json.dumps(sessions_data))
+
+        _create_test_db(db_path, session_a, [
+            {"role": "user", "content": "From A", "timestamp": "2026-03-29T15:00:01"},
+        ])
+        _create_test_db(db_path, session_b, [
+            {"role": "assistant", "content": "From B", "timestamp": "2026-03-29T15:00:02"},
+        ])
+
+        class TestDB:
+            def get_messages(self, sid):
+                conn = sqlite3.connect(str(db_path))
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
+                    (sid,),
+                ).fetchall()
+                conn.close()
+                return [dict(r) for r in rows]
+
+        db = TestDB()
+        bridge = mcp_serve.EventBridge()
+
+        bridge._poll_once(db)
+        first = bridge.poll_events(after_cursor=0)
+        assert [event["content"] for event in first["events"]] == ["From A"]
+
+        sessions_data["agent:main:telegram:dm:index-b"] = {
+            "session_key": "agent:main:telegram:dm:index-b",
+            "session_id": session_b,
+            "platform": "telegram",
+            "updated_at": "2026-03-29T15:00:06",
+            "origin": {"platform": "telegram", "chat_id": "index-b"},
+        }
+        sessions_file.write_text(json.dumps(sessions_data))
+        new_mtime = sessions_file.stat().st_mtime + 1
+        os.utime(sessions_file, (new_mtime, new_mtime))
+
+        bridge._poll_once(db)
+        second = bridge.poll_events(after_cursor=first["next_cursor"])
+        assert [event["content"] for event in second["events"]] == ["From B"]
+
     def test_poll_detects_new_message_after_db_write(self, tmp_path, monkeypatch):
         """Write a new message to the DB after first poll, verify it's detected."""
         import mcp_serve

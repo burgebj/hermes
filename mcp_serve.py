@@ -350,6 +350,7 @@ class EventBridge:
         when nothing has changed — makes 200ms polling essentially free.
         """
         # Check if sessions.json has changed (mtime check is ~1μs)
+        sessions_changed = False
         sessions_file = _get_sessions_dir() / "sessions.json"
         try:
             sj_mtime = sessions_file.stat().st_mtime if sessions_file.exists() else 0.0
@@ -357,6 +358,7 @@ class EventBridge:
             sj_mtime = 0.0
 
         if sj_mtime != self._sessions_json_mtime:
+            sessions_changed = True
             self._sessions_json_mtime = sj_mtime
             self._cached_sessions_index = _load_sessions_index()
 
@@ -372,7 +374,8 @@ class EventBridge:
         except OSError:
             db_mtime = 0.0
 
-        if db_mtime == self._state_db_mtime and sj_mtime == self._sessions_json_mtime:
+        db_changed = db_mtime != self._state_db_mtime
+        if not db_changed and not sessions_changed:
             return  # Nothing changed since last poll — skip entirely
 
         self._state_db_mtime = db_mtime
