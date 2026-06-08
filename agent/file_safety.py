@@ -109,7 +109,13 @@ def is_write_denied(path: str) -> bool:
     # profile-mode session leaves <root>/auth.json + <root>/config.yaml
     # writable — letting a prompt-injected write_file overwrite the global
     # files that every profile inherits from (same shape as #15981).
-    control_file_names = ("auth.json", "config.yaml", "webhook_subscriptions.json")
+    control_file_names = (
+        "auth.json",
+        "config.yaml",
+        "webhook_subscriptions.json",
+        os.path.join("auth", "google_oauth.json"),
+        os.path.join("cache", "bws_cache.json"),
+    )
     mcp_tokens_dir_name = "mcp-tokens"
 
     hermes_dirs = []

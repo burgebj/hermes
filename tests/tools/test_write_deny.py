@@ -67,6 +67,28 @@ class TestWriteDenyExactPaths:
 
         assert _is_write_denied(str(global_env)) is True
 
+    def test_bws_cache_denied(self):
+        from hermes_constants import get_hermes_home
+        path = str(get_hermes_home() / "cache" / "bws_cache.json")
+        assert _is_write_denied(path) is True
+
+    def test_google_oauth_denied(self):
+        from hermes_constants import get_hermes_home
+        path = str(get_hermes_home() / "auth" / "google_oauth.json")
+        assert _is_write_denied(path) is True
+
+    def test_hermes_root_bws_cache_and_google_oauth_when_running_under_profile(self, tmp_path, monkeypatch):
+        root = tmp_path / "hermes_root"
+        profile_home = root / "profiles" / "coder"
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(profile_home))
+
+        global_bws_cache = root / "cache" / "bws_cache.json"
+        global_google_oauth = root / "auth" / "google_oauth.json"
+
+        assert _is_write_denied(str(global_bws_cache)) is True
+        assert _is_write_denied(str(global_google_oauth)) is True
+
     def test_shell_profiles(self):
         home = str(Path.home())
         for name in [".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile"]:
