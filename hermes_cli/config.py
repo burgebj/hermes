@@ -1139,6 +1139,11 @@ DEFAULT_CONFIG = {
                                       # Default False matches historical behavior; set to
                                       # True if you'd rather pause than silently lose
                                       # context turns when your aux model is flaky.
+        "wall_clock_cap_seconds": 0,  # Optional end-to-end compression LLM cap.
+                                      # 0/false/missing/invalid disables. When enabled,
+                                      # each summary LLM call gets timeout=min(aux timeout,
+                                      # remaining cap). If the cap is exhausted, Hermes
+                                      # uses the local deterministic fallback.
         "codex_gpt55_autoraise": True,  # When True, gpt-5.5 on the ChatGPT Codex OAuth
                                       # route raises its compaction trigger to 85% (vs the
                                       # global `threshold` above). Codex hard-caps gpt-5.5

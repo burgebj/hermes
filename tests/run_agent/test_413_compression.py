@@ -936,3 +936,33 @@ class TestOverflowWithCompactionDisabled:
         mock_compress.assert_called_once()
         assert result["completed"] is True
         assert result.get("compaction_disabled") is not True
+
+def test_agent_init_wires_compression_wall_clock_cap_from_config():
+    cfg = {
+        "compression": {
+            "enabled": True,
+            "wall_clock_cap_seconds": "6",
+        },
+        "model": {"context_length": 100000},
+    }
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg),
+        patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+        patch("agent.context_compressor.get_model_context_length", return_value=100000),
+    ):
+        a = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+    assert a.context_compressor.wall_clock_cap_seconds == 6.0
+
+def test_default_config_disables_compression_wall_clock_cap():
+    from hermes_cli.config import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["compression"]["wall_clock_cap_seconds"] == 0

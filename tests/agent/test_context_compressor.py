@@ -1,5 +1,7 @@
 """Tests for agent/context_compressor.py — compression logic, thresholds, truncation fallback."""
 
+import time
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -359,6 +361,195 @@ class TestSummaryFailureCooldown:
         assert first is None
         assert second is None
         assert mock_call.call_count == 1
+
+
+class TestCompressionWallClockCap:
+    def _new_compressor(self, **kwargs):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            return ContextCompressor(model="test/model", quiet_mode=True, **kwargs)
+
+    def _mock_summary_response(self, content="ok summary"):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = content
+        return mock_response
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (None, 0.0),
+            (0, 0.0),
+            (False, 0.0),
+            (True, 0.0),
+            (-1, 0.0),
+            ("", 0.0),
+            ("420 seconds", 0.0),
+            (float("nan"), 0.0),
+            (float("inf"), 0.0),
+            ({"seconds": 420}, 0.0),
+            (6, 6.0),
+            (6.5, 6.5),
+            ("420", 420.0),
+            ("  7.25  ", 7.25),
+        ],
+    )
+    def test_normalizes_wall_clock_cap_seconds(self, value, expected):
+        result = ContextCompressor._normalize_wall_clock_cap_seconds(value)
+        assert result == expected
+
+    def test_summary_call_omits_timeout_when_cap_disabled(self):
+        c = self._new_compressor(wall_clock_cap_seconds=0)
+        with patch(
+            "agent.context_compressor.call_llm",
+            return_value=self._mock_summary_response(),
+        ) as mock_call:
+            c._generate_summary([{"role": "user", "content": "summarize me"}])
+
+        assert "timeout" not in mock_call.call_args.kwargs
+
+    def test_summary_call_bounds_timeout_to_remaining_cap(self):
+        c = self._new_compressor(wall_clock_cap_seconds=10)
+        c._begin_wall_clock_deadline()
+        try:
+            with (
+                patch("agent.context_compressor._get_task_timeout", return_value=300),
+                patch(
+                    "agent.context_compressor.call_llm",
+                    return_value=self._mock_summary_response(),
+                ) as mock_call,
+            ):
+                c._generate_summary([{"role": "user", "content": "summarize me"}])
+        finally:
+            c._clear_wall_clock_deadline()
+
+        timeout = mock_call.call_args.kwargs["timeout"]
+        assert 0 < timeout <= 10
+
+    def test_summary_call_preserves_lower_aux_timeout(self):
+        c = self._new_compressor(wall_clock_cap_seconds=300)
+        c._begin_wall_clock_deadline()
+        try:
+            with (
+                patch("agent.context_compressor._get_task_timeout", return_value=12),
+                patch(
+                    "agent.context_compressor.call_llm",
+                    return_value=self._mock_summary_response(),
+                ) as mock_call,
+            ):
+                c._generate_summary([{"role": "user", "content": "summarize me"}])
+        finally:
+            c._clear_wall_clock_deadline()
+
+        assert 0 < mock_call.call_args.kwargs["timeout"] <= 12
+
+    def test_expired_cap_skips_llm_and_uses_static_fallback(self):
+        c = self._new_compressor(wall_clock_cap_seconds=1)
+        c._compression_deadline = time.monotonic() - 1
+        messages = [
+            {"role": "user", "content": "important task"},
+            {"role": "assistant", "content": "did work"},
+        ]
+        try:
+            with patch("agent.context_compressor.call_llm") as mock_call:
+                summary = c._generate_summary(messages)
+        finally:
+            c._clear_wall_clock_deadline()
+
+        mock_call.assert_not_called()
+        assert summary.startswith(SUMMARY_PREFIX)
+        assert "compression wall-clock cap exceeded" in summary
+        assert c._last_summary_fallback_used is True
+        assert c._last_summary_dropped_count == len(messages)
+
+    def test_public_compress_pre_expired_cap_skips_llm_and_uses_fallback(self):
+        c = self._new_compressor(
+            wall_clock_cap_seconds=1,
+            protect_first_n=1,
+            protect_last_n=2,
+        )
+        messages = [{"role": "system", "content": "System"}] + [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"}
+            for i in range(8)
+        ]
+
+        def _expire_before_summary(*_args, **_kwargs):
+            c._compression_deadline = time.monotonic() - 1
+            return 6
+
+        with (
+            patch.object(c, "_find_tail_cut_by_tokens", side_effect=_expire_before_summary),
+            patch("agent.context_compressor.call_llm") as mock_call,
+        ):
+            result = c.compress(messages)
+
+        mock_call.assert_not_called()
+        assert len(result) < len(messages)
+        assert c._last_summary_fallback_used is True
+        assert c._last_summary_dropped_count == 4
+        assert c._compression_deadline is None
+        assert any(
+            "compression wall-clock cap exceeded" in str(msg.get("content", ""))
+            for msg in result
+        )
+
+    def test_compress_clears_deadline_on_too_few_messages(self):
+        c = self._new_compressor(
+            wall_clock_cap_seconds=1,
+            protect_first_n=2,
+            protect_last_n=2,
+        )
+        messages = [
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+        ]
+        assert c.compress(messages) == messages
+        assert c._compression_deadline is None
+
+    def test_compress_clears_deadline_on_no_middle_window(self):
+        c = self._new_compressor(
+            wall_clock_cap_seconds=1,
+            protect_first_n=1,
+            protect_last_n=2,
+        )
+        messages = [
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "two"},
+            {"role": "user", "content": "three"},
+            {"role": "assistant", "content": "four"},
+            {"role": "user", "content": "five"},
+        ]
+        with patch.object(c, "_find_tail_cut_by_tokens", return_value=1):
+            assert c.compress(messages) == messages
+        assert c._compression_deadline is None
+
+    def test_wall_clock_expired_after_llm_error_uses_fallback_without_main_retry(self):
+        c = self._new_compressor(
+            wall_clock_cap_seconds=1,
+            summary_model_override="slow-aux",
+            protect_first_n=1,
+            protect_last_n=2,
+        )
+        messages = [{"role": "system", "content": "System"}] + [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"}
+            for i in range(8)
+        ]
+
+        def _expire_and_raise(*_args, **_kwargs):
+            c._compression_deadline = time.monotonic() - 1
+            raise Exception("summary call timed out")
+
+        with (
+            patch.object(c, "_find_tail_cut_by_tokens", return_value=6),
+            patch("agent.context_compressor.call_llm", side_effect=_expire_and_raise) as mock_call,
+        ):
+            result = c.compress(messages)
+
+        assert mock_call.call_count == 1
+        assert len(result) < len(messages)
+        assert c._last_summary_fallback_used is True
+        assert c._last_aux_model_failure_model is None
+        assert c._compression_deadline is None
 
 
 class TestSummaryFallbackToMainModel:

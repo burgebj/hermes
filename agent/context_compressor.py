@@ -19,11 +19,12 @@ Improvements over v2:
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 from typing import Any, Dict, List, Optional
 
-from agent.auxiliary_client import call_llm, _is_connection_error
+from agent.auxiliary_client import call_llm, _get_task_timeout, _is_connection_error
 from agent.context_engine import ContextEngine
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
@@ -612,6 +613,7 @@ class ContextCompressor(ContextEngine):
         provider: str = "",
         api_mode: str = "",
         abort_on_summary_failure: bool = False,
+        wall_clock_cap_seconds: Any = 0,
     ):
         self.model = model
         self.base_url = base_url
@@ -628,6 +630,10 @@ class ContextCompressor(ContextEngine):
         # When False (default = historical behavior), insert a
         # deterministic "summary unavailable" handoff and drop the middle window.
         self.abort_on_summary_failure = abort_on_summary_failure
+        self.wall_clock_cap_seconds = self._normalize_wall_clock_cap_seconds(
+            wall_clock_cap_seconds
+        )
+        self._compression_deadline: Optional[float] = None
 
         self.context_length = get_model_context_length(
             model, base_url=base_url, api_key=api_key,
@@ -696,6 +702,87 @@ class ContextCompressor(ContextEngine):
         # succeeded.  Silent recovery would hide the broken config.
         self._last_aux_model_failure_error: Optional[str] = None
         self._last_aux_model_failure_model: Optional[str] = None
+
+    @staticmethod
+    def _normalize_wall_clock_cap_seconds(value: Any) -> float:
+        """Normalize optional compression wall-clock cap seconds.
+
+        ``0``/missing/false/negative/non-finite/invalid values disable the cap.
+        Plain numeric strings are accepted so YAML/env-style config such as
+        ``"420"`` works, but mixed strings like ``"420 seconds"`` are rejected.
+        """
+        if value is None or isinstance(value, bool):
+            return 0.0
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return 0.0
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(seconds) or seconds <= 0:
+            return 0.0
+        return seconds
+
+    def _begin_wall_clock_deadline(self) -> None:
+        if self.wall_clock_cap_seconds > 0:
+            self._compression_deadline = time.monotonic() + self.wall_clock_cap_seconds
+        else:
+            self._compression_deadline = None
+
+    def _clear_wall_clock_deadline(self) -> None:
+        self._compression_deadline = None
+
+    def _ensure_wall_clock_deadline(self) -> None:
+        if self.wall_clock_cap_seconds > 0 and self._compression_deadline is None:
+            self._begin_wall_clock_deadline()
+
+    def _remaining_wall_clock_seconds(self) -> Optional[float]:
+        if self.wall_clock_cap_seconds <= 0:
+            return None
+        self._ensure_wall_clock_deadline()
+        if self._compression_deadline is None:
+            return None
+        return self._compression_deadline - time.monotonic()
+
+    def _wall_clock_cap_exceeded(self) -> bool:
+        remaining = self._remaining_wall_clock_seconds()
+        return remaining is not None and remaining <= 0
+
+    def _effective_summary_timeout(self) -> Optional[float]:
+        """Return an explicit timeout only when wall-clock cap is active.
+
+        With no cap, omit the timeout kwarg so ``call_llm`` keeps its existing
+        auxiliary.compression.timeout resolution behavior. With a cap, bound the
+        call by the smaller of configured aux timeout and remaining wall-clock.
+        """
+        remaining = self._remaining_wall_clock_seconds()
+        if remaining is None:
+            return None
+        if remaining <= 0:
+            raise TimeoutError("compression wall-clock cap exceeded")
+        try:
+            base_timeout = self._normalize_wall_clock_cap_seconds(
+                _get_task_timeout("compression")
+            )
+        except Exception:
+            base_timeout = 0.0
+        effective = min(base_timeout, remaining) if base_timeout > 0 else remaining
+        return max(0.001, effective)
+
+    def _build_wall_clock_cap_fallback_summary(
+        self, turns_to_summarize: List[Dict[str, Any]]
+    ) -> str:
+        """Use the local deterministic fallback when the cap is exhausted."""
+        error = "compression wall-clock cap exceeded"
+        self._last_summary_error = error
+        self._last_summary_fallback_used = True
+        self._last_summary_dropped_count = len(turns_to_summarize)
+        return self._build_static_fallback_summary(
+            turns_to_summarize,
+            reason=error,
+        )
 
     def update_from_response(self, usage: Dict[str, Any]):
         """Update tracked token usage from API response."""
@@ -1436,7 +1523,11 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": int(summary_budget * 1.3),
                 # timeout resolved from auxiliary.compression.timeout config by call_llm
+                # unless a wall-clock cap must bound the current stage.
             }
+            effective_timeout = self._effective_summary_timeout()
+            if effective_timeout is not None:
+                call_kwargs["timeout"] = effective_timeout
             if self.summary_model:
                 call_kwargs["model"] = self.summary_model
             response = call_llm(**call_kwargs)
@@ -1454,6 +1545,8 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             self._last_summary_error = None
             return self._with_summary_prefix(summary)
         except RuntimeError:
+            if self._wall_clock_cap_exceeded():
+                return self._build_wall_clock_cap_fallback_summary(turns_to_summarize)
             # No provider configured — long cooldown, unlikely to self-resolve
             self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS
             self._last_summary_error = "no auxiliary LLM provider configured"
@@ -1499,6 +1592,8 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # back to the main model instead of entering a 60-second cooldown.
             # See issue #18458.
             _is_streaming_closed = _is_connection_error(e)
+            if self._wall_clock_cap_exceeded():
+                return self._build_wall_clock_cap_fallback_summary(turns_to_summarize)
             if _is_json_decode and not _is_model_not_found and not _is_timeout:
                 logger.error(
                     "Context compression failed: auxiliary LLM returned a "
@@ -1937,6 +2032,24 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         self._last_aux_model_failure_model = None
         self._last_compress_aborted = False
 
+        self._begin_wall_clock_deadline()
+        try:
+            return self._compress_with_deadline(
+                messages,
+                current_tokens=current_tokens,
+                focus_topic=focus_topic,
+                force=force,
+            )
+        finally:
+            self._clear_wall_clock_deadline()
+
+    def _compress_with_deadline(
+        self,
+        messages: List[Dict[str, Any]],
+        current_tokens: int = None,
+        focus_topic: str = None,
+        force: bool = False,
+    ) -> List[Dict[str, Any]]:
         # Manual /compress (force=True) bypasses the failure cooldown so the
         # user can retry immediately after an auto-compress abort.  Without
         # this, /compress would silently no-op for 30-60s after a failure.
