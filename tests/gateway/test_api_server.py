@@ -21,7 +21,7 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from aiohttp import web
+from aiohttp import FormData, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
@@ -412,6 +412,8 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/v1/health", adapter._handle_health)
     app.router.add_get("/v1/models", adapter._handle_models)
     app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
+    app.router.add_post("/v1/audio/transcriptions", adapter._handle_audio_transcriptions)
+    app.router.add_post("/v1/audio/speech", adapter._handle_audio_speech)
     app.router.add_get("/v1/skills", adapter._handle_skills)
     app.router.add_get("/v1/toolsets", adapter._handle_toolsets)
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
@@ -669,9 +671,14 @@ class TestCapabilitiesEndpoint:
             assert data["runtime"]["split_runtime"] is False
             assert "API-server host" in data["runtime"]["description"]
             assert data["features"]["chat_completions"] is True
+            assert data["features"]["audio_transcriptions"] is True
+            assert data["features"]["audio_speech"] is True
+            assert data["features"]["audio_api"] is True
             assert data["features"]["run_status"] is True
             assert data["features"]["run_events_sse"] is True
             assert data["features"]["session_continuity_header"] == "X-Hermes-Session-Id"
+            assert data["endpoints"]["audio_transcriptions"]["path"] == "/v1/audio/transcriptions"
+            assert data["endpoints"]["audio_speech"]["path"] == "/v1/audio/speech"
             assert data["endpoints"]["run_status"]["path"] == "/v1/runs/{run_id}"
             assert data["endpoints"]["skills"] == {"method": "GET", "path": "/v1/skills"}
             assert data["endpoints"]["toolsets"] == {"method": "GET", "path": "/v1/toolsets"}
@@ -690,6 +697,76 @@ class TestCapabilitiesEndpoint:
             assert authed.status == 200
             data = await authed.json()
             assert data["auth"]["required"] is True
+
+
+# ---------------------------------------------------------------------------
+# /v1/audio endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestAudioEndpoints:
+    @pytest.mark.asyncio
+    async def test_audio_transcriptions_returns_verbose_json(self, adapter):
+        app = _create_app(adapter)
+        form = FormData()
+        form.add_field(
+            "file",
+            b"fake webm bytes",
+            filename="sample.webm",
+            content_type="audio/webm",
+        )
+        form.add_field("model", "whisper-1")
+        form.add_field("response_format", "verbose_json")
+
+        with patch(
+            "tools.transcription_tools.transcribe_audio",
+            return_value={"success": True, "transcript": "hello", "provider": "local", "filtered": False},
+        ) as transcribe_mock, patch(
+            "tools.voice_mode.is_whisper_hallucination",
+            return_value=False,
+        ):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post("/v1/audio/transcriptions", data=form)
+                assert resp.status == 200
+                data = await resp.json()
+
+        assert data == {
+            "text": "hello",
+            "task": "transcribe",
+            "provider": "local",
+            "filtered": False,
+        }
+        assert resp.headers.get("X-Hermes-STT-Provider") == "local"
+        assert transcribe_mock.call_args.kwargs["model"] == "whisper-1"
+
+    @pytest.mark.asyncio
+    async def test_audio_speech_streams_generated_file(self, adapter):
+        app = _create_app(adapter)
+
+        def fake_tts(*, text, output_path):
+            with open(output_path, "wb") as handle:
+                handle.write(b"audio-bytes")
+            return json.dumps({
+                "success": True,
+                "file_path": output_path,
+                "provider": "piper",
+                "voice_compatible": True,
+            })
+
+        with patch("tools.tts_tool.text_to_speech_tool", side_effect=fake_tts) as tts_mock:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/v1/audio/speech",
+                    json={"input": "hello from Hermes", "response_format": "mp3"},
+                )
+                body = await resp.read()
+
+        assert resp.status == 200
+        assert body == b"audio-bytes"
+        assert resp.headers.get("Content-Type") == "audio/mpeg"
+        assert resp.headers.get("X-Hermes-TTS-Provider") == "piper"
+        assert resp.headers.get("X-Hermes-Voice-Compatible") == "true"
+        assert tts_mock.call_args.kwargs["text"] == "hello from Hermes"
 
 
 # ---------------------------------------------------------------------------
