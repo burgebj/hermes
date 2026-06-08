@@ -30,7 +30,7 @@ from typing import List, Dict, Any, Set, Optional
 # Edit this once to update all platforms simultaneously.
 _HERMES_CORE_TOOLS = [
     # Web
-    "web_search", "web_extract",
+    "web_search", "web_extract", "http_request",
     # Terminal + process management
     "terminal", "process",
     # File manipulation
@@ -88,8 +88,8 @@ _HERMES_WEBHOOK_SAFE_TOOLS = [
 TOOLSETS = {
     # Basic toolsets - individual tool categories
     "web": {
-        "description": "Web research and content extraction tools",
-        "tools": ["web_search", "web_extract"],
+        "description": "Web research, content extraction, and generic HTTP API call tools",
+        "tools": ["web_search", "web_extract", "http_request"],
         "includes": []  # No other toolsets included
     },
     

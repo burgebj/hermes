@@ -93,6 +93,7 @@ AUTHOR_MAP = {
     "drpelagik@gmail.com": "SeaXen",
     "lengr@users.noreply.github.com": "LengR",
     "Kewe63@users.noreply.github.com": "Kewe63",
+    "mehmet.kar@std.yildiz.edu.tr": "mehmetkr-31",
     "kewe.3217@gmail.com": "Kewe63",
     "17255546+CharZhou@users.noreply.github.com": "CharZhou",
     "metalclaudbot@gmail.com": "HashClawAI",

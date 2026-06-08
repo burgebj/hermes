@@ -149,13 +149,32 @@ def test_concurrent_compressions_same_session_serialize(tmp_path: Path) -> None:
     results: dict[str, list | None] = {"a": None, "b": None}
     errors: list[Exception] = []
 
+    # Barrier forces both threads to be inside compress_context before either
+    # one proceeds to lock acquisition.  Without this, CI scheduling jitter
+    # (up to ~1 s on heavily loaded runners) can delay the second thread so
+    # much that the first thread finishes and releases the lock before the
+    # second even starts.  That produces a sequential (not concurrent) shape
+    # and makes the test fail even though the lock code is correct.
+    _barrier = threading.Barrier(2, timeout=10)
+
     def run(key, agent):
         try:
-            compressed, _sp = agent._compress_context(_MESSAGES, "sys", approx_tokens=120_000)
-            results[key] = compressed
+            # Patch compress_context so both threads rendezvous before the
+            # lock acquisition.  The barrier is released once both threads
+            # arrive; then the first thread acquires the lock and the second
+            # thread is blocked by it.
+            with patch(
+                "agent.conversation_compression.compress_context",
+                side_effect=lambda *a, **kw: (_barrier.wait(), _orig_compress_context(*a, **kw))[1],
+            ):
+                compressed, _sp = agent._compress_context(_MESSAGES, "sys", approx_tokens=120_000)
+                results[key] = compressed
         except Exception as exc:
             errors.append(exc)
 
+    # Grab a reference to the *original* compress_context before the patch
+    # so the lambda can call it without infinite recursion.
+    from agent.conversation_compression import compress_context as _orig_compress_context
     t_a = threading.Thread(target=run, args=("a", agent_a), name="main_turn")
     t_b = threading.Thread(target=run, args=("b", agent_b), name="review_fork")
     t_a.start()
@@ -199,3 +218,4 @@ def test_concurrent_compressions_same_session_serialize(tmp_path: Path) -> None:
         "Compression lock leaked: still held on the parent session_id after both "
         "threads joined. Future compression on the child session would deadlock."
     )
+
