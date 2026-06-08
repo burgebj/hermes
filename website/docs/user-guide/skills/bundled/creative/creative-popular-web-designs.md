@@ -1,14 +1,14 @@
 ---
-title: "Popular Web Designs — 54 real design systems (Stripe, Linear, Vercel) as HTML/CSS"
+title: "Popular Web Designs"
 sidebar_label: "Popular Web Designs"
-description: "54 real design systems (Stripe, Linear, Vercel) as HTML/CSS"
+description: "Curated real design systems as HTML/CSS, sourced from VoltAgent/awesome-design-md and periodically compared with upstream"
 ---
 
 {/* This page is auto-generated from the skill's SKILL.md by website/scripts/generate-skill-docs.py. Edit the source SKILL.md, not this page. */}
 
 # Popular Web Designs
 
-54 real design systems (Stripe, Linear, Vercel) as HTML/CSS.
+Curated real design systems as HTML/CSS, sourced from VoltAgent/awesome-design-md and periodically compared with upstream.
 
 ## Skill metadata
 
@@ -16,7 +16,7 @@ description: "54 real design systems (Stripe, Linear, Vercel) as HTML/CSS"
 |---|---|
 | Source | Bundled (installed by default) |
 | Path | `skills/creative/popular-web-designs` |
-| Version | `1.0.0` |
+| Version | `1.0.1` |
 | Author | Hermes Agent + Teknium (design systems sourced from VoltAgent/awesome-design-md) |
 | License | MIT |
 | Platforms | linux, macos, windows |
@@ -29,9 +29,15 @@ The following is the complete skill definition that Hermes loads when this skill
 
 # Popular Web Designs
 
-54 real-world design systems ready for use when generating HTML/CSS. Each template captures a
-site's complete visual language: color palette, typography hierarchy, component styles, spacing
-system, shadows, responsive behavior, and practical agent prompts with exact CSS values.
+Curated real-world design systems ready for use when generating HTML/CSS. The local Hermes bundle is
+sourced from VoltAgent/awesome-design-md, but that upstream repo evolves quickly; before claiming
+Hermes has the complete current catalog, compare local `templates/*.md` with upstream
+`design-md/*/DESIGN.md`. See `references/upstream-awesome-design-md-comparison.md` for the
+2026-06-08 comparison snapshot, the 19 upstream-only designs found then, and the safe refresh strategy.
+
+Each template captures a site's visual language: color palette, typography hierarchy, component
+styles, spacing system, shadows, responsive behavior, and practical agent prompts with exact CSS
+values.
 
 ## Related design skills
 
