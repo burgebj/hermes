@@ -2937,7 +2937,7 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception:
             group_providers = None
 
-        by_slug = {p.get("slug"): p for p in providers}
+        by_slug = {p.get("slug", "").lower(): p for p in providers}
 
         def _provider_button(p):
             count = p.get("total_models", len(p.get("models", [])))
@@ -3159,7 +3159,7 @@ class TelegramAdapter(BasePlatformAdapter):
             except Exception:
                 _label, member_slugs = "", []
 
-            by_slug = {p["slug"]: p for p in state["providers"]}
+            by_slug = {p["slug"].lower(): p for p in state["providers"]}
             members = [by_slug[m] for m in member_slugs if m in by_slug]
             if not members:
                 await query.answer(text="Group not found.")
