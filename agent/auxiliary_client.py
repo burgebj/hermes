@@ -314,6 +314,7 @@ _API_KEY_PROVIDER_AUX_MODELS_FALLBACK: Dict[str, str] = {
     "kilocode": "google/gemini-3-flash-preview",
     "ollama-cloud": "nemotron-3-nano:30b",
     "tencent-tokenhub": "hy3-preview",
+    "deepinfra": "deepseek-ai/DeepSeek-V4-Flash",
 }
 
 # Legacy alias — callers that haven't been updated to _get_aux_model_for_provider()
@@ -328,6 +329,47 @@ _PROVIDER_VISION_MODELS: Dict[str, str] = {
     "xiaomi": "mimo-v2.5",
     "zai": "glm-5v-turbo",
 }
+
+
+def _get_deepinfra_default_vision_model() -> Optional[str]:
+    """Pick a default DeepInfra vision model from the live catalog.
+
+    Queries DeepInfra's filtered catalog for models carrying the ``vision``
+    capability tag and returns the first one in the catalog's hermes-sort
+    order. The catalog endpoint pre-sorts by recency/quality, so item[0] is
+    DeepInfra's currently recommended pick for this surface. Returns
+    ``None`` when the catalog is unreachable — the caller should treat that
+    as "no DeepInfra vision backend available" and fall through to the
+    next aggregator in the chain.
+    """
+    try:
+        from hermes_cli.models import _fetch_deepinfra_models_by_tag
+    except Exception:
+        return None
+    try:
+        items = _fetch_deepinfra_models_by_tag("vision")
+    except Exception:
+        return None
+    if not items:
+        return None
+    return items[0]["id"]
+
+
+def _resolve_provider_vision_default(provider: str) -> Optional[str]:
+    """Return the provider's preferred default vision model id, or None.
+
+    Static entries in :data:`_PROVIDER_VISION_MODELS` win first (xiaomi /
+    zai have dedicated vision-only model names that don't live in any
+    discoverable catalog). DeepInfra falls through to live catalog
+    discovery so the chosen model tracks DeepInfra's current availability
+    without code edits.
+    """
+    static = _PROVIDER_VISION_MODELS.get(provider)
+    if static:
+        return static
+    if provider == "deepinfra":
+        return _get_deepinfra_default_vision_model()
+    return None
 
 # Providers whose endpoint does not accept image input, even though the
 # provider's broader ecosystem has vision models available elsewhere.  When
@@ -4052,6 +4094,7 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
 _VISION_AUTO_PROVIDER_ORDER = (
     "openrouter",
     "nous",
+    "deepinfra",
 )
 
 
@@ -4108,6 +4151,21 @@ def _resolve_strict_vision_backend(
         return resolve_provider_client("openai-codex", model, is_vision=True)
     if provider == "anthropic":
         return _try_anthropic()
+    if provider == "deepinfra":
+        # DeepInfra exposes vision-capable models (Llama-4 Scout/Maverick,
+        # Qwen3-VL, Gemma 3, Gemini) on the same OpenAI-compatible endpoint
+        # as its chat models. The default model is discovered live from the
+        # catalog (filter=true&sort_by=hermes, "vision" capability tag) so
+        # we don't pin a hardcoded id that may rot when DeepInfra retires
+        # or replaces a model.
+        vision_model = model or _get_deepinfra_default_vision_model()
+        if not vision_model:
+            logger.debug(
+                "Vision auto-detect: deepinfra catalog unreachable or "
+                "returned no vision-tagged models — skipping"
+            )
+            return None, None
+        return resolve_provider_client("deepinfra", vision_model, is_vision=True)
     if provider == "custom":
         return _try_custom_endpoint()
     return None, None
@@ -4193,16 +4251,22 @@ def resolve_vision_provider_client(
         #      _PROVIDER_VISION_MODELS provides per-provider vision model
         #      overrides when the provider has a dedicated multimodal model
         #      that differs from the chat model (e.g. xiaomi → mimo-v2-omni,
-        #      zai → glm-5v-turbo). Nous is the exception: it has a dedicated
-        #      strict vision backend with tier-aware defaults, so it must not
-        #      fall through to the user's text chat model here.
-        #   2. OpenRouter  (vision-capable aggregator fallback)
+        #      zai → glm-5v-turbo). DeepInfra is similar but resolves its
+        #      default vision model live from the catalog (see
+        #      :func:`_resolve_provider_vision_default`). Nous is the
+        #      exception: it has a dedicated strict vision backend with
+        #      tier-aware defaults, so it must not fall through to the
+        #      user's text chat model here.
+        #   2. OpenRouter (vision-capable aggregator fallback)
         #   3. Nous Portal (vision-capable aggregator fallback)
-        #   4. Stop
+        #   4. DeepInfra   (OpenAI-compatible; vision model discovered
+        #                   live from the catalog — tried when
+        #                   DEEPINFRA_API_KEY is set)
+        #   5. Stop
         main_provider = _read_main_provider()
         main_model = _read_main_model()
         if main_provider and main_provider not in {"auto", ""}:
-            vision_model = _PROVIDER_VISION_MODELS.get(main_provider, main_model)
+            vision_model = _resolve_provider_vision_default(main_provider) or main_model
             if main_provider == "nous":
                 sync_client, default_model = _resolve_strict_vision_backend(
                     main_provider, vision_model

@@ -1046,7 +1046,7 @@ def _read_configured_image_model():
 
 
 def _read_configured_image_provider():
-    """Return the value of ``image_gen.provider`` from config.yaml, or None.
+    """Return ``image_gen.provider`` from config.yaml, or None.
 
     We only consult the plugin registry when this is explicitly set — an
     unset value keeps users on the in-tree FAL fallback even when other
@@ -1069,6 +1069,64 @@ def _read_configured_image_provider():
     return None
 
 
+def _read_model_provider() -> Optional[str]:
+    """Return ``model.provider`` from config.yaml, or None."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        model = cfg.get("model") if isinstance(cfg, dict) else None
+        if isinstance(model, dict):
+            value = model.get("provider")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    except Exception as exc:
+        logger.debug("Could not read model.provider: %s", exc)
+    return None
+
+
+def _resolve_image_provider_from_model_provider() -> Optional[str]:
+    """Return an image-gen provider name inferred from chat config / env,
+    or ``None`` when nothing matches an available plugin (so the caller
+    falls through to FAL).
+
+    Resolution order:
+
+    1. Explicit ``model.provider`` in config.yaml (the nested-dict form).
+    2. Chat-path env-var auto-detect — mirrors
+       :func:`hermes_cli.auth.resolve_provider("auto")`. Snapshots ship
+       the canonical ``model: <bare-id>`` config shape and rely on env
+       vars for provider routing; mirroring that here keeps image-gen
+       consistent with the chat path so a fresh-install user with only
+       ``DEEPINFRA_API_KEY`` exported doesn't drop to the FAL fallback
+       and see a misleading "FAL_KEY isn't set" message.
+
+    The candidate name only wins when the corresponding image-gen plugin
+    is loaded AND reports ``is_available()`` — that gate keeps any other
+    env-detected provider (one without an image-gen plugin) from
+    hijacking the dispatcher.
+    """
+    name = _read_model_provider()
+    if not name:
+        try:
+            from hermes_cli.auth import resolve_provider as _auth_resolve_provider
+            name = _auth_resolve_provider("auto")
+        except Exception as exc:
+            logger.debug("image_gen runtime-provider auto-detect skipped: %s", exc)
+            name = None
+    if not name:
+        return None
+    try:
+        from agent.image_gen_registry import get_provider
+        from hermes_cli.plugins import _ensure_plugins_discovered
+        _ensure_plugins_discovered()
+        provider = get_provider(name)
+        if provider is not None and provider.is_available():
+            return name
+    except Exception as exc:
+        logger.debug("image_gen auto-resolution skipped: %s", exc)
+    return None
+
+
 def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
     """Route the call to a plugin-registered provider when one is selected.
 
@@ -1082,8 +1140,13 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
     direct call, just routed through the registry).
     """
     configured = _read_configured_image_provider()
+    if configured == "fal":
+        return None  # explicit opt-in to legacy FAL
     if not configured:
-        return None
+        # Infer from model.provider; None falls through to FAL.
+        configured = _resolve_image_provider_from_model_provider()
+        if not configured:
+            return None
 
     # Also read configured model so we can pass it to the plugin
     configured_model = _read_configured_image_model()

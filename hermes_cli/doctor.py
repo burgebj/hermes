@@ -749,6 +749,10 @@ def run_doctor(args):
                 "huggingface",
                 "lmstudio",
                 "nous",
+                # DeepInfra is an aggregator-style gateway: its catalog
+                # is exclusively ``vendor/model`` slugs (Qwen/Qwen3.5-…,
+                # meta-llama/Llama-3-…, anthropic/claude-opus-4-7, …).
+                "deepinfra",
             }
             if (
                 default_model
