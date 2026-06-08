@@ -12994,6 +12994,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             )
 
         from run_agent import AIAgent
+        from gateway.config import Platform
         import queue
 
         def _run_still_current() -> bool:
@@ -13290,6 +13291,11 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             if _progress_thread_id == source.thread_id
             else {"thread_id": _progress_thread_id}
         ) if _progress_thread_id else None
+        # WeCom: tool progress uses streaming bubbles so edits update the same
+        # bubble instead of creating new ones. streaming_preview: True makes
+        # WeCom adapter.send() open a native streaming reply.
+        if source.platform == Platform.WECOM:
+            _progress_metadata = {"streaming_preview": True}
         _progress_reply_to = (
             event_message_id
             if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id
@@ -13353,7 +13359,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 except (TypeError, ValueError):
                     _edit_accepts_metadata = False
 
-            async def _edit_progress_message(message_id: str, content: str):
+            async def _edit_progress_message(message_id: str, content: str, *, finalize: bool = False):
                 kwargs = {
                     "chat_id": source.chat_id,
                     "message_id": message_id,
@@ -13361,6 +13367,12 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 }
                 if _edit_accepts_metadata:
                     kwargs["metadata"] = _progress_metadata
+                # Pass finalize kwarg only to adapters that accept it (e.g. WeCom).
+                _edit_params = inspect.signature(adapter.edit_message).parameters
+                if "finalize" in _edit_params or any(
+                    p.kind is inspect.Parameter.VAR_KEYWORD for p in _edit_params.values()
+                ):
+                    kwargs["finalize"] = finalize
                 return await adapter.edit_message(**kwargs)
 
             def _progress_text(lines: list) -> str:
@@ -13478,6 +13490,18 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                         # order. Mirrors GatewayStreamConsumer.on_segment_break
                         # on the content side. (Issue: tool + content
                         # linearization regression after PR #7885.)
+                        if progress_msg_id and can_edit and source.platform == Platform.WECOM:
+                            # WeCom streaming bubbles must be explicitly closed
+                            # (finish=True) or they hang in typing state. Finalize
+                            # before the content bubble is visible.
+                            try:
+                                await _edit_progress_message(
+                                    progress_msg_id,
+                                    _progress_text(progress_lines),
+                                    finalize=True,
+                                )
+                            except Exception:
+                                pass
                         progress_msg_id = None
                         progress_lines = []
                         last_progress_msg[0] = None
@@ -13596,10 +13620,14 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                                 # the current progress bubble and start a fresh
                                 # one for any tool lines that arrived after.
                                 await _roll_progress_overflow_if_needed()
-                                if can_edit and progress_lines and progress_msg_id:
+                                if can_edit and progress_msg_id:
                                     _pending_text = _progress_text(progress_lines)
                                     try:
-                                        await _edit_progress_message(progress_msg_id, _pending_text)
+                                        await _edit_progress_message(
+                                            progress_msg_id,
+                                            _pending_text,
+                                            finalize=source.platform == Platform.WECOM,
+                                        )
                                     except Exception:
                                         pass
                                 progress_msg_id = None
@@ -13617,7 +13645,11 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     if can_edit and progress_lines and progress_msg_id:
                         full_text = _progress_text(progress_lines)
                         try:
-                            await _edit_progress_message(progress_msg_id, full_text)
+                            await _edit_progress_message(
+                                progress_msg_id,
+                                full_text,
+                                finalize=source.platform == Platform.WECOM,
+                            )
                         except Exception:
                             pass
                     return
@@ -13678,6 +13710,10 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
+                return
+            # WeCom: suppress status callbacks — the streaming typing indicator
+            # already signals activity; sending status text creates extra bubbles.
+            if source.platform == Platform.WECOM:
                 return
             prepared_message = _prepare_gateway_status_message(
                 source.platform,
@@ -13814,6 +13850,10 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                         if source.platform == Platform.MATRIX:
                             _effective_cursor = ""
                             _buffer_only = True
+                        elif source.platform == Platform.WECOM:
+                            # WeCom: no cursor (the native streaming bubble
+                            # already shows a typing indicator).
+                            _effective_cursor = ""
                         # Fresh-final applies to Telegram only — other
                         # platforms either edit in place cheaply or don't
                         # have the edit-timestamp-stays-stale problem.
@@ -13832,11 +13872,19 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                             transport=_scfg.transport or "edit",
                             chat_type=getattr(source, "chat_type", "") or "",
                         )
+                        # WeCom: pass streaming_preview metadata so the stream
+                        # consumer's initial send() opens a native streaming
+                        # bubble that can be edited.
+                        _stream_metadata = (
+                            {"streaming_preview": True}
+                            if source.platform == Platform.WECOM
+                            else _status_thread_metadata
+                        )
                         _stream_consumer = GatewayStreamConsumer(
                             adapter=_adapter,
                             chat_id=source.chat_id,
                             config=_consumer_cfg,
-                            metadata=_status_thread_metadata,
+                            metadata=_stream_metadata,
                             on_new_message=(
                                 (lambda: progress_queue.put(("__reset__",)))
                                 if progress_queue is not None
@@ -13847,6 +13895,10 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                         if _want_stream_deltas:
                             def _stream_delta_cb(text: str) -> None:
                                 if _run_still_current():
+                                    # WeCom: suppress segment breaks (text=None)
+                                    # so all content stays in one streaming bubble.
+                                    if text is None and source.platform == Platform.WECOM:
+                                        return
                                     _stream_consumer.on_delta(text)
                         stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
@@ -13856,12 +13908,19 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 if not _run_still_current():
                     return
                 if _stream_consumer is not None:
+                    # WeCom: suppress all interim messages — they would create
+                    # extra bubbles or corrupt the streaming bubble content.
+                    if source.platform == Platform.WECOM:
+                        return
                     if already_streamed:
                         _stream_consumer.on_segment_break()
                     else:
                         _stream_consumer.on_commentary(text)
                     return
                 if already_streamed or not _status_adapter or not str(text or "").strip():
+                    return
+                # WeCom fallback: suppress even when stream consumer is not set up.
+                if source.platform == Platform.WECOM:
                     return
                 safe_schedule_threadsafe(
                     _status_adapter.send(
@@ -14761,6 +14820,10 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         async def _notify_long_running():
             if _NOTIFY_INTERVAL is None:
                 return  # Notifications disabled (gateway_notify_interval: 0)
+            # WeCom: suppress "Still working..." notifications — the native
+            # streaming typing indicator already signals that work is in progress.
+            if source.platform == Platform.WECOM:
+                return
             _notify_adapter = self.adapters.get(source.platform)
             if not _notify_adapter:
                 return

@@ -204,8 +204,15 @@ class TestPlatformDefaults:
         """Signal, BlueBubbles, etc. default to 'off' tool progress."""
         from gateway.display_config import resolve_display_setting
 
-        for plat in ("signal", "bluebubbles", "weixin", "wecom", "dingtalk"):
+        for plat in ("signal", "bluebubbles", "weixin", "dingtalk"):
             assert resolve_display_setting({}, plat, "tool_progress") == "off", plat
+
+    def test_wecom_tool_progress_enabled(self):
+        """WeCom shows tool progress via streaming bubbles (like Telegram)."""
+        from gateway.display_config import resolve_display_setting
+
+        assert resolve_display_setting({}, "wecom", "tool_progress") == "new"
+        assert resolve_display_setting({}, "wecom", "streaming") is True
 
     def test_minimal_tier_platforms(self):
         """Email, SMS, webhook default to 'off' tool progress."""
