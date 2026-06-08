@@ -1094,10 +1094,30 @@ def _load_local_whisper_model(model_name: str):
     On those hosts the load itself sometimes succeeds and the dlopen failure
     only surfaces at first ``transcribe()`` call.
 
-    We try ``auto`` first (fast CUDA path when it works), and on any CUDA
-    library load failure fall back to CPU + int8.
+    We try ``cuda`` + ``float16`` first (required for newer GPUs like RTX 5090
+    where ``compute_type="auto"`` triggers cuBLAS_STATUS_NOT_SUPPORTED), then
+    fall back to ``auto`` for other GPUs, and finally CPU + int8 on any CUDA
+    library load failure.
     """
     from faster_whisper import WhisperModel
+
+    # Newer GPUs (e.g. RTX 5090 / Blackwell) may not support the compute type
+    # that ctranslate2 auto-selects, causing cuBLAS_STATUS_NOT_SUPPORTED.
+    # Explicitly requesting float16 avoids the incompatible kernel path.
+    try:
+        return WhisperModel(model_name, device="cuda", compute_type="float16")
+    except Exception as exc:
+        if _looks_like_cuda_lib_error(exc):
+            logger.warning(
+                "faster-whisper CUDA load failed (%s) — falling back to CPU (int8). "
+                "Install the NVIDIA CUDA runtime (libcublas/libcudnn) to use GPU.",
+                exc,
+            )
+            return WhisperModel(model_name, device="cpu", compute_type="int8")
+        # Non-library errors (e.g. OOM, model corruption) — try auto as fallback
+        logger.debug(
+            "faster-whisper cuda+float16 failed (%s) — trying auto.", exc,
+        )
     try:
         return WhisperModel(model_name, device="auto", compute_type="auto")
     except Exception as exc:
