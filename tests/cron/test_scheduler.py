@@ -397,6 +397,28 @@ class TestResolveDeliveryTarget:
 
         assert _resolve_delivery_targets({"deliver": []}) == []
 
+    def test_list_form_with_none_entries_drops_none(self, monkeypatch):
+        """deliver=[None, 'telegram'] must resolve to telegram only.
+
+        ``str(None) == "None"`` is truthy, so a naive ``[str(p).strip() for p
+        in deliver if str(p).strip()]`` filter would join the literal string
+        ``"None"`` into the canonical deliver value (``"None,telegram"``).
+        Downstream then attempts to resolve a platform literally named
+        ``"None"`` and silently fails.  Mirrors the API-boundary fix in
+        ``tools/cronjob_tools._normalize_deliver_param`` (#22521) — defense in
+        depth for jobs persisted before that fix landed or hand-edited
+        jobs.json files.
+        """
+        from cron.scheduler import _resolve_delivery_targets, _normalize_deliver_value
+
+        assert _normalize_deliver_value([None, "telegram"]) == "telegram"
+        assert _normalize_deliver_value([None, None]) == "local"
+        assert _normalize_deliver_value(["telegram", None, "discord"]) == "telegram,discord"
+
+        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-9001")
+        targets = _resolve_delivery_targets({"deliver": [None, "telegram"], "origin": None})
+        assert [t["platform"] for t in targets] == ["telegram"]
+
 
 class TestRoutingIntents:
     """``all`` routing intent expands at fire time."""

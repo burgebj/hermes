@@ -590,7 +590,11 @@ def _normalize_deliver_value(deliver) -> str:
     if deliver is None or deliver == "":
         return "local"
     if isinstance(deliver, (list, tuple)):
-        parts = [str(p).strip() for p in deliver if str(p).strip()]
+        parts = [
+            str(p).strip()
+            for p in deliver
+            if p is not None and str(p).strip()
+        ]
         return ",".join(parts) if parts else "local"
     return str(deliver)
 
