@@ -29,7 +29,7 @@ _TITLE_PROMPT = (
 def generate_title(
     user_message: str,
     assistant_response: str,
-    timeout: float = 30.0,
+    timeout: Optional[float] = None,
     failure_callback: Optional[FailureCallback] = None,
     main_runtime: dict = None,
 ) -> Optional[str]:
@@ -92,6 +92,7 @@ def auto_title_session(
     failure_callback: Optional[FailureCallback] = None,
     main_runtime: dict = None,
     title_callback: Optional[TitleCallback] = None,
+    timeout: Optional[float] = None,
 ) -> None:
     """Generate and set a session title if one doesn't already exist.
 
@@ -113,7 +114,7 @@ def auto_title_session(
         return
 
     title = generate_title(
-        user_message, assistant_response, failure_callback=failure_callback, main_runtime=main_runtime
+        user_message, assistant_response, timeout=timeout, failure_callback=failure_callback, main_runtime=main_runtime
     )
     if not title:
         return
@@ -139,6 +140,7 @@ def maybe_auto_title(
     failure_callback: Optional[FailureCallback] = None,
     main_runtime: dict = None,
     title_callback: Optional[TitleCallback] = None,
+    timeout: Optional[float] = None,
 ) -> None:
     """Fire-and-forget title generation after the first exchange.
 
@@ -164,6 +166,7 @@ def maybe_auto_title(
             "failure_callback": failure_callback,
             "main_runtime": main_runtime,
             "title_callback": title_callback,
+            "timeout": timeout,
         },
         daemon=True,
         name="auto-title",

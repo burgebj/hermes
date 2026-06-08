@@ -93,6 +93,38 @@ class TestGenerateTitle:
         with patch("agent.title_generator.call_llm", side_effect=RuntimeError("nope")):
             assert generate_title("q", "a") is None
 
+    def test_default_timeout_is_none(self):
+        """generate_title defaults timeout to None so call_llm reads config."""
+        captured = {}
+
+        def mock_call_llm(**kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = "Title"
+            return resp
+
+        with patch("agent.title_generator.call_llm", side_effect=mock_call_llm):
+            generate_title("q", "a")
+
+        assert captured["timeout"] is None
+
+    def test_explicit_timeout_passed_to_call_llm(self):
+        """An explicit timeout value is forwarded to call_llm."""
+        captured = {}
+
+        def mock_call_llm(**kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = "Title"
+            return resp
+
+        with patch("agent.title_generator.call_llm", side_effect=mock_call_llm):
+            generate_title("q", "a", timeout=120.0)
+
+        assert captured["timeout"] == 120.0
+
     def test_truncates_long_messages(self):
         """Long user/assistant messages should be truncated in the LLM request."""
         captured_kwargs = {}
@@ -157,6 +189,28 @@ class TestAutoTitleSession:
             auto_title_session(db, "sess-1", "hi", "hello")
             db.set_session_title.assert_not_called()
 
+    def test_forwards_timeout_to_generate_title(self):
+        """auto_title_session must forward timeout to generate_title."""
+        db = MagicMock()
+        db.get_session_title.return_value = None
+
+        with patch("agent.title_generator.generate_title", return_value="T") as gen:
+            auto_title_session(db, "sess-1", "hi", "hello", timeout=60.0)
+            gen.assert_called_once_with(
+                "hi", "hello", timeout=60.0, failure_callback=None, main_runtime=None
+            )
+
+    def test_default_timeout_is_none(self):
+        """auto_title_session defaults timeout to None."""
+        db = MagicMock()
+        db.get_session_title.return_value = None
+
+        with patch("agent.title_generator.generate_title", return_value="T") as gen:
+            auto_title_session(db, "sess-1", "hi", "hello")
+            gen.assert_called_once_with(
+                "hi", "hello", timeout=None, failure_callback=None, main_runtime=None
+            )
+
 
 class TestMaybeAutoTitle:
     """Tests for maybe_auto_title() — the fire-and-forget entry point."""
@@ -202,6 +256,7 @@ class TestMaybeAutoTitle:
                 failure_callback=None,
                 main_runtime=None,
                 title_callback=None,
+                timeout=None,
             )
 
     def test_forwards_failure_callback_to_worker(self):
@@ -228,6 +283,31 @@ class TestMaybeAutoTitle:
                 failure_callback=_cb,
                 main_runtime=None,
                 title_callback=None,
+                timeout=None,
+            )
+
+    def test_forwards_timeout_to_worker(self):
+        """maybe_auto_title must forward timeout into the thread."""
+        db = MagicMock()
+        db.get_session_title.return_value = None
+        history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+        ]
+
+        with patch("agent.title_generator.auto_title_session") as mock_auto:
+            maybe_auto_title(db, "sess-1", "hello", "hi there", history, timeout=120.0)
+            import time
+            time.sleep(0.3)
+            mock_auto.assert_called_once_with(
+                db,
+                "sess-1",
+                "hello",
+                "hi there",
+                failure_callback=None,
+                main_runtime=None,
+                title_callback=None,
+                timeout=120.0,
             )
 
     def test_skips_if_no_response(self):
