@@ -6823,6 +6823,44 @@ class HermesCLI:
             else:
                 print("(^_^)v New session started!")
 
+    def _handle_upload_trace_command(self, cmd_original: str) -> None:
+        """Handle ``/upload-trace`` — upload this session to Hugging Face.
+
+        Deterministic, zero-LLM export (ported from qwibitai/nanoclaw#2648).
+        Reconstructs the current session as Claude Code JSONL and pushes it
+        to the user's private ``{user}/hermes-traces`` dataset, viewable in
+        the HF Agent Trace Viewer. Flags: ``--public``, ``--no-redact``.
+        The network call runs in a background thread so the UI stays
+        responsive; the status line prints when it finishes.
+        """
+        import threading
+
+        tokens = cmd_original.split()[1:]  # drop the command word
+        public = "--public" in tokens
+        no_redact = "--no-redact" in tokens
+        session_id = self.session_id
+        model = getattr(self, "model", "") or ""
+
+        _cprint(f"  {_DIM}Uploading session trace to Hugging Face…{_RST}")
+
+        def _worker():
+            try:
+                from agent.trace_upload import upload_session_trace
+                import os as _os
+                status = upload_session_trace(
+                    session_id,
+                    model=model,
+                    cwd=_os.getcwd(),
+                    redact=not no_redact,
+                    private=not public,
+                )
+            except Exception as e:  # never crash the CLI on upload failure
+                status = f"Trace upload failed: {e}"
+            for line in status.splitlines() or [status]:
+                _cprint(f"  {line}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _handle_handoff_command(self, cmd_original: str) -> bool:
         """Handle ``/handoff <platform>`` — transfer this CLI session to a gateway platform.
 
@@ -8972,6 +9010,8 @@ class HermesCLI:
         elif canonical == "handoff":
             if not self._handle_handoff_command(cmd_original):
                 return False
+        elif canonical == "upload-trace":
+            self._handle_upload_trace_command(cmd_original)
         elif canonical == "new":
             # Strip inline-skip tokens (now/--yes/-y) before deriving the title
             # so "/new now My Session" yields title="My Session" instead of

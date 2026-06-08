@@ -59,6 +59,7 @@ hermes [global-options] <command> [subcommand/options]
 | `hermes doctor` | Diagnose config and dependency issues. |
 | `hermes security audit` | On-demand supply-chain audit (OSV.dev) for the venv, plugin requirements, and pinned MCP servers. |
 | `hermes dump` | Copy-pasteable setup summary for support/debugging. |
+| `hermes trace upload` | Upload a session transcript to your private Hugging Face traces dataset (HF Agent Trace Viewer). |
 | `hermes prompt-size` | Show a byte breakdown of the system prompt + tool schemas (skills index, memory, profile). Runs offline. |
 | `hermes debug` | Debug tools — upload logs and system info for support. |
 | `hermes backup` | Back up Hermes home directory to a zip file. |
@@ -701,6 +702,32 @@ config_overrides:
 :::tip
 `hermes dump` is specifically designed for sharing. For interactive diagnostics, use `hermes doctor`. For a visual overview, use `hermes status`.
 :::
+
+## `hermes trace`
+
+```bash
+hermes trace upload [SESSION_ID] [--public] [--no-redact]
+```
+
+Upload a session transcript to your own private Hugging Face dataset
+(`{username}/hermes-traces`), where it opens in the
+[HF Agent Trace Viewer](https://huggingface.co/docs/hub/agent-traces) — a
+timeline of prompts, assistant turns, tool calls, and results. The session is
+exported as Claude Code JSONL, one of the formats the Hub auto-detects.
+
+Defaults to the most recently active session; pass a `SESSION_ID` (or a unique
+prefix) to upload another. Requires `HF_TOKEN` (a Hugging Face token with WRITE
+access) in your environment or `~/.hermes/.env`.
+
+| Flag | Description |
+|------|-------------|
+| `--public` | Create the traces dataset public instead of private (default: private). |
+| `--no-redact` | Skip secret redaction before upload (default: known secret patterns are scrubbed). |
+
+The same action is available mid-session as the `/upload-trace` slash command
+(CLI and gateway). Traces can contain prompts, tool output, local paths, and
+secrets — they are kept private and redacted by default; review before making
+one public.
 
 ## `hermes debug`
 

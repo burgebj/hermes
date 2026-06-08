@@ -8349,6 +8349,9 @@ class GatewayRunner:
         if canonical == "title":
             return await self._handle_title_command(event)
 
+        if canonical == "upload-trace":
+            return await self._handle_upload_trace_command(event)
+
         if canonical == "resume":
             return await self._handle_resume_command(event)
 
@@ -13919,6 +13922,39 @@ class GatewayRunner:
         if last_assistant:
             response += f"\n\nLast Hermes message:\n{last_assistant}"
         return response
+
+    async def _handle_upload_trace_command(self, event: MessageEvent) -> str:
+        """Handle /upload-trace — upload this session's transcript to Hugging Face.
+
+        Deterministic, zero-LLM export (ported from qwibitai/nanoclaw#2648).
+        Reconstructs the session as Claude Code JSONL and pushes it to the
+        user's private ``{user}/hermes-traces`` dataset, viewable in the HF
+        Agent Trace Viewer. The blocking HF network call is run in a thread
+        executor so the gateway event loop stays responsive. Flags:
+        ``--public`` (default private), ``--no-redact`` (default redact).
+        """
+        import asyncio
+
+        session_entry = self.session_store.get_or_create_session(event.source)
+        session_id = session_entry.session_id
+
+        args = (event.get_command_args() or "").split()
+        public = "--public" in args
+        no_redact = "--no-redact" in args
+
+        def _do():
+            try:
+                from agent.trace_upload import upload_session_trace
+                return upload_session_trace(
+                    session_id,
+                    redact=not no_redact,
+                    private=not public,
+                )
+            except Exception as e:  # never crash the gateway on upload failure
+                return f"Trace upload failed: {e}"
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, _do)
 
     async def _handle_title_command(self, event: MessageEvent) -> str:
         """Handle /title command — set or show the current session's title."""

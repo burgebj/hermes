@@ -6615,6 +6615,13 @@ def cmd_dump(args):
     run_dump(args)
 
 
+def cmd_trace(args):
+    """Upload a session transcript to Hugging Face as an agent trace."""
+    from hermes_cli.trace import run_trace
+
+    run_trace(args)
+
+
 def cmd_debug(args):
     """Debug tools (share report, etc.)."""
     from hermes_cli.debug import run_debug
@@ -11666,6 +11673,7 @@ def _coalesce_session_name_args(argv: list) -> list:
         "webhook",
         "memory",
         "dump",
+        "trace",
         "debug",
         "backup",
         "import",
@@ -12533,7 +12541,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "model", "pairing", "plugins", "portal", "postinstall", "profile", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
-        "skills", "slack", "status", "tools", "uninstall", "update",
+        "skills", "slack", "status", "tools", "trace", "uninstall", "update",
         "version", "webhook", "whatsapp", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
@@ -13989,6 +13997,43 @@ def main():
         help="Show redacted API key prefixes (first/last 4 chars) instead of just set/not set",
     )
     dump_parser.set_defaults(func=cmd_dump)
+
+    # =========================================================================
+    # trace command — upload a session transcript to Hugging Face
+    # =========================================================================
+    trace_parser = subparsers.add_parser(
+        "trace",
+        help="Upload a session transcript to Hugging Face (agent trace viewer)",
+        description="Upload a Hermes session transcript to your private "
+        "Hugging Face traces dataset, viewable in the HF Agent Trace Viewer. "
+        "See https://huggingface.co/docs/hub/agent-traces",
+    )
+    trace_subparsers = trace_parser.add_subparsers(dest="trace_command")
+    trace_upload = trace_subparsers.add_parser(
+        "upload",
+        aliases=["up"],
+        help="Upload a session trace to Hugging Face",
+        description="Export the session as Claude Code JSONL and upload it to "
+        "your private {user}/hermes-traces dataset. Defaults to the most recent "
+        "session; pass a SESSION_ID to choose another. Requires HF_TOKEN.",
+    )
+    trace_upload.add_argument(
+        "session_id",
+        nargs="?",
+        default=None,
+        help="Session id (or unique prefix) to upload. Defaults to the latest session.",
+    )
+    trace_upload.add_argument(
+        "--public",
+        action="store_true",
+        help="Create the traces dataset public instead of private (default: private).",
+    )
+    trace_upload.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="Skip secret redaction before upload (default: redact known secret patterns).",
+    )
+    trace_parser.set_defaults(func=cmd_trace)
 
     # =========================================================================
     # debug command

@@ -168,6 +168,9 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # ─── Tools ─────────────────────────────────────────────────────────────
     # ACP adapter (VS Code / Zed / JetBrains integration)
     "tool.acp": ("agent-client-protocol==0.9.0",),
+    # Session-trace upload to Hugging Face (`hermes trace upload` /
+    # `/upload-trace`). Only paid when the user actually uploads a trace.
+    "tool.trace_upload": ("huggingface_hub==1.4.1",),
     # Dashboard (`hermes dashboard`)
     "tool.dashboard": (
         "fastapi==0.133.1",
