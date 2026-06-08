@@ -4116,7 +4116,12 @@ def block_task(
     reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
-    """Transition ``running -> blocked``."""
+    """Transition a task into ``blocked``.
+
+    Manual/operator calls (``expected_run_id is None``) may block a
+    dependency-gated ``todo`` card before it has ever been claimed.
+    Worker-scoped calls stay stricter and still require the matching run.
+    """
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
@@ -4127,7 +4132,7 @@ def block_task(
                        claim_expires= NULL,
                        worker_pid   = NULL
                  WHERE id = ?
-                   AND status IN ('running', 'ready')
+                   AND status IN ('todo', 'running', 'ready')
                 """,
                 (task_id,),
             )
