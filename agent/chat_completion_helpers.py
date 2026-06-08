@@ -1662,6 +1662,17 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     # poll loop uses this to detect stale connections that keep receiving
     # SSE keep-alive pings but no actual data.
     last_chunk_time = {"t": time.time()}
+    # Wall-clock timestamp of the last chunk that carried real output
+    # (content text or tool calls).  Unlike last_chunk_time, this is NOT
+    # reset by reasoning-only (reasoning_content / thinking) chunks.
+    # The outer poll loop uses it to detect models stuck in an infinite
+    # reasoning loop that never commit to a visible response (#29086).
+    last_content_chunk_time = {"t": time.time()}
+    # Becomes True once the model emits the first reasoning chunk.
+    # The reasoning-only stale check only activates after this is set so
+    # models that are simply slow to produce their first token are not
+    # affected — they fall under the normal _stream_stale_timeout guard.
+    reasoning_seen = {"yes": False}
 
     def _fire_first_delta():
         if not first_delta_fired["done"] and on_first_delta:
@@ -1718,9 +1729,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 api_kwargs=stream_kwargs,
             )
         )
-        # Reset stale-stream timer so the detector measures from this
+        # Reset stale-stream timers so the detectors measure from this
         # attempt's start, not a previous attempt's last chunk.
         last_chunk_time["t"] = time.time()
+        last_content_chunk_time["t"] = time.time()
+        reasoning_seen["yes"] = False
         agent._touch_activity("waiting for provider response (streaming)")
         # Initialize per-attempt stream diagnostics so the retry block can
         # reach for them after the stream dies.  Lives on
@@ -1797,11 +1810,13 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             reasoning_text = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
             if reasoning_text:
                 reasoning_parts.append(reasoning_text)
+                reasoning_seen["yes"] = True  # model entered reasoning mode
                 _fire_first_delta()
                 agent._fire_reasoning_delta(reasoning_text)
 
             # Accumulate text content — fire callback only when no tool calls
             if delta and delta.content:
+                last_content_chunk_time["t"] = time.time()  # real output arrived
                 content_parts.append(delta.content)
                 if not tool_calls_acc:
                     _fire_first_delta()
@@ -1827,6 +1842,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
 
             # Accumulate tool call deltas — notify display on first name
             if delta and delta.tool_calls:
+                last_content_chunk_time["t"] = time.time()  # real output arrived
                 for tc_delta in delta.tool_calls:
                     raw_idx = tc_delta.index if tc_delta.index is not None else 0
                     delta_id = tc_delta.id or ""
@@ -1983,8 +1999,10 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         """
         has_tool_use = False
 
-        # Reset stale-stream timer for this attempt
+        # Reset stale-stream timers for this attempt
         last_chunk_time["t"] = time.time()
+        last_content_chunk_time["t"] = time.time()
+        reasoning_seen["yes"] = False
         # Per-attempt diagnostic dict for the retry block to consume.
         _diag = agent._stream_diag_init()
         request_client_holder["diag"] = _diag
@@ -2031,6 +2049,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     block = getattr(event, "content_block", None)
                     if block and getattr(block, "type", None) == "tool_use":
                         has_tool_use = True
+                        last_content_chunk_time["t"] = time.time()  # real output (tool call)
                         tool_name = getattr(block, "name", None)
                         if tool_name:
                             _fire_first_delta()
@@ -2043,12 +2062,14 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         if delta_type == "text_delta":
                             text = getattr(delta, "text", "")
                             if text and not has_tool_use:
+                                last_content_chunk_time["t"] = time.time()  # real output
                                 _fire_first_delta()
                                 agent._fire_stream_delta(text)
                                 deltas_were_sent["yes"] = True
                         elif delta_type == "thinking_delta":
                             thinking_text = getattr(delta, "thinking", "")
                             if thinking_text:
+                                reasoning_seen["yes"] = True  # model entered reasoning mode
                                 _fire_first_delta()
                                 agent._fire_reasoning_delta(thinking_text)
 
@@ -2328,6 +2349,14 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         else:
             _stream_stale_timeout = _stream_stale_timeout_base
 
+    # Reasoning-only stale timeout: how long we tolerate a model emitting
+    # only reasoning tokens with no visible output before aborting (#29086).
+    # Independent of _stream_stale_timeout — that one fires when NO chunks
+    # arrive at all; this one fires when chunks arrive but are all reasoning.
+    _reasoning_only_stale_timeout = float(
+        os.getenv("HERMES_REASONING_ONLY_STALE_TIMEOUT", 300.0)
+    )
+
     t = threading.Thread(target=_call, daemon=True)
     t.start()
     _last_heartbeat = time.time()
@@ -2385,6 +2414,49 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             agent._touch_activity(
                 f"stale stream detected after {int(_stale_elapsed)}s, reconnecting"
             )
+
+        # Reasoning-only stale: model is emitting reasoning tokens but never
+        # committing to visible output.  Kills the connection so the inner
+        # retry loop can start fresh instead of waiting for the HTTP timeout
+        # (up to 1800 s).  Only activates once reasoning has been seen so
+        # slow-to-start models are unaffected (#29086).
+        if reasoning_seen["yes"]:
+            _ro_elapsed = time.time() - last_content_chunk_time["t"]
+            if _ro_elapsed > _reasoning_only_stale_timeout:
+                logger.warning(
+                    "Reasoning-only stream for %.0fs (threshold %.0fs) — "
+                    "model emitting reasoning but no visible output. "
+                    "model=%s. Killing connection.",
+                    _ro_elapsed, _reasoning_only_stale_timeout,
+                    api_kwargs.get("model", "unknown"),
+                )
+                agent._emit_status(
+                    f"⚠️ Model has been reasoning for {int(_ro_elapsed)}s "
+                    f"without producing output "
+                    f"(model: {api_kwargs.get('model', 'unknown')}). "
+                    f"Aborting stream..."
+                )
+                try:
+                    rc = request_client_holder.get("client")
+                    if rc is not None:
+                        agent._close_request_openai_client(
+                            rc, reason="reasoning_only_stale_kill"
+                        )
+                except Exception:
+                    pass
+                try:
+                    agent._replace_primary_openai_client(
+                        reason="reasoning_only_stale_pool_cleanup"
+                    )
+                except Exception:
+                    pass
+                # Reset to prevent repeated kills while the thread processes
+                # the closure.
+                last_content_chunk_time["t"] = time.time()
+                reasoning_seen["yes"] = False
+                agent._touch_activity(
+                    f"reasoning-only stale after {int(_ro_elapsed)}s, reconnecting"
+                )
 
         if agent._interrupt_requested:
             try:
