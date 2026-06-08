@@ -1637,6 +1637,13 @@ def resolve_runtime_provider(
         if cfg_provider == provider:
             cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
         base_url = cfg_base_url or creds.get("base_url", "").rstrip("/")
+        api_key = creds.get("api_key", "")
+        source = creds.get("source", "env")
+        if provider == "deepseek" and not api_key and cfg_provider == "deepseek":
+            cfg_api_key = str(model_cfg.get("api_key") or "").strip()
+            if cfg_api_key:
+                api_key = cfg_api_key
+                source = "config:model.api_key"
         api_mode = "chat_completions"
         if provider == "copilot":
             api_mode = _copilot_runtime_api_mode(model_cfg, creds.get("api_key", ""))
@@ -1674,8 +1681,8 @@ def resolve_runtime_provider(
             "provider": provider,
             "api_mode": api_mode,
             "base_url": base_url,
-            "api_key": creds.get("api_key", ""),
-            "source": creds.get("source", "env"),
+            "api_key": api_key,
+            "source": source,
             "requested_provider": requested_provider,
         }
 

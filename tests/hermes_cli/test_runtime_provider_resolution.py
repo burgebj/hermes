@@ -199,6 +199,62 @@ def test_resolve_runtime_provider_uses_qwen_pool_entry(monkeypatch):
     assert resolved["source"] == "manual:qwen_cli"
 
 
+def test_resolve_runtime_provider_deepseek_uses_config_api_key_when_auth_empty(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "deepseek")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "deepseek",
+            "api_key": "config-deepseek-token",
+            "base_url": "https://api.deepseek.com/v1",
+            "default": "deepseek/deepseek-chat",
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_api_key_provider_credentials",
+        lambda provider: {
+            "provider": provider,
+            "api_key": "",
+            "base_url": "https://api.deepseek.com/v1",
+            "source": "default",
+        },
+    )
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
+
+    resolved = rp.resolve_runtime_provider(requested="deepseek")
+
+    assert resolved["provider"] == "deepseek"
+    assert resolved["api_key"] == "config-deepseek-token"
+    assert resolved["source"] == "config:model.api_key"
+    assert resolved["base_url"] == "https://api.deepseek.com/v1"
+
+
+def test_resolve_runtime_provider_deepseek_config_api_key_is_ignored_for_other_provider(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "anthropic",
+            "api_key": "config-deepseek-token",
+            "base_url": "https://api.anthropic.com",
+        },
+    )
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.resolve_anthropic_token",
+        lambda: "anthropic-token",
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="anthropic")
+
+    assert resolved["provider"] == "anthropic"
+    assert resolved["api_key"] == "anthropic-token"
+    assert resolved["base_url"] == "https://api.anthropic.com"
+
+
 def test_resolve_provider_alias_qwen(monkeypatch):
     monkeypatch.setattr(rp.auth_mod, "_load_auth_store", lambda: {})
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
