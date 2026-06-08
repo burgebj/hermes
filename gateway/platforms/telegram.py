@@ -4457,6 +4457,19 @@ class TelegramAdapter(BasePlatformAdapter):
             flags=re.MULTILINE,
         )
 
+        # 9b) Protect bare URLs from MarkdownV2 escaping.
+        #     Plain-text URLs (not already inside a markdown link) get their
+        #     special characters (`.`, `?`, `!`, etc.) backslash-escaped by
+        #     _escape_mdv2, which makes them invisible or unreadable in
+        #     Telegram clients.  Wrapping them as MarkdownV2 autolinks
+        #     `[url](url)` keeps the URL intact and clickable.  (Fixes #40667)
+        _BARE_URL_RE = re.compile(
+            r'(https?://[^\s\[\]()<>{}]+)',
+        )
+        def _protect_bare_url(m: re.Match) -> str:
+            return _ph(f'[{m.group(1)}]({m.group(1)})')
+        text = _BARE_URL_RE.sub(_protect_bare_url, text)
+
         # 10) Escape remaining special characters in plain text
         text = _escape_mdv2(text)
 

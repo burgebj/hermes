@@ -291,6 +291,91 @@ class TestFormatMessageLinks:
 
 
 # =========================================================================
+# format_message - bare URL protection (fixes #40667)
+# =========================================================================
+
+
+class TestFormatMessageBareUrls:
+    r"""Bare URLs must be wrapped as MarkdownV2 autolinks before escaping.
+
+    Without protection, ``_escape_mdv2`` backslash-escapes ``.``, ``!``,
+    ``?`` etc. inside the URL, making it invisible or unreadable in
+    Telegram clients.  (Fixes #40667)
+    """
+
+    def test_bare_http_url_not_escaped(self, adapter):
+        """Bare http URL should become a MarkdownV2 link, not have dots escaped."""
+        result = adapter.format_message("Visit http://127.0.0.1:5173/?token=abc123 now")
+        # URL should appear as a link, not with escaped dots
+        assert "http://127.0.0.1:5173/?token=abc123" in result
+        # Dots should NOT be backslash-escaped
+        assert "127\\.0" not in result
+
+    def test_bare_https_url_not_escaped(self, adapter):
+        """Bare https URL should be wrapped as link."""
+        result = adapter.format_message("Go to https://example.com/path?foo=bar&baz=1")
+        assert "https://example.com/path?foo=bar&baz=1" in result
+        assert "example\\.com" not in result
+
+    def test_bare_url_becomes_markdown_link(self, adapter):
+        """Bare URL should be converted to [url](url) MarkdownV2 format."""
+        result = adapter.format_message("See http://example.com/page")
+        # Should be wrapped as a link
+        assert "[http://example.com/page](http://example.com/page)" in result
+
+    def test_url_in_code_block_not_double_wrapped(self, adapter):
+        """URLs inside code blocks should NOT be wrapped again."""
+        text = "```\nhttp://example.com\n```"
+        result = adapter.format_message(text)
+        # Code block content should be preserved as-is
+        assert "```" in result
+
+    def test_url_in_inline_code_not_double_wrapped(self, adapter):
+        """URLs inside inline code should NOT be wrapped again."""
+        text = "Use `http://example.com` endpoint"
+        result = adapter.format_message(text)
+        assert "`http://example.com`" in result
+
+    def test_markdown_link_not_double_wrapped(self, adapter):
+        """Existing markdown links should not be double-wrapped."""
+        text = "[Click](http://example.com)"
+        result = adapter.format_message(text)
+        # Should appear once as a link (URL in href), not nested
+        assert result.count("http://example.com") == 1  # only in the URL part
+        # Should still be a valid link structure
+        assert "[Click](http://example.com)" in result
+
+    def test_multiple_bare_urls(self, adapter):
+        """Multiple bare URLs should each be wrapped independently."""
+        result = adapter.format_message("See http://a.com and https://b.org/path")
+        assert "http://a.com" in result
+        assert "https://b.org/path" in result
+        assert "a\\.com" not in result
+        assert "b\\.org" not in result
+
+    def test_url_with_complex_query_string(self, adapter):
+        """URL with query params, fragments, and special chars should survive."""
+        url = "https://app.example.com/callback?code=abc123&state=xyz&redirect_uri=https%3A%2F%2Ffoo.bar"
+        result = adapter.format_message(f"Auth URL: {url}")
+        assert url in result
+
+    def test_url_with_port(self, adapter):
+        """URL with explicit port should survive."""
+        result = adapter.format_message("Server at http://192.168.1.1:8080/health")
+        assert "http://192.168.1.1:8080/health" in result
+        assert "192\\.168" not in result
+
+    def test_surrounding_text_still_escaped(self, adapter):
+        """Non-URL text around bare URLs should still have specials escaped."""
+        result = adapter.format_message("Hello! Visit http://example.com now.")
+        # Surrounding text should have ! and . escaped
+        assert "Hello\\!" in result
+        assert "now\\." in result
+        # URL should not be escaped
+        assert "example\\.com" not in result
+
+
+# =========================================================================
 # format_message - BUG: italic regex spans newlines
 # =========================================================================
 
