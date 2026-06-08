@@ -10,24 +10,23 @@ Resolution order for text tasks (auto mode):
   2. OpenRouter  (OPENROUTER_API_KEY)
   3. Nous Portal (~/.hermes/auth.json active provider)
   4. Custom endpoint (config.yaml model.base_url + OPENAI_API_KEY)
-  5. Native Anthropic
-  6. Direct API-key providers (z.ai/GLM, Kimi/Moonshot, MiniMax, MiniMax-CN)
-  7. None
+  5. Direct API-key providers (z.ai/GLM, Kimi/Moonshot, MiniMax, MiniMax-CN)
+  6. None
 
 Resolution order for vision/multimodal tasks (auto mode):
   1. Selected main provider, if it is one of the supported vision backends below
   2. OpenRouter
   3. Nous Portal
-  4. Native Anthropic
-  5. Custom endpoint (for local vision models: Qwen-VL, LLaVA, Pixtral, etc.)
+  4. Custom endpoint (for local vision models: Qwen-VL, LLaVA, Pixtral, etc.)
+  5. Direct API-key providers with vision-capable auxiliary models
   6. None
 
-Codex OAuth (ChatGPT-account auth) is intentionally NOT in either
-fallback chain: OpenAI gates this endpoint behind an undocumented,
-shifting model allow-list, so "just try Codex with a hardcoded model"
-rots on its own.  Codex is used only when the user's main provider *is*
-openai-codex (Step 1 above) or when a caller explicitly requests it with
-a model (auxiliary.<task>.provider + auxiliary.<task>.model).
+Codex OAuth (ChatGPT-account auth) is intentionally NOT in the fallback
+chain: OpenAI gates this endpoint behind an undocumented, shifting model
+allow-list, so "just try Codex with a hardcoded model" rots on its own.
+Codex is used only when the user's main provider *is* openai-codex
+(Step 1 above) or when a caller explicitly requests it with a model
+(auxiliary.<task>.provider + auxiliary.<task>.model).
 
 Per-task overrides are configured in config.yaml under the ``auxiliary:`` section
 (e.g. ``auxiliary.vision.provider``, ``auxiliary.compression.model``).
@@ -37,7 +36,8 @@ Payment / credit exhaustion fallback:
   When a resolved provider returns HTTP 402 or a credit-related error,
   call_llm() automatically retries with the next available provider in the
   auto-detection chain.  This handles the common case where a user depletes
-  their OpenRouter balance but has Codex OAuth or another provider available.
+  their OpenRouter balance but has Nous Portal, a custom endpoint, or another
+  direct API-key provider available.
 """
 
 import json
