@@ -505,6 +505,8 @@ export function useSessionActions({
       if (stored) {
         setCurrentUsage(current => ({
           ...current,
+          cache_read: stored.cache_read_tokens || 0,
+          cache_write: stored.cache_write_tokens || 0,
           input: stored.input_tokens || 0,
           output: stored.output_tokens || 0,
           total: (stored.input_tokens || 0) + (stored.output_tokens || 0)
@@ -802,6 +804,8 @@ export function useSessionActions({
           if (stored) {
             setCurrentUsage(current => ({
               ...current,
+              cache_read: stored.cache_read_tokens || 0,
+              cache_write: stored.cache_write_tokens || 0,
               input: stored.input_tokens || 0,
               output: stored.output_tokens || 0,
               total: (stored.input_tokens || 0) + (stored.output_tokens || 0)

@@ -279,6 +279,8 @@ export interface SessionCreateResponse {
 
 export interface SessionInfo {
   archived?: boolean
+  cache_read_tokens?: number
+  cache_write_tokens?: number
   cwd?: null | string
   ended_at: null | number
   id: string
@@ -356,6 +358,11 @@ export interface SessionRuntimeInfo {
 
 export interface UsageStats {
   calls: number
+  cache_hit_ratio?: number
+  cache_read?: number
+  cache_read_tokens?: number
+  cache_write?: number
+  cache_write_tokens?: number
   context_max?: number
   context_percent?: number
   context_used?: number

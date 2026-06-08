@@ -19,7 +19,7 @@ import {
 } from '@/lib/icons'
 import { formatModelStatusLabel } from '@/lib/model-status-label'
 import type { RuntimeReadinessResult } from '@/lib/runtime-readiness'
-import { contextBarLabel, LiveDuration, usageContextLabel } from '@/lib/statusbar'
+import { contextBarLabel, LiveDuration, usageCacheLabel, usageContextLabel } from '@/lib/statusbar'
 import { cn } from '@/lib/utils'
 import { setGlobalYolo, setSessionYolo } from '@/lib/yolo-session'
 import { $desktopActionTasks } from '@/store/activity'
@@ -101,6 +101,7 @@ export function useStatusbarItems({
 
   const contextUsage = useMemo(() => usageContextLabel(currentUsage), [currentUsage])
   const contextBar = useMemo(() => contextBarLabel(currentUsage), [currentUsage])
+  const cacheUsage = useMemo(() => usageCacheLabel(currentUsage), [currentUsage])
 
   // Per-session approval bypass (same scope as the TUI's Shift+Tab). On a
   // new-chat draft (no runtime session yet) we arm locally; the session-create
@@ -326,6 +327,14 @@ export function useStatusbarItems({
         variant: 'text'
       },
       {
+        detail: cacheUsage?.detail,
+        hidden: !cacheUsage,
+        id: 'cache-usage',
+        label: cacheUsage?.label,
+        title: cacheUsage?.title,
+        variant: 'text'
+      },
+      {
         detail: contextBar || undefined,
         hidden: !contextUsage,
         id: 'context-usage',
@@ -389,6 +398,7 @@ export function useStatusbarItems({
     ],
     [
       busy,
+      cacheUsage,
       contextBar,
       contextUsage,
       copy,
