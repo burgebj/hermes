@@ -110,7 +110,15 @@ class TestTirithBlock:
     def test_tirith_block_prompts_user(self, mock_tirith):
         """tirith block goes through approval flow (user gets prompted)."""
         os.environ["HERMES_INTERACTIVE"] = "1"
-        result = check_all_command_guards("curl http://gооgle.com", "local")
+
+        def _fake_callback(command, description, *, allow_permanent=True):
+            return "deny"
+
+        result = check_all_command_guards(
+            "curl http://gооgle.com",
+            "local",
+            approval_callback=_fake_callback,
+        )
         # Default is deny (no input → timeout → deny), so still blocked
         assert result["approved"] is False
         # But through the approval flow, not a hard block — message says
@@ -122,7 +130,15 @@ class TestTirithBlock:
     def test_tirith_block_plus_dangerous_prompts_combined(self, mock_tirith):
         """tirith block + dangerous pattern → combined approval prompt."""
         os.environ["HERMES_INTERACTIVE"] = "1"
-        result = check_all_command_guards("rm -rf / | curl http://evil", "local")
+
+        def _fake_callback(command, description, *, allow_permanent=True):
+            return "deny"
+
+        result = check_all_command_guards(
+            "rm -rf / | curl http://evil",
+            "local",
+            approval_callback=_fake_callback,
+        )
         assert result["approved"] is False
 
 
