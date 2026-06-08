@@ -6013,6 +6013,15 @@ def set_config_value(key: str, value: str):
         except Exception:
             user_config = {}
     
+    # Alias bare "provider" → "model.provider" so that the short form
+    # `hermes config set provider X` writes to the same key the runtime
+    # reads (`model.provider`) instead of a dead top-level `provider:`
+    # key that is never consumed.  (#41943)
+    _KEY_ALIASES = {
+        "provider": "model.provider",
+    }
+    key = _KEY_ALIASES.get(key, key)
+
     # Handle nested keys (e.g., "tts.provider") including numeric list
     # indices (e.g., "custom_providers.0.api_key").  Delegates to
     # _set_nested which preserves list-typed nodes; before #17876 the
