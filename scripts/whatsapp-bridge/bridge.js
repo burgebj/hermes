@@ -119,9 +119,144 @@ function trackSentMessageId(sent) {
   }
 }
 
+// Track display names observed from incoming messages so outgoing mentions can
+// render as @Name instead of raw @phone whenever WhatsApp has shown us a name.
+const contactNames = new Map();
+
+function rememberContactName(jid, name) {
+  const normalized = normalizeOutboundMentionJid(jid);
+  const display = sanitizeMentionDisplayName(name);
+  if (!normalized || !display) return;
+  contactNames.set(normalized, display);
+  const bare = normalized.split('@')[0];
+  if (bare) contactNames.set(bare, display);
+  const mappedPhone = lidToPhone[normalized] || lidToPhone[bare];
+  if (mappedPhone) {
+    contactNames.set(mappedPhone, display);
+    contactNames.set(`${mappedPhone}@s.whatsapp.net`, display);
+  }
+}
+
+function sanitizeMentionDisplayName(name) {
+  if (!name) return '';
+  const cleaned = String(name)
+    .replace(/^@+/, '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned || /^\d{5,}$/.test(cleaned)) return '';
+  return cleaned.slice(0, 50);
+}
+
+function mentionDisplayFromRaw(raw, jid) {
+  if (raw && typeof raw === 'object') {
+    const explicit = sanitizeMentionDisplayName(
+      raw.displayName || raw.display_name || raw.name || raw.pushName || raw.notify,
+    );
+    if (explicit) return explicit;
+  }
+  const bare = String(jid || '').split('@')[0];
+  return contactNames.get(jid) || contactNames.get(bare) || '';
+}
+
 function normalizeWhatsAppId(value) {
   if (!value) return '';
   return String(value).replace(':', '@');
+}
+
+function normalizeOutboundMentionJid(value) {
+  if (!value) return '';
+  const normalized = normalizeWhatsAppId(value).trim().replace(/^@+/, '');
+  if (normalized.endsWith('@s.whatsapp.net') || normalized.endsWith('@lid')) return normalized;
+  if (/^\d{5,}$/.test(normalized)) return `${normalized}@s.whatsapp.net`;
+  return '';
+}
+
+function rawMentionValue(raw) {
+  if (raw && typeof raw === 'object') {
+    return raw.jid || raw.id || raw.userId || raw.user_id || raw.mentionedJid || raw.value || '';
+  }
+  return raw;
+}
+
+function addUniqueMention(mentions, value) {
+  const rawValue = rawMentionValue(value);
+  const jid = normalizeOutboundMentionJid(rawValue);
+  if (jid) {
+    const bare = jid.split('@')[0];
+    let existing = mentions.find(item => item.jid === jid || String(item.jid).split('@')[0] === bare);
+    const display = mentionDisplayFromRaw(value, jid);
+    if (!existing) {
+      existing = { jid, display };
+      mentions.push(existing);
+    } else if (display && !existing.display) {
+      existing.display = display;
+    }
+  }
+  return jid;
+}
+
+function prepareOutgoingMentions(message, rawMentions = []) {
+  const mentions = [];
+  const explicit = Array.isArray(rawMentions)
+    ? rawMentions
+    : (typeof rawMentions === 'string' ? [rawMentions] : []);
+  
+  // Handle both string JIDs and {jid, display} objects
+  for (const item of explicit) {
+    if (typeof item === 'string') {
+      addUniqueMention(mentions, item);
+    } else if (item && typeof item === 'object' && item.jid) {
+      addUniqueMention(mentions, item.jid, item.display);
+    }
+  }
+
+  // Convert raw JIDs in text into WhatsApp mention display tokens.  Without
+  // the parallel `mentions` array Baileys sends these as plain text and no one
+  // is pinged.
+  let text = String(message || '').replace(
+    /(^|[^\w@])@?(\d{5,}@(s\.whatsapp\.net|lid))\b/g,
+    (match, prefix, jid) => {
+      const normalized = addUniqueMention(mentions, jid) || jid;
+      const bare = normalized.split('@')[0];
+      const mention = mentions.find(item => item.jid === normalized || String(item.jid).split('@')[0] === bare);
+      const display = sanitizeMentionDisplayName(mention?.display) || bare;
+      return `${prefix}@${display}`;
+    },
+  );
+
+  // Also support already-humanized @phone tokens.
+  for (const match of text.matchAll(/(^|[^\w@])@(\d{5,})(?![\w@])/g)) {
+    addUniqueMention(mentions, match[2]);
+  }
+
+  for (const mention of mentions) {
+    const bare = String(mention.jid).split('@')[0];
+    const display = sanitizeMentionDisplayName(mention.display);
+    if (bare && display) {
+      text = text.replace(new RegExp(`(^|[^\\w@])@${bare.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}(?![\\w@])`, 'g'), `$1@${display}`);
+    }
+  }
+
+  return { text, mentions };
+}
+
+function mentionsForChunk(chunk, mentions) {
+  if (!chunk || !Array.isArray(mentions) || mentions.length === 0) return undefined;
+  const selected = [];
+  for (const mention of mentions) {
+    const jid = typeof mention === 'string' ? mention : mention?.jid;
+    if (!jid) continue;
+    const bare = String(jid).split('@')[0];
+    const display = sanitizeMentionDisplayName(mention?.display);
+    // Match either @bare or @display in the chunk
+    if (
+      ((bare && chunk.includes(`@${bare}`)) || (display && chunk.includes(`@${display}`)))
+    ) {
+      selected.push(jid);
+    }
+  }
+  return selected.length ? selected : undefined;
 }
 
 function getMessageContent(msg) {
@@ -263,6 +398,7 @@ async function startSocket() {
       const senderId = msg.key.participant || chatId;
       const isGroup = chatId.endsWith('@g.us');
       const senderNumber = senderId.replace(/@.*/, '');
+      rememberContactName(senderId, msg.pushName);
 
       // Handle fromMe messages based on mode
       if (msg.key.fromMe) {
@@ -495,16 +631,20 @@ app.post('/send', async (req, res) => {
     return res.status(503).json({ error: 'Not connected to WhatsApp' });
   }
 
-  const { chatId, message, replyTo } = req.body;
+  const { chatId, message, replyTo, mentions: rawMentions } = req.body;
   if (!chatId || !message) {
     return res.status(400).json({ error: 'chatId and message are required' });
   }
 
   try {
-    const chunks = splitLongMessage(formatOutgoingMessage(message));
+    const prepared = prepareOutgoingMentions(message, rawMentions);
+    const chunks = splitLongMessage(formatOutgoingMessage(prepared.text));
     const messageIds = [];
     for (let i = 0; i < chunks.length; i += 1) {
-      const sent = await sendWithTimeout(chatId, { text: chunks[i] });
+      const payload = { text: chunks[i] };
+      const chunkMentions = mentionsForChunk(chunks[i], prepared.mentions);
+      if (chunkMentions) payload.mentions = chunkMentions;
+      const sent = await sendWithTimeout(chatId, payload);
       trackSentMessageId(sent);
       if (sent?.key?.id) messageIds.push(sent.key.id);
       if (chunks.length > 1 && i < chunks.length - 1) {

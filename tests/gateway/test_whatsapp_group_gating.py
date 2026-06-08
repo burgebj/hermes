@@ -298,6 +298,48 @@ def test_config_bridges_whatsapp_allow_from(monkeypatch, tmp_path):
     assert __import__("os").environ["WHATSAPP_ALLOWED_USERS"] == "6281234567890@s.whatsapp.net"
 
 
+def test_outbound_mentions_rewrite_raw_jids_and_collect_metadata():
+    from gateway.platforms.whatsapp import WhatsAppAdapter
+
+    text, mentions = WhatsAppAdapter._prepare_outbound_mentions(
+        "Loop in @15551230000@s.whatsapp.net and 67427329167522@lid please"
+    )
+
+    assert text == "Loop in @15551230000 and @67427329167522 please"
+    assert mentions == ["15551230000@s.whatsapp.net", "67427329167522@lid"]
+
+
+def test_outbound_mentions_collect_existing_phone_tokens_and_ignore_names():
+    from gateway.platforms.whatsapp import WhatsAppAdapter
+
+    text, mentions = WhatsAppAdapter._prepare_outbound_mentions("cc @15551230000 and @shakib")
+
+    assert text == "cc @15551230000 and @shakib"
+    assert mentions == ["15551230000@s.whatsapp.net"]
+
+
+def test_outbound_mentions_accept_explicit_metadata_without_text_rewrite():
+    from gateway.platforms.whatsapp import WhatsAppAdapter
+
+    text, mentions = WhatsAppAdapter._prepare_outbound_mentions(
+        "hello Shakib",
+        {"mentions": ["15551230000@s.whatsapp.net", "@67427329167522@lid"]},
+    )
+
+    assert text == "hello Shakib"
+    assert mentions == ["15551230000@s.whatsapp.net", "67427329167522@lid"]
+
+
+def test_mentions_for_text_only_sends_mentions_present_in_chunk():
+    from gateway.platforms.whatsapp import WhatsAppAdapter
+
+    mentions = ["15551230000@s.whatsapp.net", "67427329167522@lid"]
+
+    assert WhatsAppAdapter._mentions_for_text("hi @15551230000", mentions) == [
+        "15551230000@s.whatsapp.net"
+    ]
+
+
 # --- Broadcast / status / newsletter pseudo-chats are always dropped ---
 
 

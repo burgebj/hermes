@@ -443,6 +443,186 @@ class WhatsAppAdapter(BasePlatformAdapter):
             normalized = normalized.replace(":", "@", 1)
         return normalized
 
+    @classmethod
+    def _normalize_chat_id(cls, chat_id: str) -> str:
+        """Normalize a chat ID to proper WhatsApp JID format.
+        
+        Groups must end with @g.us, individuals with @s.whatsapp.net.
+        """
+        if not chat_id:
+            return chat_id
+        
+        chat_id = str(chat_id).strip()
+        
+        # Already has a valid suffix
+        if chat_id.endswith("@g.us") or chat_id.endswith("@s.whatsapp.net") or chat_id.endswith("@lid"):
+            return chat_id
+        
+        # Group IDs are typically 18+ digits
+        if len(chat_id) >= 18 and chat_id.isdigit():
+            return f"{chat_id}@g.us"
+        
+        # Individual numbers (with or without country code)
+        if chat_id.isdigit() or (chat_id.startswith("+") and chat_id[1:].isdigit()):
+            digits = "".join(filter(str.isdigit, chat_id))
+            return f"{digits}@s.whatsapp.net"
+        
+        # Return as-is if we can't determine
+        return chat_id
+
+    @classmethod
+    def _normalize_outbound_mention_jid(cls, value: Optional[str]) -> str:
+        """Normalize a caller-provided WhatsApp mention target to a JID.
+
+        Baileys only creates a real WhatsApp mention when the message payload
+        includes ``mentions: [jid]``.  Models/tools often write raw IDs in the
+        text (``@123@s.whatsapp.net`` / ``@123@lid``) instead, which renders as
+        plain text and does not ping.  This helper accepts both raw JIDs and
+        bare phone-like ``@123`` tokens and turns them into mention JIDs.
+        """
+        normalized = cls._normalize_whatsapp_id(value)
+        if not normalized:
+            return ""
+        normalized = normalized.lstrip("@")
+        if normalized.endswith("@s.whatsapp.net") or normalized.endswith("@lid"):
+            return normalized
+        if re.fullmatch(r"\d{5,}", normalized):
+            return f"{normalized}@s.whatsapp.net"
+        return ""
+
+    @classmethod
+    def _prepare_outbound_mentions(
+        cls,
+        text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> tuple[str, list[dict]]:
+        """Rewrite raw WhatsApp IDs in outgoing text and collect mention JIDs.
+
+        Output text uses WhatsApp's visible mention token (``@<bare id>`` or ``@Name``) while
+        the returned JID list is sent through bridge metadata so WhatsApp can
+        resolve/ping the mentioned participant.
+        
+        Supports name-based mentions by looking up contacts from the contact index.
+        Returns list of {jid, display} objects for the bridge.
+        """
+        if not text:
+            return text, []
+
+        mentions: list[dict] = []  # List of {jid, display}
+        
+        # Load contact index for name-to-JID resolution
+        contact_index: dict[str, str] = {}  # name -> jid
+        contact_names: dict[str, str] = {}  # jid -> display name
+        try:
+            import json
+            index_path = Path("/home/pixu/contacts-index.json")
+            if index_path.exists():
+                contacts = json.loads(index_path.read_text())
+                for c in contacts:
+                    name = c.get("name", "").strip()
+                    jid = c.get("jid", "")
+                    if name and jid:
+                        contact_index[name.lower()] = jid
+                        contact_names[jid] = name
+        except Exception:
+            pass  # Contact index not available, fall back to JID-only mentions
+
+        def add_mention(jid: Optional[str], display: Optional[str] = None) -> Optional[dict]:
+            if not jid:
+                return None
+            normalized = cls._normalize_outbound_mention_jid(jid)
+            if not normalized:
+                return None
+            bare = normalized.split("@", 1)[0]
+            # Check if already exists
+            existing = next((m for m in mentions if m["jid"] == normalized or m["jid"].split("@", 1)[0] == bare), None)
+            if existing:
+                return existing
+            # Use provided display name or look it up
+            if not display:
+                display = contact_names.get(normalized, bare)
+            mention = {"jid": normalized, "display": display}
+            mentions.append(mention)
+            return mention
+
+        meta = metadata or {}
+        for key in ("mentions", "mentioned_jids", "mentionedJids", "mentionedIds"):
+            raw = meta.get(key) if isinstance(meta, dict) else None
+            if isinstance(raw, str):
+                raw = [raw]
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict):
+                        add_mention(item.get("jid"), item.get("display"))
+                    else:
+                        add_mention(str(item))
+
+        # Raw JIDs may appear as either "123@s.whatsapp.net" or
+        # "@123@s.whatsapp.net".  Keep the visible text as "@123" so WhatsApp
+        # clients can render the mention nicely once metadata is attached.
+        jid_re = re.compile(r"(?<![\w@])@?(\d{5,}@(?:s\.whatsapp\.net|lid))\b")
+
+        def replace_jid(match: re.Match) -> str:
+            mention = add_mention(match.group(1))
+            bare = (mention["jid"] if mention else match.group(1)).split("@", 1)[0]
+            return f"@{bare}"
+
+        rewritten = jid_re.sub(replace_jid, text)
+
+        # Handle @Name mentions by looking up in contact index
+        # Match @Name patterns (letters, spaces, hyphens, apostrophes)
+        name_re = re.compile(r"(?<![\w@])@([A-Za-z][A-Za-z\s'\-]{1,40})(?![\w@])")
+        
+        def replace_name(match: re.Match) -> str:
+            name = match.group(1).strip()
+            name_lower = name.lower()
+            # Try exact match first
+            jid = contact_index.get(name_lower)
+            # Try partial match if exact fails
+            if not jid:
+                for idx_name, idx_jid in contact_index.items():
+                    if name_lower in idx_name or idx_name in name_lower:
+                        jid = idx_jid
+                        break
+            if jid:
+                mention = add_mention(jid, name)
+                return f"@{name}"
+            return match.group(0)  # Keep original if no match
+
+        rewritten = name_re.sub(replace_name, rewritten)
+
+        # If the model already wrote a WhatsApp-style phone mention, attach
+        # metadata too.  This deliberately only accepts long numeric tokens to
+        # avoid converting ordinary @names into fake WhatsApp JIDs.
+        for match in re.finditer(r"(?<![\w@])@(\d{5,})(?![\w@])", rewritten):
+            phone = match.group(1)
+            # Try to find display name for this phone
+            jid = f"{phone}@s.whatsapp.net"
+            display = contact_names.get(jid, phone)
+            add_mention(jid, display)
+
+        return rewritten, mentions
+
+    @staticmethod
+    def _mentions_for_text(text: str, mentions: list[dict]) -> list[dict]:
+        """Return only mention JIDs whose visible @token appears in text.
+        
+        Mentions are {jid, display} objects for the bridge.
+        """
+        if not text or not mentions:
+            return []
+        selected = []
+        for mention in mentions:
+            jid = mention.get("jid", "") if isinstance(mention, dict) else mention
+            if not jid:
+                continue
+            bare = jid.split("@", 1)[0]
+            if bare and f"@{bare}" in text:
+                # Check if already selected
+                if not any(s.get("jid") == jid if isinstance(s, dict) else s == jid for s in selected):
+                    selected.append(mention)
+        return selected
+
     def _bot_ids_from_message(self, data: Dict[str, Any]) -> set[str]:
         bot_ids = set()
         for candidate in data.get("botIds") or []:
@@ -929,19 +1109,26 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
 
+        # Normalize chat_id to proper WhatsApp JID format
+        normalized_chat_id = self._normalize_chat_id(chat_id)
+
         try:
             import aiohttp
 
-            # Format and chunk the message
+            # Format, convert raw WhatsApp IDs into real mention metadata, then chunk.
             formatted = self.format_message(content)
+            formatted, mentions = self._prepare_outbound_mentions(formatted, metadata)
             chunks = self.truncate_message(formatted, self._outgoing_chunk_limit())
 
             last_message_id = None
             for chunk in chunks:
                 payload: Dict[str, Any] = {
-                    "chatId": chat_id,
+                    "chatId": normalized_chat_id,
                     "message": chunk,
                 }
+                chunk_mentions = self._mentions_for_text(chunk, mentions)
+                if chunk_mentions:
+                    payload["mentions"] = chunk_mentions
                 if reply_to and last_message_id is None:
                     # Only reply-to on the first chunk
                     payload["replyTo"] = reply_to
@@ -985,10 +1172,14 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=bridge_exit)
         try:
             import aiohttp
+            
+            # Normalize chat_id
+            normalized_chat_id = self._normalize_chat_id(chat_id)
+            
             async with self._http_session.post(
                 f"http://127.0.0.1:{self._bridge_port}/edit",
                 json={
-                    "chatId": chat_id,
+                    "chatId": normalized_chat_id,
                     "messageId": message_id,
                     "message": content,
                 },
@@ -1022,8 +1213,11 @@ class WhatsAppAdapter(BasePlatformAdapter):
             if not os.path.exists(file_path):
                 return SendResult(success=False, error=f"File not found: {file_path}")
 
+            # Normalize chat_id to proper WhatsApp JID format
+            normalized_chat_id = self._normalize_chat_id(chat_id)
+
             payload: Dict[str, Any] = {
-                "chatId": chat_id,
+                "chatId": normalized_chat_id,
                 "filePath": file_path,
                 "mediaType": media_type,
             }
@@ -1120,6 +1314,9 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if await self._check_managed_bridge_exit():
             return
         
+        # Normalize chat_id
+        normalized_chat_id = self._normalize_chat_id(chat_id)
+        
         try:
             import aiohttp
 
@@ -1128,7 +1325,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
             # socket in CLOSE_WAIT. See #18451.
             async with self._http_session.post(
                 f"http://127.0.0.1:{self._bridge_port}/typing",
-                json={"chatId": chat_id},
+                json={"chatId": normalized_chat_id},
                 timeout=aiohttp.ClientTimeout(total=5)
             ):
                 pass
