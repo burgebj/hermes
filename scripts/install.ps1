@@ -2513,6 +2513,14 @@ function Invoke-SetupWizard {
 }
 
 function Start-GatewayIfConfigured {
+    # The setup wizard (hermes setup) installs the gateway itself when a
+    # messaging platform is configured, and writes this marker when it does.
+    # Skip the prompt/install here so the gateway is not set up twice (#35200).
+    if (Test-Path (Join-Path $HermesHome ".gateway_setup_done")) {
+        Write-Info "Gateway already configured during setup."
+        return
+    }
+
     $envPath = "$HermesHome\.env"
     if (-not (Test-Path $envPath)) { return }
 

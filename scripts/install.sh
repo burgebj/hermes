@@ -1971,6 +1971,13 @@ run_setup_wizard() {
 }
 
 maybe_start_gateway() {
+    # The setup wizard (hermes setup) installs the gateway itself when a
+    # messaging platform is configured, and writes this marker when it does.
+    # Skip the prompt/install here so the gateway is not set up twice (#35200).
+    if [ -f "$HERMES_HOME/.gateway_setup_done" ]; then
+        return 0
+    fi
+
     # Check if any messaging platform tokens were configured
     ENV_FILE="$HERMES_HOME/.env"
     if [ ! -f "$ENV_FILE" ]; then
