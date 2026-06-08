@@ -728,6 +728,22 @@ class TestFindHermesMd:
         (repo / ".git").mkdir()
         assert _find_hermes_md(repo) is None
 
+    def test_does_not_walk_to_parent_without_git_root(self, tmp_path):
+        """Ad-hoc workdirs must not inherit unrelated parent .hermes.md files."""
+        (tmp_path / ".hermes.md").write_text("outside")
+        workdir = tmp_path / "work" / "proj"
+        workdir.mkdir(parents=True)
+        assert _find_hermes_md(workdir) is None
+
+    def test_build_context_prompt_ignores_parent_without_git_root(self, tmp_path):
+        (tmp_path / ".hermes.md").write_text("outside parent rules")
+        workdir = tmp_path / "scratch" / "task"
+        workdir.mkdir(parents=True)
+
+        result = build_context_files_prompt(cwd=str(workdir))
+
+        assert "outside parent rules" not in result
+
 
 class TestFindGitRoot:
     def test_finds_git_dir(self, tmp_path):

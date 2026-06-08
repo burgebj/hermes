@@ -87,6 +87,15 @@ def _find_hermes_md(cwd: Path) -> Optional[Path]:
     stop_at = _find_git_root(cwd)
     current = cwd.resolve()
 
+    # Without a repository root, walking all the way to the filesystem root
+    # leaks unrelated parent worktree rules into ad-hoc directories.
+    if stop_at is None:
+        for name in _HERMES_MD_NAMES:
+            candidate = current / name
+            if candidate.is_file():
+                return candidate
+        return None
+
     for directory in [current, *current.parents]:
         for name in _HERMES_MD_NAMES:
             candidate = directory / name
