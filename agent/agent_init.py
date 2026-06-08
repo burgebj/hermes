@@ -86,6 +86,35 @@ def _build_codex_gpt55_autoraise_notice(autoraise: Dict[str, float]) -> str:
     )
 
 
+def _resolve_compression_threshold(
+    global_threshold: float,
+    model_cthresh: Optional[float],
+    *,
+    is_codex_gpt55: bool,
+) -> tuple[float, Optional[Dict[str, float]]]:
+    """Combine the user's global compaction threshold with a per-model override.
+
+    Returns ``(effective_threshold, autoraise_notice)``. ``autoraise_notice`` is
+    ``{"from": <old>, "to": <new>}`` only when the Codex gpt-5.5 autoraise
+    actually raises the threshold, otherwise ``None``.
+
+    The Codex gpt-5.5 override is an *autoraise*: it must never LOWER a higher
+    user-configured threshold. A user who already set ``compression.threshold``
+    above 0.85 deliberately keeps more raw context, and silently dropping them
+    to 0.85 would both waste usable window and contradict the feature's purpose
+    (use more of the window). Other overrides (e.g. Arcee Trinity) keep their
+    existing unconditional behaviour.
+    """
+    if model_cthresh is None:
+        return global_threshold, None
+    if is_codex_gpt55:
+        if model_cthresh <= global_threshold + 1e-9:
+            # Autoraise never lowers; keep the user's higher/equal threshold.
+            return global_threshold, None
+        return model_cthresh, {"from": global_threshold, "to": model_cthresh}
+    return model_cthresh, None
+
+
 def _normalized_custom_base_url(value: Any) -> str:
     if not isinstance(value, str):
         return ""
@@ -1286,21 +1315,17 @@ def init_agent(
             agent.provider,
             allow_codex_gpt55_autoraise=_codex_gpt55_autoraise,
         )
-        if _model_cthresh is not None:
-            _prev_threshold = compression_threshold
-            compression_threshold = _model_cthresh
-            # Notify only for the Codex gpt-5.5 autoraise (the Arcee Trinity
-            # override is a long-standing silent default). Skip the notice when
-            # the user's global threshold already meets/exceeds the raised
-            # value, since nothing actually changed for them.
-            if (
-                _is_codex_gpt55_fn(agent.model, agent.provider)
-                and _model_cthresh > _prev_threshold + 1e-9
-            ):
-                agent._compression_threshold_autoraised = {
-                    "from": _prev_threshold,
-                    "to": _model_cthresh,
-                }
+        # The Codex gpt-5.5 override is an autoraise — apply it only when it
+        # raises (never lower a user's higher global threshold). The notice is
+        # populated only when it actually fires. Arcee Trinity keeps its
+        # long-standing unconditional behaviour.
+        compression_threshold, agent._compression_threshold_autoraised = (
+            _resolve_compression_threshold(
+                compression_threshold,
+                _model_cthresh,
+                is_codex_gpt55=_is_codex_gpt55_fn(agent.model, agent.provider),
+            )
+        )
     except Exception:
         pass
     compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
