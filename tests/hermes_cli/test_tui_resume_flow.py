@@ -858,6 +858,86 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
     assert captured["prompt"] == "recall this"
 
 
+def test_oneshot_detects_provider_for_config_model_when_profile_omits_provider(monkeypatch):
+    """Profile-backed oneshot should infer provider from config model defaults."""
+    from hermes_cli.oneshot import _run_agent
+
+    captured = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["agent_kwargs"] = kwargs
+            self.suppress_status_output = False
+            self.stream_delta_callback = object()
+            self.tool_gen_callback = object()
+
+        def chat(self, prompt):
+            captured["prompt"] = prompt
+            return "ok"
+
+    def mod(name, **attrs):
+        module = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(module, key, value)
+        return module
+
+    def fake_resolve_runtime_provider(**kwargs):
+        captured["runtime_call"] = kwargs
+        return {
+            "api_key": "k",
+            "base_url": "u",
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "credential_pool": None,
+        }
+
+    monkeypatch.delenv("HERMES_INFERENCE_MODEL", raising=False)
+    monkeypatch.delenv("HERMES_INFERENCE_PROVIDER", raising=False)
+    monkeypatch.setitem(sys.modules, "run_agent", mod("run_agent", AIAgent=FakeAgent))
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_state",
+        mod("hermes_state", SessionDB=lambda: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        mod("hermes_cli.config", load_config=lambda: {"model": {"default": "moonshotai/kimi-k2.6"}}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.models",
+        mod(
+            "hermes_cli.models",
+            detect_provider_for_model=lambda model_name, current_provider: (
+                "openrouter",
+                "moonshotai/kimi-k2.6",
+            )
+            if model_name == "moonshotai/kimi-k2.6" and current_provider == "auto"
+            else None,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.runtime_provider",
+        mod(
+            "hermes_cli.runtime_provider",
+            resolve_runtime_provider=fake_resolve_runtime_provider,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.tools_config",
+        mod("hermes_cli.tools_config", _get_platform_tools=lambda *_args, **_kwargs: set()),
+    )
+
+    assert _run_agent("hello from profile") == "ok"
+    assert captured["runtime_call"]["requested"] == "openrouter"
+    assert captured["runtime_call"]["target_model"] == "moonshotai/kimi-k2.6"
+    assert captured["agent_kwargs"]["provider"] == "openrouter"
+    assert captured["agent_kwargs"]["model"] == "moonshotai/kimi-k2.6"
+
+
 def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     captured = {}
     active_path_during_call = None

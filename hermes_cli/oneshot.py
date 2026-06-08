@@ -269,6 +269,10 @@ def _run_agent(
         cfg_model = model_cfg.get("default") or model_cfg.get("model") or ""
 
     env_model = os.getenv("HERMES_INFERENCE_MODEL", "").strip()
+    env_provider = os.getenv("HERMES_INFERENCE_PROVIDER", "").strip().lower()
+    cfg_provider = ""
+    if isinstance(model_cfg, dict):
+        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
     effective_model = (model or "").strip() or env_model or cfg_model
 
     # Resolve effective provider: explicit arg → (auto-detect from model if
@@ -281,36 +285,26 @@ def _run_agent(
     # the caller just asked for.
     effective_provider = (provider or "").strip() or None
     explicit_base_url_from_alias: Optional[str] = None
-    if effective_provider is None and (model or env_model):
-        # Only auto-detect when the model was explicitly requested via arg or
-        # env var (not when it came from config — that's the "use my defaults"
-        # path and the configured provider is already correct).
-        explicit_model = (model or "").strip() or env_model
-        if explicit_model:
-            # First check DIRECT_ALIASES populated from config.yaml `model_aliases:`.
-            # These map a user-defined alias to (model, provider, base_url) for
-            # endpoints not in any catalog (local servers, custom proxies, etc.).
-            try:
-                from hermes_cli import model_switch as _ms
-                _ms._ensure_direct_aliases()
-                direct = _ms.DIRECT_ALIASES.get(explicit_model.strip().lower())
-            except Exception:
-                direct = None
-            if direct is not None:
-                effective_model = direct.model
-                effective_provider = direct.provider
-                if direct.base_url:
-                    explicit_base_url_from_alias = direct.base_url.rstrip("/")
-            else:
-                cfg_provider = ""
-                if isinstance(model_cfg, dict):
-                    cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
-                current_provider = (
-                    cfg_provider
-                    or os.getenv("HERMES_INFERENCE_PROVIDER", "").strip().lower()
-                    or "auto"
-                )
-                detected = detect_provider_for_model(explicit_model, current_provider)
+    if effective_provider is None and effective_model:
+        # First check DIRECT_ALIASES populated from config.yaml `model_aliases:`.
+        # These map a user-defined alias to (model, provider, base_url) for
+        # endpoints not in any catalog (local servers, custom proxies, etc.).
+        try:
+            from hermes_cli import model_switch as _ms
+            _ms._ensure_direct_aliases()
+            direct = _ms.DIRECT_ALIASES.get(effective_model.strip().lower())
+        except Exception:
+            direct = None
+        if direct is not None:
+            effective_model = direct.model
+            effective_provider = direct.provider
+            if direct.base_url:
+                explicit_base_url_from_alias = direct.base_url.rstrip("/")
+        else:
+            current_provider = cfg_provider or env_provider or "auto"
+            should_detect_provider = bool(model or env_model) or not (cfg_provider or env_provider)
+            if should_detect_provider:
+                detected = detect_provider_for_model(effective_model, current_provider)
                 if detected:
                     effective_provider, effective_model = detected
 
