@@ -182,8 +182,29 @@ done
 # mkdir -p block below seeds. Keep them in sync if the seed list changes.
 actual_hermes_uid=$(id -u hermes)
 needs_chown=false
+# Top-level $HERMES_HOME ownership (the original #35027 path).
 if [ "$(stat -c %u "$HERMES_HOME" 2>/dev/null)" != "$actual_hermes_uid" ]; then
     needs_chown=true
+fi
+# Probe the hermes-owned subdirs directly, INDEPENDENTLY of $HERMES_HOME.
+# `usermod -u <new> hermes` re-chowns the hermes home dir ($HERMES_HOME ==
+# /opt/data) to the new UID as a side effect, so after a HERMES_UID/PUID/PGID
+# remap `stat $HERMES_HOME` already matches and the top-level check above is
+# false — but the subdirs below are NOT touched by usermod and remain owned by
+# the build-time UID (10000), leaving the data volume with mixed ownership
+# (#41699). This is the same $HERMES_HOME-gating regression #38556 fixed for
+# the build trees under $INSTALL_DIR; probe the data-volume subdirs directly
+# for the same reason. `groupmod -o -g` likewise does not re-chown files, so a
+# GID-only remap leaves subdir GIDs stale until this targeted chown runs.
+# Keep the probe list in sync with the chown list below.
+if [ "$needs_chown" = false ]; then
+    for sub in cron sessions logs hooks memories skills skins plans workspace home profiles pairing platforms/pairing; do
+        if [ -e "$HERMES_HOME/$sub" ] && \
+                [ "$(stat -c %u "$HERMES_HOME/$sub" 2>/dev/null)" != "$actual_hermes_uid" ]; then
+            needs_chown=true
+            break
+        fi
+    done
 fi
 if [ "$needs_chown" = true ]; then
     echo "[stage2] Fixing ownership of $HERMES_HOME (targeted) to hermes ($actual_hermes_uid)"
