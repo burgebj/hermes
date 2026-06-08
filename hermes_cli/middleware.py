@@ -234,7 +234,13 @@ def _has_middleware(kind: str) -> bool:
 def _get_middleware_callbacks(kind: str) -> List[Callable]:
     from hermes_cli.plugins import get_plugin_manager
 
-    return list(get_plugin_manager()._middleware.get(kind, []))
+    pm = get_plugin_manager()
+    # Defensive: some runtime contexts return a PluginManager-like object
+    # that hasn't been fully initialised (missing _middleware attribute).
+    middleware = getattr(pm, "_middleware", None)
+    if middleware is None:
+        return []
+    return list(middleware.get(kind, []))
 
 
 def _run_execution_chain(
