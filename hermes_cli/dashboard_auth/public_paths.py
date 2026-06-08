@@ -40,9 +40,8 @@ PUBLIC_API_PATHS: frozenset[str] = frozenset({
     # Read-only config-defaults / schema feeds for the SPA's Config page.
     "/api/config/defaults",
     "/api/config/schema",
-    # Read-only model metadata (context windows, etc.) — same shape as
-    # provider catalogs already exposed on the public internet.
-    "/api/model/info",
+    # Model metadata includes the locally configured provider/model. Keep it
+    # behind dashboard auth; the SPA can load it after login/session bootstrap.
     # Read-only theme + plugin manifests for the dashboard skin engine.
     "/api/dashboard/themes",
     "/api/dashboard/plugins",
