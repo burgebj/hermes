@@ -201,3 +201,39 @@ def test_fetch_account_usage_openrouter_omits_quota_window_when_key_has_no_limit
     assert snapshot.windows == ()
     assert "Credits balance: $74.50" in snapshot.details
     assert "API key usage: $25.50 total • $1.25 today • $4.50 this week • $18.00 this month" in snapshot.details
+
+
+def test_fetch_account_usage_openrouter_tolerates_non_numeric_credit_values(monkeypatch):
+    """Non-numeric total_credits / total_usage must not raise ValueError."""
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_runtime_provider",
+        lambda requested, explicit_base_url=None, explicit_api_key=None: {
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-test",
+        },
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=10.0: _RoutingClient(
+            {
+                "https://openrouter.ai/api/v1/credits": {
+                    # API returning strings instead of numbers (malformed response)
+                    "data": {"total_credits": "N/A", "total_usage": "unknown"}
+                },
+                "https://openrouter.ai/api/v1/key": {
+                    "data": {
+                        "limit": None,
+                        "limit_remaining": None,
+                        "usage": None,
+                    }
+                },
+            }
+        ),
+    )
+
+    # Before fix this raised ValueError; now returns a snapshot with zeroed credits.
+    snapshot = fetch_account_usage("openrouter")
+
+    assert snapshot is not None
+    assert "Credits balance: $0.00" in snapshot.details

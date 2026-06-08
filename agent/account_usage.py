@@ -483,8 +483,14 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
             key_data = (key_resp.json() or {}).get("data") or {}
         except Exception:
             key_data = {}
-    total_credits = float(credits.get("total_credits") or 0.0)
-    total_usage = float(credits.get("total_usage") or 0.0)
+    try:
+        total_credits = float(credits.get("total_credits") or 0.0)
+    except (TypeError, ValueError):
+        total_credits = 0.0
+    try:
+        total_usage = float(credits.get("total_usage") or 0.0)
+    except (TypeError, ValueError):
+        total_usage = 0.0
     details = [f"Credits balance: ${max(0.0, total_credits - total_usage):.2f}"]
     windows: list[AccountUsageWindow] = []
     limit = key_data.get("limit")
