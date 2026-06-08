@@ -1,0 +1,98 @@
+# Nous-approved MCP catalog entry.
+# Presence in this directory = approval. Merged via PR review.
+#
+# Schema version 1.
+manifest_version: 1
+
+name: patter-voice
+description: Place outbound AI phone calls (Twilio or Telnyx), run autonomous third-party tasks, and pull live call transcripts via the Patter SDK.
+source: https://github.com/PatterAI/patter-mcp
+
+# patter-mcp is a Streamable-HTTP MCP server that runs locally on :3000.
+# It is NOT distributed as an `npx -y` package today (see source README:
+# "Why not `npx -y getpatter-mcp` like other MCP servers?"), so the user
+# must clone + start the server before Hermes can connect. Once running,
+# Hermes connects by URL through the existing MCP HTTP client — no local
+# subprocess management here.
+transport:
+  type: http
+  url: http://localhost:3000/mcp
+
+# Authentication. Patter itself has no central API key — credentials are
+# the underlying provider keys (carrier + LLM/STT/TTS) that the local
+# patter-mcp process reads from its own environment. Hermes prompts for
+# them at install time and writes them to ~/.hermes/.env so the user can
+# export them into the shell that launches patter-mcp.
+#
+# Required minimum: one carrier (Twilio OR Telnyx) + OPENAI_API_KEY for
+# the default OpenAI Realtime engine. Deepgram + ElevenLabs are only
+# required for the STT->LLM->TTS Pipeline mode.
+auth:
+  type: api_key
+  env:
+    - name: TWILIO_ACCOUNT_SID
+      prompt: "Twilio Account SID (starts with AC...). Leave blank if using Telnyx."
+      required: true
+      secret: false
+    - name: TWILIO_AUTH_TOKEN
+      prompt: "Twilio Auth Token"
+      required: true
+      secret: true
+    - name: TWILIO_PHONE_NUMBER
+      prompt: "Twilio phone number in E.164 (e.g. +15551234567)"
+      required: true
+      secret: false
+    - name: OPENAI_API_KEY
+      prompt: "OpenAI API key (used by the default Realtime engine)"
+      required: true
+      secret: true
+    - name: TELNYX_API_KEY
+      prompt: "Telnyx API key (optional — alternative to Twilio)"
+      required: false
+      secret: true
+    - name: DEEPGRAM_API_KEY
+      prompt: "Deepgram API key (required only for STT->LLM->TTS Pipeline mode)"
+      required: false
+      secret: true
+    - name: ELEVENLABS_API_KEY
+      prompt: "ElevenLabs API key (required only for Pipeline mode or ConvAI engine)"
+      required: false
+      secret: true
+
+# Tool selection at install time:
+# patter-mcp exposes 4 tools today. All four are safe-by-default for a
+# user who has scoped credentials to their own carrier number, so the
+# checklist starts with everything pre-checked. Mutating tools
+# (`make_call`, `call_third_party`) cost real telephony minutes — Hermes
+# should confirm with the user before invoking them.
+tools:
+  default_enabled:
+    - make_call
+    - call_third_party
+    - get_calls
+    - get_transcript
+
+post_install: |
+  patter-mcp runs as a local Streamable-HTTP server on port 3000. Hermes
+  does not auto-spawn it. Start it once in a separate terminal before
+  using the tools:
+
+      git clone https://github.com/PatterAI/patter-mcp.git
+      cd patter-mcp
+      npm install
+      npm run build
+      PATTER_EAGER=1 npm start
+
+  The `PATTER_EAGER=1` flag pre-warms the SDK so the first call is
+  instant (recommended for demos). Drop it for production / lazy boot.
+
+  Then, in another terminal, start a new Hermes session — the
+  patter-voice tools will appear once the HTTP probe at
+  http://localhost:3000/mcp succeeds.
+
+  Make sure the env vars you provided during install are exported into
+  the shell that launches patter-mcp (Hermes wrote them to
+  ~/.hermes/.env — `source` it before `npm start`).
+
+  Real telephony minutes cost real money. Confirm with the user before
+  placing outbound calls.
