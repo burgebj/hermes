@@ -354,6 +354,11 @@ class TestPidPort:
             "hermes_cli.gateway_windows_restart_worker._drain_and_stop",
             lambda *a, **kw: None,
         )
+        # Mock _wait_for_handoff to return True (simulate handoff succeeded)
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows_restart_worker._wait_for_handoff",
+            lambda *a, **kw: True,
+        )
         # Mock _pid_exists to return True for old_pid (still alive), False for others
         monkeypatch.setattr(
             "hermes_cli.gateway_restart_state._pid_exists",
@@ -534,6 +539,11 @@ class TestWorkerStatusFallback:
         monkeypatch.setattr(
             "hermes_cli.gateway_windows_restart_worker._drain_and_stop",
             MagicMock(side_effect=RuntimeError("drain exploded")),
+        )
+        # Mock _wait_for_handoff to return True (simulate handoff succeeded)
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows_restart_worker._wait_for_handoff",
+            lambda *a, **kw: True,
         )
         # Ensure _pid_exists returns False so the PID check passes
         monkeypatch.setattr(
@@ -1389,6 +1399,11 @@ class TestClaimThenWriteStatusError:
             "hermes_cli.gateway_windows_restart_worker._drain_and_stop",
             MagicMock(side_effect=OSError("disk full")),
         )
+        # Mock _wait_for_handoff to return True (simulate handoff succeeded)
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows_restart_worker._wait_for_handoff",
+            lambda *a, **kw: True,
+        )
         monkeypatch.setattr(
             "hermes_cli.gateway_restart_state._pid_exists",
             lambda pid: False,
@@ -1744,3 +1759,219 @@ class TestSchtasksFailClosed:
         assert status is not None
         assert status["state"] == "failed"
         assert "dual" in status.get("error", "").lower()
+
+
+# ===========================================================================
+# P0-1: schtasks fail closed — strict direct-spawn block
+# ===========================================================================
+
+class TestSchtasksFailClosedStrict:
+    """P0-1: schtasks accepted but no evidence → fail closed, no direct spawn."""
+
+    def test_schtasks_accepted_no_evidence_blocks_direct_spawn(self, worker_env, monkeypatch):
+        """schtasks /Run returns 0, no launch evidence → RuntimeError, direct spawn NOT called."""
+        from hermes_cli.gateway_windows_restart_worker import _start_new_gateway
+        from hermes_cli.gateway_restart_state import create_intent
+        from unittest.mock import MagicMock
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+
+        # Mock hermes_cli.gateway_windows module so is_task_registered returns True
+        # and _exec_schtasks returns success (code=0)
+        mock_gw_windows = MagicMock()
+        mock_gw_windows.is_task_registered = MagicMock(return_value=True)
+        mock_gw_windows._exec_schtasks = MagicMock(return_value=(0, "", ""))
+        monkeypatch.setitem(sys.modules, "hermes_cli.gateway_windows", mock_gw_windows)
+
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows_restart_worker._wait_for_launch_evidence",
+            MagicMock(return_value=0),
+        )
+        direct_spawn_mock = MagicMock(return_value=9999)
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows_restart_worker._direct_spawn_gateway",
+            direct_spawn_mock,
+        )
+
+        with pytest.raises(RuntimeError, match="schtasks /Run succeeded"):
+            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway")
+
+        direct_spawn_mock.assert_not_called()
+
+
+# ===========================================================================
+# P0-2: Handoff gate — Worker waits before destructive actions
+# ===========================================================================
+
+class TestHandoffGate:
+    """P0-2: Worker waits for handoff before destructive actions."""
+
+    def test_handoff_timeout_blocks_drain(self, worker_env, monkeypatch):
+        """If handoff never completes, Worker exits without draining."""
+        from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        from hermes_cli.gateway_restart_state import create_intent, RestartLock
+
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        # Mock _wait_for_handoff to return False (handoff never happens)
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows_restart_worker._wait_for_handoff",
+            lambda *a, **kw: False,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.gateway_restart_state._pid_exists",
+            lambda pid: False,
+        )
+
+        drain_mock = MagicMock()
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows_restart_worker._drain_and_stop",
+            drain_mock,
+        )
+
+        with pytest.raises(SystemExit):
+            _run_restart_transaction(
+                disk_intent, "default", request_id, nonce,
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
+
+        drain_mock.assert_not_called()
+
+    def test_handoff_failure_safe_exit(self, worker_env, monkeypatch):
+        """P0-2: Handoff timeout → Worker writes failed and exits."""
+        from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        from hermes_cli.gateway_restart_state import create_intent, read_status
+
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows_restart_worker._wait_for_handoff",
+            lambda *a, **kw: False,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.gateway_restart_state._pid_exists",
+            lambda pid: False,
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            _run_restart_transaction(
+                disk_intent, "default", request_id, nonce,
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
+        assert exc_info.value.code == 1
+
+
+# ===========================================================================
+# P0-3 + P0-4: Owner-scoped cleanup
+# ===========================================================================
+
+class TestOwnerScopedCleanup:
+    """P0-3: Cleanup operations are owner-scoped."""
+
+    def test_prelease_exception_no_lease_deletion(self, worker_env, monkeypatch):
+        """Worker exception before lease_owned=True does NOT delete any lease."""
+        from hermes_cli.gateway_windows_restart_worker import main
+        from hermes_cli.gateway_restart_state import (
+            create_intent, RestartLock, lease_path, read_intent,
+        )
+
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        # Winner claims the lease
+        winner_lock = RestartLock("default")
+        assert winner_lock.try_acquire(request_id) is True
+        assert winner_lock.claim_lease(request_id, nonce) is True
+
+        # Loser calls main() — should NOT touch winner's lease
+        monkeypatch.setattr(
+            "hermes_cli.gateway_restart_state._pid_exists",
+            lambda pid: False,
+        )
+        monkeypatch.setattr(sys, "argv", [
+            "worker", "--profile", "default", "--request-id", request_id,
+        ])
+
+        with pytest.raises(SystemExit):
+            main()
+
+        # Winner's lease must survive
+        lp = lease_path("default", request_id)
+        assert lp.exists(), "Winner's lease must not be deleted by loser"
+
+    def test_prelease_validation_preserves_directory(self, worker_env, monkeypatch):
+        """P0-4: _fail_closed does NOT rmtree the request directory."""
+        from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        from hermes_cli.gateway_restart_state import (
+            create_intent, read_intent, request_dir_path,
+        )
+
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = disk_intent["request_id"]
+
+        # Tamper with intent to cause validation failure (wrong nonce)
+        monkeypatch.setattr(
+            "hermes_cli.gateway_restart_state._pid_exists",
+            lambda pid: False,
+        )
+
+        with pytest.raises(SystemExit):
+            _run_restart_transaction(
+                disk_intent, "default", request_id, "wrong-nonce",
+                1234, "test", "/fake/hermes", "Hermes_Gateway",
+            )
+
+        # Request directory must still exist
+        rd = request_dir_path("default", request_id)
+        assert rd.exists(), "Request directory must not be deleted on pre-lease failure"
+
+    def test_release_lease_rejects_wrong_owner(self, worker_env, monkeypatch):
+        """P0-3: release_lease refuses when owner_token doesn't match."""
+        from hermes_cli.gateway_restart_state import (
+            create_intent, RestartLock, lease_path, release_lease,
+        )
+
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        # Create a lease
+        lock = RestartLock("default")
+        assert lock.try_acquire(request_id) is True
+        assert lock.claim_lease(request_id, nonce) is True
+
+        lp = lease_path("default", request_id)
+        assert lp.exists()
+
+        # Try to release with wrong owner_token
+        result = release_lease("default", request_id,
+                              owner_token="wrong-token",
+                              worker_pid=os.getpid())
+        assert result is False
+        assert lp.exists(), "Lease must survive with wrong owner_token"
+
+    def test_sanitize_intent_rejects_wrong_nonce(self, worker_env, monkeypatch):
+        """P0-3: sanitize_intent refuses when expected_nonce doesn't match."""
+        from hermes_cli.gateway_restart_state import (
+            create_intent, sanitize_intent, read_intent,
+        )
+
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        request_id = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        # Try to sanitize with wrong nonce
+        result = sanitize_intent("default", request_id,
+                                expected_nonce="wrong-nonce")
+        assert result is False
+
+        # Intent nonce must survive
+        intent = read_intent("default", request_id)
+        assert intent is not None
+        assert intent["nonce"] == nonce, "Nonce must not be cleared with wrong expected_nonce"

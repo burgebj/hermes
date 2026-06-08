@@ -63,8 +63,6 @@ def main() -> None:
         # P0-8: Write failed status on ANY unhandled exception
         from hermes_cli.gateway_restart_state import (
             append_restart_log,
-            release_lease as _release_lease,
-            sanitize_intent as _sanitize_intent,
             write_status,
         )
         write_status(profile, "failed", request_id=request_id, error=str(exc))
@@ -72,22 +70,42 @@ def main() -> None:
             request_id=request_id, profile=profile, old_pid=old_pid,
             origin=origin, state="failed", error=f"unhandled: {exc}",
         )
-        # P0-4: Release lease + sanitize intent (NOT full cleanup_intent)
-        # to preserve terminal status for Coordinator.
-        try:
-            _release_lease(profile, request_id)
-        except Exception:
-            pass
-        try:
-            _sanitize_intent(profile, request_id)
-        except Exception:
-            pass
+        # P0-4: Do NOT call release_lease/sanitize_intent here.
+        # If lease was claimed, _run_restart_transaction's finally handles cleanup.
+        # If lease was NOT claimed, we have no right to touch those files.
         sys.exit(1)
     # NOTE: No blanket finally:cleanup_intent here.
     # - Winner cleanup: _run_restart_transaction inner finally
     # - Invalid-request cleanup: _fail_closed() does its own cleanup
     # - Loser (SystemExit from claim_lease failure): must NOT cleanup
     #   because the winner is actively using the same request directory.
+
+
+def _wait_for_handoff(profile: str, request_id: str,
+                      expected_owner_token: str,
+                      timeout: float = 15.0) -> bool:
+    """Wait for Coordinator to hand off active.lock ownership.
+
+    P0-2: Worker must confirm active.lock.owner_token == lease_owner_token
+    and phase == "running" before proceeding with destructive actions.
+    """
+    from hermes_cli.gateway_restart_state import lock_path
+    lp = lock_path(profile)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not lp.exists():
+            # Lock was released (handoff failed or not needed)
+            return False
+        try:
+            data = json.loads(lp.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                if (data.get("owner_token") == expected_owner_token
+                        and data.get("phase") == "running"):
+                    return True
+        except (OSError, json.JSONDecodeError):
+            pass
+        time.sleep(0.5)
+    return False
 
 
 def _run_restart_transaction(
@@ -140,6 +158,7 @@ def _run_restart_transaction(
 
     # P0-1 + P0-3: Atomic lease claim via O_EXCL + intent state transition
     lock = RestartLock(profile)
+    lease_owned = False
     if not lock.claim_lease(request_id, nonce, expected_state="scheduled"):
         # P0-2: Lease loser must NOT write status or cleanup intent.
         # Only log and exit.
@@ -148,6 +167,14 @@ def _run_restart_transaction(
             origin=origin, state="loser_exit", reason="lease_claim_failed",
         )
         sys.exit(1)
+    lease_owned = True
+
+    # P0-2: Wait for Coordinator handoff acknowledgement
+    # Worker must not drain/stop/start until active.lock ownership is confirmed.
+    if not _wait_for_handoff(profile, request_id, lock.owner_token, timeout=15.0):
+        _fail_closed(profile, request_id, old_pid, origin, "handoff_timeout",
+                     "Coordinator did not hand off active.lock within timeout",
+                     nonce=nonce)
 
     # P0-4: From here on, ALL logic is in one try/finally
     try:
@@ -183,24 +210,22 @@ def _run_restart_transaction(
         # --- Phase 4: Verify ---
         _verify_new_gateway(profile, request_id, old_pid, new_pid, origin, launcher)
     finally:
-        # P0-4: Clean up Worker-owned resources only.
-        # - Release lease (lease.lock) — NOT the entire request directory
-        # - Sanitize intent (clear nonce)
-        # - Release active.lock if Coordinator handed it off
-        # - Preserve terminal status (completed/failed) for Coordinator
-        from hermes_cli.gateway_restart_state import (
-            release_lease as _release_lease,
-            sanitize_intent as _sanitize_intent,
-        )
-        _release_lease(profile, request_id)
-        _sanitize_intent(profile, request_id)
-        # Release active.lock if Coordinator handed it off.
-        # After handoff, active.lock.owner_token == lock.owner_token (lease token).
-        # lock.release() checks owner_token match — safe even if handoff didn't happen.
+        # P1-2: Order matters — release active.lock first, then lease, then intent
+        # All operations are owner-scoped.
         try:
-            lock.release()
+            lock.release()  # release active.lock (handed off)
         except Exception:
             pass
+        if lease_owned:
+            from hermes_cli.gateway_restart_state import (
+                release_lease as _release_lease,
+                sanitize_intent as _sanitize_intent,
+            )
+            _release_lease(profile, request_id,
+                          owner_token=lock.owner_token,
+                          worker_pid=os.getpid())
+            _sanitize_intent(profile, request_id,
+                            expected_nonce=nonce)
 
 
 # ---------------------------------------------------------------------------
@@ -502,37 +527,10 @@ def _start_new_gateway(
             origin=origin, state="starting_task",
         )
 
+        code = -1
         try:
             from hermes_cli.gateway_windows import _exec_schtasks
             code, out, err = _exec_schtasks(["/Run", "/TN", task_name])
-            if code == 0:
-                new_pid = _wait_for_launch_evidence(old_pid, timeout=15.0)
-                if new_pid > 0:
-                    append_restart_log(
-                        request_id=request_id, profile=profile, old_pid=old_pid,
-                        new_pid=new_pid, origin=origin, state="starting_task",
-                        launcher="scheduled_task", reason="launch_evidence_ok",
-                    )
-                    return new_pid, "scheduled_task"
-                # P1-1: schtasks /Run accepted but no evidence — fail closed
-                # Scheduled Task may have started with a delay; direct spawn
-                # would create a dual gateway.
-                append_restart_log(
-                    request_id=request_id, profile=profile, old_pid=old_pid,
-                    origin=origin, state="failed",
-                    reason="schtasks_run_accepted_but_no_evidence",
-                )
-                raise RuntimeError(
-                    "schtasks /Run succeeded (exit 0) but no launch evidence "
-                    "within 15s.  Scheduled Task may have started with delay. "
-                    "Will NOT direct-spawn to avoid dual gateway."
-                )
-
-            append_restart_log(
-                request_id=request_id, profile=profile, old_pid=old_pid,
-                origin=origin, state="starting_task",
-                reason=f"schtasks_run_code={code}, no_launch_evidence",
-            )
         except Exception as e:
             append_restart_log(
                 request_id=request_id, profile=profile, old_pid=old_pid,
@@ -540,7 +538,34 @@ def _start_new_gateway(
                 error=f"schtasks_run_exception: {e}",
             )
 
-    # Direct detached spawn (fallback or primary)
+        if code == 0:
+            new_pid = _wait_for_launch_evidence(old_pid, timeout=15.0)
+            if new_pid > 0:
+                append_restart_log(
+                    request_id=request_id, profile=profile, old_pid=old_pid,
+                    new_pid=new_pid, origin=origin, state="starting_task",
+                    launcher="scheduled_task", reason="launch_evidence_ok",
+                )
+                return new_pid, "scheduled_task"
+            # P1-1: schtasks /Run accepted but no evidence — fail closed
+            append_restart_log(
+                request_id=request_id, profile=profile, old_pid=old_pid,
+                origin=origin, state="failed",
+                reason="schtasks_run_accepted_but_no_evidence",
+            )
+            raise RuntimeError(
+                "schtasks /Run succeeded (exit 0) but no launch evidence "
+                "within 15s.  Scheduled Task may have started with delay. "
+                "Will NOT direct-spawn to avoid dual gateway."
+            )
+
+        append_restart_log(
+            request_id=request_id, profile=profile, old_pid=old_pid,
+            origin=origin, state="starting_task",
+            reason=f"schtasks_run_code={code}, falling through to direct spawn",
+        )
+
+    # Direct detached spawn (only when schtasks not installed or schtasks failed)
     write_status(profile, "starting_direct_fallback", request_id=request_id)
     append_restart_log(
         request_id=request_id, profile=profile, old_pid=old_pid,
@@ -764,14 +789,13 @@ def _fail_closed(
     detail: str,
     nonce: str = "",
 ) -> None:
-    """Fail closed: write status, log, cleanup, and exit.
+    """Fail closed: write status, log, and exit.
 
-    Called when any validation fails.  Guarantees no destructive action
-    has been taken before this point.
+    P0-4: Does NOT delete the request directory — only writes failed status
+    and JSONL log.  cleanup_intent() is reserved for Coordinator use only.
     """
     from hermes_cli.gateway_restart_state import (
         append_restart_log,
-        cleanup_intent,
         write_status,
     )
     write_status(profile, "failed", request_id=request_id,
@@ -780,7 +804,6 @@ def _fail_closed(
         request_id=request_id, profile=profile, old_pid=old_pid,
         origin=origin, state="failed", error=f"{error_code}: {detail}",
     )
-    cleanup_intent(profile, request_id)
     sys.exit(1)
 
 

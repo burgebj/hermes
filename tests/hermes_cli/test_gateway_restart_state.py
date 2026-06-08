@@ -754,3 +754,94 @@ class TestReleaseLease:
         status = read_status("default", rid)
         assert status is not None
         assert status["state"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# P1-1: mark_worker_spawned return value
+# ---------------------------------------------------------------------------
+
+class TestMarkWorkerSpawned:
+    """P1-1: mark_worker_spawned return value handling."""
+
+    def test_mark_worker_spawned_returns_false_when_not_owner(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import RestartLock, create_intent
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+
+        lock = RestartLock("default")
+        # NOT acquired — should return False
+        result = lock.mark_worker_spawned(1234, time.time() + 30)
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# P1-2: Worker fast completion + handoff race
+# ---------------------------------------------------------------------------
+
+class TestHandoffRace:
+    """P1-2: Worker fast completion vs handoff race."""
+
+    def test_no_orphan_active_lock_on_fast_completion(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            RestartLock, create_intent, lock_path, lease_path,
+        )
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+        nonce = intent["nonce"]
+
+        # Coordinator acquires
+        coord_lock = RestartLock("default")
+        assert coord_lock.try_acquire(rid) is True
+        coord_token = coord_lock.owner_token
+
+        # Worker claims lease
+        worker_lock = RestartLock("default")
+        assert worker_lock.claim_lease(rid, nonce) is True
+        lease_token = worker_lock.owner_token
+
+        # Coordinator hands off
+        assert coord_lock.handoff_active_lock(rid, coord_token, os.getpid(), lease_token) is True
+
+        # Worker releases active.lock first (P1-2 order)
+        worker_lock.release()
+        assert not lock_path("default").exists(), "active.lock must be released"
+
+        # Then release lease
+        lp = lease_path("default", rid)
+        lp.unlink(missing_ok=True)
+        assert not lp.exists()
+
+
+# ---------------------------------------------------------------------------
+# P1-3: GC safety rules
+# ---------------------------------------------------------------------------
+
+class TestGCSafety:
+    """P1-3: GC safety rules."""
+
+    def test_gc_skips_running_request(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            create_intent, write_status, gc_expired_request_dirs,
+            request_dir_path, lease_path,
+        )
+
+        # Create a "running" request with lease
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+        write_status("default", "draining", request_id=rid, old_pid=100)
+
+        # Create a fake lease file
+        lp = lease_path("default", rid)
+        lp.write_text('{"test": true}')
+
+        # Run GC with very short max_age
+        removed = gc_expired_request_dirs("default", max_age_s=0, active_request_id=rid)
+
+        # Directory must survive
+        rd = request_dir_path("default", rid)
+        assert rd.exists(), "GC must not delete request with active lease"

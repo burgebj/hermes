@@ -201,53 +201,77 @@ def update_intent_state(profile: str, request_id: str, state: str,
         return False
 
 
-def release_lease(profile: str, request_id: str) -> None:
-    """Release only the request-scoped lease file.
+def release_lease(profile: str, request_id: str,
+                  owner_token: str = "", worker_pid: int = 0) -> bool:
+    """Release only the request-scoped lease file, verifying ownership.
 
-    P0-4: Worker calls this instead of cleanup_intent() to preserve
-    terminal status for the Coordinator to read.
+    P0-3: Only the lease owner (matching owner_token and worker_pid)
+    can release the lease.  Returns True if lease was released.
     """
     if not request_id:
-        return
+        return False
+    lp = lease_path(profile, request_id)
+    if not lp.exists():
+        return False
     try:
-        lp = lease_path(profile, request_id)
+        data = json.loads(lp.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return False
+        if owner_token and data.get("owner_token") != owner_token:
+            return False
+        if worker_pid and data.get("worker_pid") != worker_pid:
+            return False
         lp.unlink(missing_ok=True)
-    except OSError:
-        pass
+        return True
+    except (OSError, json.JSONDecodeError):
+        return False
 
 
-def sanitize_intent(profile: str, request_id: str) -> None:
-    """Clear sensitive fields from intent (nonce) while preserving the file.
+def sanitize_intent(profile: str, request_id: str,
+                    expected_nonce: str = "", owner_token: str = "") -> bool:
+    """Clear sensitive fields from intent, verifying ownership.
 
-    P0-4: Worker calls this after completing to prevent nonce leakage
-    without deleting the request directory.
+    P0-3: Only clears nonce if expected_nonce matches (or is empty).
+    Returns True on success.
     """
     if not request_id:
-        return
+        return False
     ip = intent_path(profile, request_id)
     try:
         data = json.loads(ip.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            data["nonce"] = ""
-            _atomic_write_json(ip, data)
+        if not isinstance(data, dict):
+            return False
+        if expected_nonce and not secrets.compare_digest(
+                data.get("nonce", ""), expected_nonce):
+            return False
+        data["nonce"] = ""
+        _atomic_write_json(ip, data)
+        return True
     except (OSError, json.JSONDecodeError):
-        pass
+        return False
 
 
 def gc_expired_request_dirs(profile: str = "default",
-                            max_age_s: int = 3600) -> int:
+                            max_age_s: int = 3600,
+                            active_request_id: str = "") -> int:
     """Garbage-collect expired request directories.
 
-    P0-4: Request directories are no longer deleted by the Worker.
-    Periodic GC removes directories older than max_age_s.
-    Returns the number of directories removed.
+    P1-3: Skips directories that are still running or have active leases.
+    Never deletes the active_request_id directory.
     """
     profile_dir = _get_profile_dir(profile)
     now = time.time()
     removed = 0
+    _TERMINAL_STATES = frozenset({"completed", "failed"})
     try:
         for d in profile_dir.iterdir():
             if not d.is_dir():
+                continue
+            # Never delete the active request
+            if d.name == active_request_id:
+                continue
+            # Skip if lease still exists (worker still running)
+            if (d / "lease.lock").exists():
                 continue
             sp = d / "status.json"
             if not sp.exists():
@@ -263,6 +287,10 @@ def gc_expired_request_dirs(profile: str = "default",
                 continue
             try:
                 data = json.loads(sp.read_text(encoding="utf-8"))
+                state = data.get("state", "")
+                # Only GC terminal states
+                if state not in _TERMINAL_STATES:
+                    continue
                 ts_str = data.get("updated_at", "")
                 if ts_str:
                     from datetime import datetime as _dt

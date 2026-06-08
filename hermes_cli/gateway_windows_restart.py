@@ -135,6 +135,12 @@ def schedule_restart_handoff(
     - launcher: str (only if completed)
     """
     _assert_windows()
+    # P1-3: Light GC of expired request directories
+    try:
+        from hermes_cli.gateway_restart_state import gc_expired_request_dirs
+        gc_expired_request_dirs(profile=profile)
+    except Exception:
+        pass  # GC failure must not block restart
     from hermes_cli.gateway_restart_state import (
         RestartLock,
         append_restart_log,
@@ -216,7 +222,13 @@ def schedule_restart_handoff(
         }
 
     # P0-3: Update lock with worker_pid and claim_deadline for recovery
-    lock.mark_worker_spawned(worker_pid, time.time() + 30)
+    if not lock.mark_worker_spawned(worker_pid, time.time() + 30):
+        append_restart_log(
+            request_id=request_id, profile=profile, old_pid=old_pid,
+            origin=origin, state="scheduled",
+            reason="mark_worker_spawned_failed",
+        )
+        # Continue anyway — lock recovery will use standard TTL expiry
 
     # Wait for worker to claim lease
     claimed = _wait_for_worker_claim(profile, request_id, timeout_s=10.0)
