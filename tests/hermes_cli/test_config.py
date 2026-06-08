@@ -477,6 +477,18 @@ class TestSanitizeEnvLines:
         assert result[0].startswith("GLM_API_KEY=")
         assert result[1].startswith("LM_API_KEY=")
 
+    def test_value_with_space_before_known_key_not_split(self):
+        """A legitimate value containing a space then a known KEY= must NOT be split.
+
+        Genuine missing-newline concatenation (#8908) never inserts whitespace,
+        so a known KEY= preceded by a space is part of the value, not a new
+        entry. Splitting there would truncate the real secret and synthesize a
+        bogus credential var.
+        """
+        lines = ["IRC_SERVER_PASSWORD=hunter2 OPENAI_API_KEY=not-a-real-entry\n"]
+        result = _sanitize_env_lines(lines)
+        assert result == lines, f"spaced value was wrongly split: {result}"
+
     def test_save_env_value_fixes_corruption_on_write(self, tmp_path):
         """save_env_value sanitizes corrupted lines when writing a new key."""
         env_file = tmp_path / ".env"

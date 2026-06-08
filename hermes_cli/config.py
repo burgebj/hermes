@@ -5444,9 +5444,18 @@ def _sanitize_env_lines(lines: list) -> list:
                 match_ranges.append((idx, idx + len(needle)))
                 idx = stripped.find(needle, idx + len(needle))
 
+        # A KEY= needle is only a genuine entry boundary when it starts the
+        # line or directly follows the previous value with no separator — the
+        # missing-newline corruption pattern from #8908 never inserts
+        # whitespace. A needle preceded by whitespace is therefore part of a
+        # value (e.g. "MATRIX_PASSWORD=hunter2 EXTRA=note"), so splitting there
+        # would truncate the real secret and synthesize a bogus var. Only treat
+        # such needles as boundaries when pos == 0 or the preceding char is not
+        # whitespace.
         split_positions = sorted({
             s for s, e in match_ranges
-            if not any(
+            if (s == 0 or not stripped[s - 1].isspace())
+            and not any(
                 s2 <= s and e2 >= e and (s2, e2) != (s, e)
                 for s2, e2 in match_ranges
             )
