@@ -1,6 +1,7 @@
 """Tests for gateway service management helpers."""
 
 import os
+import plistlib
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -332,6 +333,7 @@ class TestGeneratedSystemdUnits:
         # systemd doesn't SIGKILL the cgroup before post-interrupt cleanup
         # (tool subprocess kill, adapter disconnect) runs — issue #8202.
         assert self._expected_timeout_stop_sec() in unit
+        assert f"LimitNOFILE={gateway_cli.GATEWAY_SERVICE_NOFILE_LIMIT}" in unit
 
     def test_user_unit_includes_resolved_node_directory_in_path(self, monkeypatch):
         monkeypatch.setattr(gateway_cli.shutil, "which", lambda cmd: "/home/test/.nvm/versions/node/v24.14.0/bin/node" if cmd == "node" else None)
@@ -393,7 +395,22 @@ class TestGeneratedSystemdUnits:
         # systemd doesn't SIGKILL the cgroup before post-interrupt cleanup
         # (tool subprocess kill, adapter disconnect) runs — issue #8202.
         assert self._expected_timeout_stop_sec() in unit
+        assert f"LimitNOFILE={gateway_cli.GATEWAY_SERVICE_NOFILE_LIMIT}" in unit
         assert "WantedBy=multi-user.target" in unit
+
+
+class TestGeneratedLaunchdPlists:
+    def test_launchd_plist_sets_file_descriptor_limits(self):
+        plist = plistlib.loads(gateway_cli.generate_launchd_plist().encode("utf-8"))
+
+        assert (
+            plist["SoftResourceLimits"]["NumberOfFiles"]
+            == gateway_cli.GATEWAY_SERVICE_NOFILE_LIMIT
+        )
+        assert (
+            plist["HardResourceLimits"]["NumberOfFiles"]
+            == gateway_cli.GATEWAY_SERVICE_NOFILE_LIMIT
+        )
 
 
 class TestGatewayStopCleanup:
