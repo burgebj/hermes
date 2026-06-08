@@ -332,6 +332,14 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         except Exception:
             pass
 
+    # Close slash_worker subprocess to prevent zombie processes (#38095).
+    try:
+        worker = session.get("slash_worker")
+        if worker:
+            worker.close()
+    except Exception:
+        pass
+
     session_key = session.get("session_key")
     session_id = getattr(agent, "session_id", None) or session_key
     _notify_session_boundary("on_session_finalize", session_id)
