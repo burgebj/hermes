@@ -451,6 +451,28 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
 # ---------------------------------------------------------------------------
 
 
+_DEFAULT_MAX_MCP_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+def _max_mcp_image_bytes() -> int:
+    """Return the per-block decoded byte limit for MCP ImageContent."""
+    raw = os.getenv("HERMES_MCP_IMAGE_MAX_BYTES")
+    if raw is None:
+        return _DEFAULT_MAX_MCP_IMAGE_BYTES
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_MCP_IMAGE_BYTES
+    return max(0, value)
+
+
+def _base64_decoded_length_upper_bound(data: str) -> int:
+    """Return an upper bound for decoded bytes without allocating output."""
+    compact = "".join(str(data).split())
+    padding = len(compact) - len(compact.rstrip("="))
+    return max(0, (len(compact) * 3) // 4 - padding)
+
+
 def _mcp_image_extension_for_mime_type(mime_type: str) -> str:
     """Return a reasonable file extension for an MCP image MIME type."""
     import mimetypes
@@ -478,10 +500,33 @@ def _cache_mcp_image_block(block) -> str:
     if data is None or not normalized_mime.startswith("image/"):
         return ""
 
+    encoded_data = "".join(str(data).split())
+    max_bytes = _max_mcp_image_bytes()
+    decoded_upper_bound = _base64_decoded_length_upper_bound(encoded_data)
+    if decoded_upper_bound > max_bytes:
+        logger.warning(
+            "MCP image block skipped (%s): decoded payload exceeds limit "
+            "(%d > %d bytes)",
+            normalized_mime,
+            decoded_upper_bound,
+            max_bytes,
+        )
+        return ""
+
     try:
-        raw_bytes = base64.b64decode(data)
+        raw_bytes = base64.b64decode(encoded_data, validate=True)
     except (TypeError, ValueError) as exc:
         logger.warning("MCP image block decode failed (%s): %s", normalized_mime, exc)
+        return ""
+
+    if len(raw_bytes) > max_bytes:
+        logger.warning(
+            "MCP image block skipped (%s): decoded payload exceeds limit "
+            "(%d > %d bytes)",
+            normalized_mime,
+            len(raw_bytes),
+            max_bytes,
+        )
         return ""
 
     try:
