@@ -86,12 +86,12 @@ def test_background_review_matches_parent_toolset_config():
 
 
 def test_background_review_installs_thread_local_whitelist():
-    """The review fork must install a memory/skills-only thread-local whitelist.
+    """The review fork must install a memory/skills/file thread-local whitelist.
 
     The schema-level toolset narrowing was lifted (for prefix-cache parity),
     so #15204's safety contract now relies on the runtime whitelist gate to
     deny terminal/send_message/delegate_task at dispatch time. Verify the
-    whitelist is set with exactly the memory+skills tool names.
+    whitelist includes memory+skills+file tools while blocking dangerous tools.
     """
     import run_agent
     from hermes_cli import plugins as _plugins
@@ -122,11 +122,16 @@ def test_background_review_installs_thread_local_whitelist():
 
     assert "whitelist" in captured, "set_thread_tool_whitelist was not called"
     whitelist = captured["whitelist"]
-    # memory + skills tools must be allowed
+    # memory + skills + file tools must be allowed
     assert "memory" in whitelist
     assert "skill_manage" in whitelist
     assert "skill_view" in whitelist
     assert "skills_list" in whitelist
+    assert "read_file" in whitelist
+    assert "search_files" in whitelist
+    # write-capable file tools must NOT be in the whitelist
+    assert "write_file" not in whitelist
+    assert "patch" not in whitelist
     # dangerous tools must NOT be in the whitelist
     assert "terminal" not in whitelist
     assert "send_message" not in whitelist
@@ -136,7 +141,7 @@ def test_background_review_installs_thread_local_whitelist():
 
 
 def test_background_review_agent_tools_are_limited():
-    """Verify the resolved memory+skills toolsets only contain memory and skill tools.
+    """Verify the resolved memory+skills+file toolsets only contain expected tools.
 
     Sanity check on the source of truth for what the runtime whitelist is
     derived from — if a future PR adds e.g. `terminal` to the `memory`
@@ -144,13 +149,18 @@ def test_background_review_agent_tools_are_limited():
     """
     from toolsets import resolve_multiple_toolsets
 
-    expected_tools = set(resolve_multiple_toolsets(["memory", "skills"]))
+    expected_tools = set(resolve_multiple_toolsets(["memory", "skills", "file"]))
 
     assert "memory" in expected_tools
     assert "skill_manage" in expected_tools
     assert "skill_view" in expected_tools
     assert "skills_list" in expected_tools
+    assert "read_file" in expected_tools
+    assert "search_files" in expected_tools
 
+    # write-capable file tools should be excluded at the whitelist level,
+    # but they will appear in the raw toolset resolution — the safety gate
+    # is the discard() call in background_review.py, not the toolset itself.
     assert "terminal" not in expected_tools
     assert "send_message" not in expected_tools
     assert "delegate_task" not in expected_tools
