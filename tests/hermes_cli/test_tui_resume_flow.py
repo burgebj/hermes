@@ -806,9 +806,9 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
             self.stream_delta_callback = object()
             self.tool_gen_callback = object()
 
-        def chat(self, prompt):
+        def run_conversation(self, prompt):
             captured["prompt"] = prompt
-            return "ok"
+            return {"final_response": "ok", "completed": True}
 
     class FakeSessionDB:
         def __new__(cls):
@@ -856,6 +856,61 @@ def test_oneshot_wires_session_db_for_recall(monkeypatch):
     assert captured["session_db"] is sentinel_db
     assert captured["enabled_toolsets"] == ["session_search"]
     assert captured["prompt"] == "recall this"
+
+
+def test_oneshot_run_agent_raises_on_failed_result(monkeypatch):
+    """Oneshot must not print run_conversation errors as successful output."""
+    from hermes_cli.oneshot import _run_agent
+
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            self.suppress_status_output = False
+            self.stream_delta_callback = object()
+            self.tool_gen_callback = object()
+
+        def run_conversation(self, _prompt):
+            return {"failed": True, "error": "Connection error."}
+
+    def mod(name, **attrs):
+        module = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(module, key, value)
+        return module
+
+    monkeypatch.setitem(sys.modules, "run_agent", mod("run_agent", AIAgent=FakeAgent))
+    monkeypatch.setitem(sys.modules, "hermes_state", mod("hermes_state", SessionDB=lambda: None))
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        mod("hermes_cli.config", load_config=lambda: {"model": {"default": "m"}}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.models",
+        mod("hermes_cli.models", detect_provider_for_model=lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.runtime_provider",
+        mod(
+            "hermes_cli.runtime_provider",
+            resolve_runtime_provider=lambda **_kwargs: {
+                "api_key": "k",
+                "base_url": "u",
+                "provider": "p",
+                "api_mode": "chat_completions",
+                "credential_pool": None,
+            },
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.tools_config",
+        mod("hermes_cli.tools_config", _get_platform_tools=lambda *_args, **_kwargs: set()),
+    )
+
+    with pytest.raises(RuntimeError, match="Connection error"):
+        _run_agent("hello")
 
 
 def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):

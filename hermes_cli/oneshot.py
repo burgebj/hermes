@@ -140,12 +140,9 @@ def run_oneshot(
 
     Returns the exit code.  Caller should sys.exit() with the return.
     """
-    # Silence every stdlib logger for the duration.  AIAgent, tools, and
-    # provider adapters all log to stderr through the root logger; file
-    # handlers added by setup_logging() keep working (they're attached to
-    # the root logger's handler list, not affected by level), but no
-    # bytes reach the terminal.
-    logging.disable(logging.CRITICAL)
+    # Do not call logging.disable() here.  stdout/stderr are redirected below
+    # so terminal chatter stays hidden, while file handlers keep the provider
+    # watchdog evidence needed by automated hardening loops.
 
     # --provider without --model is ambiguous: carrying the user's configured
     # model across to a different provider is usually wrong (that provider may
@@ -364,7 +361,10 @@ def _run_agent(
     agent.stream_delta_callback = None
     agent.tool_gen_callback = None
 
-    return agent.chat(prompt) or ""
+    result = agent.run_conversation(prompt)
+    if result.get("failed") or (result.get("error") and not result.get("final_response")):
+        raise RuntimeError(result.get("error") or "agent failed without final response")
+    return result.get("final_response") or ""
 
 
 def _oneshot_clarify_callback(question: str, choices=None) -> str:
