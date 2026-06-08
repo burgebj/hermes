@@ -2407,10 +2407,11 @@ class TestConcurrentToolExecution:
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
         messages = []
 
-        call_count = [0]
         def fake_handle(name, args, task_id, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
+            # Use tool_call_id to determine which call should fail,
+            # not a global counter (threads execute in non-deterministic order)
+            tool_call_id = kwargs.get("tool_call_id", "")
+            if tool_call_id == "c1":
                 raise RuntimeError("boom")
             return "success"
 
@@ -2418,9 +2419,9 @@ class TestConcurrentToolExecution:
             agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
 
         assert len(messages) == 2
-        # First tool should have error
+        # First tool (c1) should have error
         assert "Error" in messages[0]["content"] or "boom" in messages[0]["content"]
-        # Second tool should succeed
+        # Second tool (c2) should succeed
         assert "success" in messages[1]["content"]
 
     def test_concurrent_interrupt_before_start(self, agent):

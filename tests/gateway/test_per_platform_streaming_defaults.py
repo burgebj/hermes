@@ -16,6 +16,8 @@ def test_default_per_platform_streaming_flags():
     plats = DEFAULT_CONFIG["display"]["platforms"]
     assert plats["telegram"]["streaming"] is True
     assert plats["discord"]["streaming"] is False
+    # WeCom: native streaming via msgtype: "stream" / aibot_respond_msg.
+    assert plats["wecom"]["streaming"] is True
 
 
 def test_resolver_telegram_on_discord_off_when_global_enabled():

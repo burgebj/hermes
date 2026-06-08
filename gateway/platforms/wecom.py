@@ -95,6 +95,30 @@ RECONNECT_BACKOFF = [2, 5, 10, 30, 60]
 
 DEDUP_MAX_SIZE = 1000
 
+# Native streaming (msgtype: stream) constants — modeled on WeCom's official
+# OpenClaw plugin behavior. WeCom's AI Bot supports cumulative stream frames
+# via aibot_respond_msg; the first frame sends a <think></think> placeholder
+# (matching the plugin's THINKING_MESSAGE) to signal a reasoning turn,
+# subsequent frames push cumulative content, and a final frame with
+# finish=true closes the stream.
+STREAM_EXPIRED_ERRCODE = 846608  # >6 min without update — stream is dead
+STREAM_NOT_SUBSCRIBED_ERRCODE = 846609  # ws connection lost the subscription
+MAX_STREAM_CONTENT_LENGTH = 20480  # WeCom server-enforced byte limit per frame
+# Throttle window for intermediate stream frames (seconds).
+# If the previous frame was sent less than this duration ago, the current
+# intermediate frame is dropped.  Cumulative text guarantees no info loss.
+# NOTE: This is a time-based throttle, NOT true in-flight backpressure.
+# Our fire-and-forget path has no ack signal, so we cannot replicate the
+# official SDK's replyStreamNonBlocking (which skips when an ack is pending).
+# 200ms is a pragmatic middle ground: fast enough for smooth streaming UX,
+# slow enough to prevent frame pile-up under load.
+STREAM_FRAME_SKIP_WINDOW = 0.2  # 200ms
+# Per-turn cap on intermediate frames.  WeCom SDK has an internal 100-frame
+# per-reqId queue limit; we cap at 85 (matching openclaw plugin) to guarantee
+# room for the finalize frame.  Once hit, all further intermediate frames are
+# silently dropped — finalize still sends unconditionally.
+MAX_INTERMEDIATE_FRAMES = 85
+
 IMAGE_MAX_BYTES = 10 * 1024 * 1024
 VIDEO_MAX_BYTES = 10 * 1024 * 1024
 VOICE_MAX_BYTES = 2 * 1024 * 1024
@@ -139,11 +163,55 @@ def _entry_matches(entries: List[str], target: str) -> bool:
     return False
 
 
+class WeComStreamExpiredError(RuntimeError):
+    """Raised when WeCom returns errcode 846608 (stream update expired).
+
+    WeCom's stream protocol caps a stream session at ~6 minutes from the
+    first frame. After that window the server refuses further updates with
+    846608 and the entire stream id is dead — callers must fall back to a
+    proactive ``aibot_send_msg`` to deliver the remaining content.
+    """
+
+    def __init__(self, errcode: int = STREAM_EXPIRED_ERRCODE, errmsg: str = ""):
+        super().__init__(
+            f"WeCom stream expired (errcode={errcode}): {errmsg or 'no detail'}"
+        )
+        self.errcode = errcode
+        self.errmsg = errmsg
+
+
+class StreamTurn:
+    """Per-turn stream state to avoid global state conflicts.
+
+    Each inbound message creates its own StreamTurn, ensuring concurrent
+    messages don't interfere with each other's stream state.
+    """
+    def __init__(self, chat_id: str, req_id: str):
+        self.chat_id = chat_id
+        self.req_id = req_id
+        self.stream_id = f"stream_{uuid.uuid4().hex[:12]}"
+        self.accumulated_text = ""
+        self.finalized = False
+        self.seeded = False  # True after seed frame sent (prevents double seed)
+        self.start_time = time.monotonic()
+        self.expired = False
+        # Throttle state for intermediate frames.
+        # Time-based: skip frames arriving within STREAM_FRAME_SKIP_WINDOW.
+        # Count-based: cap at MAX_INTERMEDIATE_FRAMES per turn.
+        self._last_frame_sent_at: float = 0.0
+        self._intermediate_frames_sent: int = 0
+
+
 class WeComAdapter(BasePlatformAdapter):
     """WeCom AI Bot adapter backed by a persistent WebSocket connection."""
 
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
     SUPPORTS_MESSAGE_EDITING = False
+    # WeCom AI Bot supports msgtype: "stream" via aibot_respond_msg, which
+    # the gateway streaming consumer treats as a transport that bypasses the
+    # edit-based path. See ``send_stream_frame`` and ``supports_native_streaming``.
+    SUPPORTS_NATIVE_STREAMING = True
+    MAX_STREAM_CONTENT_LENGTH = MAX_STREAM_CONTENT_LENGTH
     # Threshold for detecting WeCom client-side message splits.
     # When a chunk is near the 4000-char limit, a continuation is almost certain.
     _SPLIT_THRESHOLD = 3900
@@ -193,6 +261,207 @@ class WeComAdapter(BasePlatformAdapter):
         self._device_id = uuid.uuid4().hex
         self._last_chat_req_ids: Dict[str, str] = {}
 
+        # Per-turn stream state: keyed by (chat_id, req_id) to support concurrent messages.
+        # Replaces global _active_stream_id to avoid conflicts when multiple messages
+        # are processed simultaneously (e.g., approval during streaming).
+        self._stream_turns: Dict[str, StreamTurn] = {}  # key = f"{chat_id}:{req_id}"
+
+        # Chats whose stream session has been retired (846608 / 846609 / no
+        # req_id). Cleared whenever a fresh inbound callback for the chat
+        # arrives — a new inbound message gives us a new req_id and the
+        # stream channel becomes usable again.
+        self._stream_expired_chats: set[str] = set()
+
+        # Per-chat FIFO send queue with token-bucket rate limiting.
+        # Mirrors OpenClaw's chat-queue.ts (serial per chat) plus a
+        # token bucket to stay within WeCom's 30 msgs/min/chat limit.
+        self._chat_queues: Dict[str, asyncio.Queue] = {}
+        self._chat_workers: Dict[str, asyncio.Task] = {}
+
+        # Control lane: high-priority queue for approval prompts, finalize frames,
+        # and error notifications. These bypass normal queue to prevent blocking.
+        self._control_queues: Dict[str, asyncio.Queue] = {}
+        self._control_workers: Dict[str, asyncio.Task] = {}
+
+        # Token bucket with reserved tokens for control messages.
+        # Per-chat usage tracking: {chat_id: {"normal": used, "reserved": used, "last_reset": ts}}
+        self._chat_token_usage: Dict[str, Dict[str, float]] = {}
+
+    # Token bucket parameters: 30 tokens max per minute, split between normal and reserved.
+    _BUCKET_MAX_TOKENS = 30
+    _BUCKET_NORMAL_TOKENS = 24      # For normal messages
+    _BUCKET_RESERVED_TOKENS = 6     # Reserved for control lane (approval, finalize, errors)
+
+    def _get_token_usage(self, chat_id: str) -> Dict[str, float]:
+        """Get or create token usage tracking for a chat."""
+        key = str(chat_id or "").strip()
+        if key not in self._chat_token_usage:
+            self._chat_token_usage[key] = {
+                "normal": 0.0,
+                "reserved": 0.0,
+                "last_reset": time.monotonic(),
+            }
+        return self._chat_token_usage[key]
+
+    def _bucket_try_consume(self, chat_id: str) -> float:
+        """Try to consume a normal token. Returns 0 if available, or seconds to wait."""
+        usage = self._get_token_usage(chat_id)
+        now = time.monotonic()
+
+        # Reset counters every minute
+        if now - usage["last_reset"] > 60.0:
+            usage["normal"] = 0.0
+            usage["reserved"] = 0.0
+            usage["last_reset"] = now
+
+        # Normal messages can only use normal quota
+        if usage["normal"] < self._BUCKET_NORMAL_TOKENS:
+            usage["normal"] += 1.0
+            return 0.0  # token available, no wait
+        else:
+            # Wait until next minute
+            return 60.0 - (now - usage["last_reset"])
+
+    def _bucket_try_consume_control(self, chat_id: str) -> float:
+        """Try to consume a control token. Can use normal remaining + reserved pool."""
+        usage = self._get_token_usage(chat_id)
+        now = time.monotonic()
+
+        # Reset counters every minute
+        if now - usage["last_reset"] > 60.0:
+            usage["normal"] = 0.0
+            usage["reserved"] = 0.0
+            usage["last_reset"] = now
+
+        # Control messages prefer normal quota first (don't waste reserved)
+        normal_available = self._BUCKET_NORMAL_TOKENS - usage["normal"]
+        if normal_available > 0:
+            usage["normal"] += 1.0
+            return 0.0
+
+        # Normal exhausted, use reserved pool
+        reserved_available = self._BUCKET_RESERVED_TOKENS - usage["reserved"]
+        if reserved_available > 0:
+            usage["reserved"] += 1.0
+            return 0.0
+
+        # Both exhausted, wait until next minute
+        return 60.0 - (now - usage["last_reset"])
+
+    async def _enqueue_chat_send(self, chat_id: str, coro_factory, is_control: bool = False):
+        """Enqueue a send task for a chat and await its result.
+
+        FIFO per chat, parallel across chats. Two lanes:
+        - Control lane: approval prompts, finalize frames, errors (uses reserved tokens)
+        - Normal lane: regular messages (uses normal tokens only)
+
+        Control messages bypass normal queue to prevent approval prompt blocking.
+        """
+        key = str(chat_id or "").strip()
+
+        if is_control:
+            # Control lane: high priority, reserved token pool
+            if key not in self._control_queues:
+                logger.debug(
+                    "[%s] Creating control queue + worker for chat %s",
+                    self.name, key,
+                )
+                self._control_queues[key] = asyncio.Queue()
+                self._control_workers[key] = asyncio.create_task(
+                    self._control_send_worker(key)
+                )
+            queue = self._control_queues[key]
+        else:
+            # Normal lane
+            if key not in self._chat_queues:
+                logger.debug(
+                    "[%s] Creating normal queue + worker for chat %s",
+                    self.name, key,
+                )
+                self._chat_queues[key] = asyncio.Queue()
+                self._chat_workers[key] = asyncio.create_task(
+                    self._chat_send_worker(key)
+                )
+            queue = self._chat_queues[key]
+
+        logger.debug(
+            "[%s] Enqueuing send for chat %s (lane=%s, qsize=%d)",
+            self.name, key, "control" if is_control else "normal", queue.qsize(),
+        )
+        future = asyncio.get_running_loop().create_future()
+        await queue.put((coro_factory, future))
+        return await future
+
+    async def _chat_send_worker(self, chat_key: str) -> None:
+        """Per-chat worker: drain normal queue with token-bucket rate limiting."""
+        queue = self._chat_queues[chat_key]
+        logger.debug("[%s] Normal send worker started for chat %s", self.name, chat_key)
+        try:
+            while True:
+                coro_factory, future = await queue.get()
+                try:
+                    # Token bucket: wait only if bucket is empty
+                    wait = self._bucket_try_consume(chat_key)
+                    if wait > 0:
+                        logger.debug(
+                            "[%s] Normal worker rate-limited for chat %s, waiting %.1fs",
+                            self.name, chat_key, wait,
+                        )
+                        await asyncio.sleep(wait)
+                        # Re-consume after wait
+                        self._bucket_try_consume(chat_key)
+
+                    result = await coro_factory()
+                    if not future.done():
+                        future.set_result(result)
+                except Exception as exc:
+                    if not future.done():
+                        future.set_exception(exc)
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            while not queue.empty():
+                try:
+                    _, future = queue.get_nowait()
+                    if not future.done():
+                        future.set_exception(
+                            RuntimeError("WeCom adapter shutting down")
+                        )
+                except asyncio.QueueEmpty:
+                    break
+
+    async def _control_send_worker(self, chat_key: str) -> None:
+        """Control lane worker: drain control queue with reserved token pool."""
+        queue = self._control_queues[chat_key]
+        try:
+            while True:
+                coro_factory, future = await queue.get()
+                try:
+                    # Control messages use reserved + normal remaining tokens
+                    wait = self._bucket_try_consume_control(chat_key)
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                        self._bucket_try_consume_control(chat_key)
+
+                    result = await coro_factory()
+                    if not future.done():
+                        future.set_result(result)
+                except Exception as exc:
+                    if not future.done():
+                        future.set_exception(exc)
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            while not queue.empty():
+                try:
+                    _, future = queue.get_nowait()
+                    if not future.done():
+                        future.set_exception(
+                            RuntimeError("WeCom adapter shutting down")
+                        )
+                except asyncio.QueueEmpty:
+                    break
+
     # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
@@ -241,6 +510,17 @@ class WeComAdapter(BasePlatformAdapter):
         """Disconnect from WeCom."""
         self._running = False
         self._mark_disconnected()
+        # Force-close any lingering stream so the WeCom client doesn't show
+        # a permanent typing bubble after the gateway goes down.
+        self._reset_native_stream_state()
+
+        # Cancel per-chat send workers (normal + control lanes) so queued tasks get cleaned up.
+        for task in list(self._chat_workers.values()) + list(self._control_workers.values()):
+            task.cancel()
+        self._chat_workers.clear()
+        self._control_workers.clear()
+        self._chat_queues.clear()
+        self._control_queues.clear()
 
         if self._listen_task:
             self._listen_task.cancel()
@@ -281,7 +561,17 @@ class WeComAdapter(BasePlatformAdapter):
     async def _open_connection(self) -> None:
         """Open and authenticate a websocket connection."""
         await self._cleanup_ws()
-        self._session = aiohttp.ClientSession(trust_env=True)
+        # Use certifi's CA bundle so aiohttp trusts the same roots as
+        # urllib/requests — avoids SSL_CERTIFICATE_VERIFY_FAILED on macOS
+        # where the OpenSSL default path may be empty or stale.
+        import ssl as _ssl
+        try:
+            import certifi
+            _ssl_ctx = _ssl.create_default_context(cafile=certifi.where())
+        except ImportError:
+            _ssl_ctx = _ssl.create_default_context()
+        _connector = aiohttp.TCPConnector(ssl=_ssl_ctx)
+        self._session = aiohttp.ClientSession(trust_env=True, connector=_connector)
         self._ws = await self._session.ws_connect(
             self._ws_url,
             heartbeat=HEARTBEAT_INTERVAL_SECONDS * 2,
@@ -406,7 +696,22 @@ class WeComAdapter(BasePlatformAdapter):
         if cmd in CALLBACK_COMMANDS:
             await self._on_message(payload)
             return
-        if cmd in {APP_CMD_PING, APP_CMD_EVENT_CALLBACK}:
+        if cmd == APP_CMD_PING:
+            return
+        if cmd == APP_CMD_EVENT_CALLBACK:
+            # Check for "kicked by server" event — WeCom sends this when a new
+            # connection is established elsewhere (another instance). Mirror the
+            # official OpenClaw SDK: suppress reconnect to avoid mutual kicking.
+            body = payload.get("body") or {}
+            event_type = str(body.get("event_type") or "")
+            if event_type == "disconnected_event":
+                logger.warning(
+                    "[%s] Kicked by server (another WS connection established). "
+                    "Suppressing reconnect to avoid mutual kicking. "
+                    "Check for duplicate gateway instances.",
+                    self.name,
+                )
+                self._running = False  # stop _listen_loop from reconnecting
             return
 
         logger.debug("[%s] Ignoring websocket payload: %s", self.name, cmd or payload)
@@ -916,6 +1221,77 @@ class WeComAdapter(BasePlatformAdapter):
         self._last_chat_req_ids[normalized_chat_id] = normalized_req_id
         while len(self._last_chat_req_ids) > DEDUP_MAX_SIZE:
             self._last_chat_req_ids.pop(next(iter(self._last_chat_req_ids)))
+        # A fresh inbound req_id resurrects the stream channel — drop any
+        # stale "stream is dead" marker from prior 846608 responses so the
+        # next outbound turn can attempt native streaming again.
+        self._stream_expired_chats.discard(normalized_chat_id)
+        # A new inbound message starts a new "turn" — allow send_typing to
+        # open a fresh stream again (the previous turn's delivery guard is
+        # no longer relevant).
+
+    def _resolve_stream_req_id(
+        self, chat_id: str, reply_to: Optional[str]
+    ) -> Optional[str]:
+        """Pick a req_id for a stream reply.
+
+        Precedence: explicit ``reply_to`` (a prior message id we cached) →
+        last inbound req_id for this chat → ``None`` (stream impossible).
+        """
+        req_id = self._reply_req_id_for_message(reply_to)
+        if req_id:
+            return req_id
+        return self._last_chat_req_ids.get(str(chat_id or "").strip()) or None
+
+    def _get_or_create_stream_turn(self, chat_id: str, req_id: str) -> StreamTurn:
+        """Get or create a StreamTurn for the given chat and req_id."""
+        key = f"{chat_id}:{req_id}"
+        if key not in self._stream_turns:
+            self._stream_turns[key] = StreamTurn(chat_id, req_id)
+        return self._stream_turns[key]
+
+    def _cleanup_stream_turn(self, chat_id: str, req_id: str) -> None:
+        """Clean up a StreamTurn after finalization or error."""
+        key = f"{chat_id}:{req_id}"
+        self._stream_turns.pop(key, None)
+
+    def _find_active_turn_for_chat(self, chat_id: str) -> Optional[StreamTurn]:
+        """Find the most recent active (non-finalized) turn for a chat."""
+        for turn in self._stream_turns.values():
+            if turn.chat_id == chat_id and not turn.finalized:
+                return turn
+        return None
+
+    def _reset_native_stream_state(self) -> None:
+        """Legacy method for compatibility. Now a no-op since state is per-turn."""
+        # No-op: stream state is now per-turn, not global.
+        # Kept for compatibility with existing code that calls this.
+        pass
+
+    async def _force_reconnect_on_stale_subscription(self, errcode: int) -> None:
+        """Force-close the WS when server rejects our subscription (846609).
+
+        WeCom errcode 846609 means the server no longer considers this WS
+        session subscribed — all sends will fail until we reconnect. Rather
+        than waiting for the WS to close naturally (can take 2+ minutes of
+        timeouts), we proactively close it to trigger _listen_loop's
+        reconnect cycle immediately.
+        """
+        if errcode != STREAM_NOT_SUBSCRIBED_ERRCODE:
+            return
+        logger.warning(
+            "[%s] Got errcode %d (subscription lost) — clearing stale state",
+            self.name, errcode,
+        )
+        # Only invalidate cached req_ids (bound to the dead session).
+        # Do NOT close the WS — closing triggers _listen_loop to reconnect,
+        # which opens a second WS connection. WeCom only allows one long-lived
+        # connection per bot; the server kicks the second one and invalidates
+        # the first's session, creating an infinite kick-reconnect loop.
+        # The WS will be closed by the server side naturally; _listen_loop
+        # handles the reconnect when that happens.
+        self._last_chat_req_ids.clear()
+        self._reply_req_ids.clear()
+        self._reset_native_stream_state()
 
     def _reply_req_id_for_message(self, reply_to: Optional[str]) -> Optional[str]:
         normalized = str(reply_to or "").strip()
@@ -1246,6 +1622,89 @@ class WeComAdapter(BasePlatformAdapter):
         self._raise_for_wecom_error(response, "send reply markdown")
         return response
 
+    @staticmethod
+    def _truncate_stream_content(content: str, limit: int) -> str:
+        """Truncate ``content`` to fit within ``limit`` UTF-8 bytes.
+
+        WeCom enforces a byte-length cap on stream frames; truncating by
+        codepoints would still let multi-byte runs blow past the limit.
+        """
+        encoded = content.encode("utf-8")
+        if len(encoded) <= limit:
+            return content
+        return encoded[:limit].decode("utf-8", errors="ignore")
+
+    async def _send_stream_reply(
+        self,
+        reply_req_id: str,
+        stream_id: str,
+        content: str,
+        finish: bool = False,
+    ) -> Dict[str, Any]:
+        """Send a single ``msgtype: "stream"`` frame via aibot_respond_msg.
+
+        WeCom's stream protocol:
+          * the first frame for a turn establishes ``stream.id``;
+          * every subsequent frame reuses that id with ``content`` set to
+            the **cumulative** text (not an incremental delta);
+          * ``finish=True`` on the final frame closes the stream and
+            replaces the live "thinking" bubble with the final content;
+          * ``content`` is capped at 20480 bytes server-side — we
+            pre-truncate to stay safely below.
+
+        Performance: intermediate frames (finish=False) are fire-and-forget
+        — we send the WS frame and return immediately without waiting for
+        the server ack. This mirrors the official WeCom SDK's
+        ``replyStream`` / ``replyStreamNonBlocking`` behavior where only
+        the finishing frame needs confirmation. Without this optimization
+        each mid-stream frame blocks for ~15s waiting for an ack that
+        WeCom may not send until the stream closes.
+
+        Only the ``finish=True`` frame uses ``_send_reply_request`` (with
+        ack + timeout) so we reliably detect 846608 on the final frame.
+
+        Raises :class:`WeComStreamExpiredError` on errcode 846608 so the
+        caller can fall back to a proactive markdown send.
+        """
+        truncated = self._truncate_stream_content(
+            content or "", self.MAX_STREAM_CONTENT_LENGTH,
+        )
+        if len(content or "") != len(truncated):
+            logger.warning(
+                "[%s] Stream content truncated for stream_id=%s",
+                self.name, stream_id,
+            )
+        body: Dict[str, Any] = {
+            "msgtype": "stream",
+            "stream": {
+                "id": stream_id,
+                "finish": bool(finish),
+                "content": truncated,
+            },
+        }
+
+        if not finish:
+            # Fire-and-forget for intermediate frames — don't await ack.
+            # This is the key performance optimization: WeCom server may
+            # not ack intermediate stream frames at all, so awaiting the
+            # correlated response future would block 15s on every frame.
+            if not self._ws or self._ws.closed:
+                raise RuntimeError("WeCom websocket is not connected")
+            await self._send_json(
+                {"cmd": APP_CMD_RESPONSE, "headers": {"req_id": reply_req_id}, "body": body}
+            )
+            return {"errcode": 0, "errmsg": "fire-and-forget"}
+
+        # Finish frame: await ack so we reliably detect 846608.
+        response = await self._send_reply_request(reply_req_id, body)
+        errcode = response.get("errcode", 0)
+        if errcode == STREAM_EXPIRED_ERRCODE:
+            raise WeComStreamExpiredError(
+                errcode=errcode, errmsg=str(response.get("errmsg") or ""),
+            )
+        self._raise_for_wecom_error(response, "send stream reply")
+        return response
+
     async def _send_reply_media_message(
         self,
         reply_req_id: str,
@@ -1306,25 +1765,40 @@ class WeComAdapter(BasePlatformAdapter):
         if not reply_req_id and chat_id in self._last_chat_req_ids:
             reply_req_id = self._last_chat_req_ids[chat_id]
 
+        # When native streaming was/is active for this chat, media MUST go
+        # through the proactive send path (aibot_send_msg), NOT passive reply
+        # (aibot_respond_msg). This mirrors the official OpenClaw plugin:
+        #   "replyMedia（被动回复）无法覆盖 replyStream 发出的 thinking 流式消息，
+        #    因此所有媒体统一走 aibot_send_msg 主动发送。"
+        # The reply_req_id is "owned" by the stream — using it for media
+        # causes the server to either ignore it or never ack.
+        active_turn = self._find_active_turn_for_chat(chat_id)
+        if active_turn or chat_id in self._stream_expired_chats:
+            reply_req_id = None  # force proactive send
+
         try:
             upload_result = await self._upload_media_bytes(
                 prepared["data"],
                 prepared["final_type"],
                 prepared["file_name"],
             )
+            logger.info("[%s] upload_media_bytes OK: media_id=%s type=%s", self.name, upload_result.get("media_id"), prepared["final_type"])
             if reply_req_id:
                 media_response = await self._send_reply_media_message(
                     reply_req_id,
                     prepared["final_type"],
                     upload_result["media_id"],
                 )
+                logger.info("[%s] send_reply_media OK: %s", self.name, media_response)
             else:
                 media_response = await self._send_media_message(
                     chat_id,
                     prepared["final_type"],
                     upload_result["media_id"],
                 )
+                logger.info("[%s] send_media_message OK: %s", self.name, media_response)
         except asyncio.TimeoutError:
+            logger.error("[%s] TIMEOUT in _send_media_source for %s", self.name, media_source)
             return SendResult(success=False, error="Timeout sending media to WeCom")
         except Exception as exc:
             logger.error("[%s] Failed to send media %s: %s", self.name, media_source, exc)
@@ -1365,20 +1839,77 @@ class WeComAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Send markdown to a WeCom chat via proactive ``aibot_send_msg``."""
-        del metadata
+        """Send markdown to a WeCom chat.
 
+        Sends content as a standalone message without interfering with any
+        active streams. Streams are managed by their creators (typically
+        GatewayStreamConsumer) who call send_stream_frame(finalize=True)
+        when ready.
+
+        All sends are serialized per chat_id to avoid exceeding WeCom's
+        30 msgs/min/chat rate limit (errcode 846607).
+
+        If metadata contains "is_approval_prompt": True, the message is routed
+        through the control lane for immediate delivery.
+        """
         if not chat_id:
             return SendResult(success=False, error="chat_id is required")
 
+        # Check if this is an approval prompt (should use control lane)
+        is_control = False
+        if metadata:
+            is_control = metadata.pop("is_approval_prompt", False)
+
+        return await self._enqueue_chat_send(
+            chat_id,
+            lambda: self._send_inner(chat_id, content, reply_to),
+            is_control=is_control,
+        )
+
+    async def _send_inner(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str] = None,
+    ) -> SendResult:
+        """Actual send logic, called under the per-chat lock.
+
+        Sends content as a standalone message. Does NOT close any active
+        streams — streams are managed by their creators (GatewayStreamConsumer)
+        who call send_stream_frame(finalize=True) when ready.
+
+        This aligns with the official wecom-openclaw-plugin model where
+        send() and streaming are independent operations.
+        """
         try:
+            # Directly send the message without touching any active streams.
+            # GatewayStreamConsumer manages its own stream lifecycle via
+            # send_stream_frame() with turn_id, so send() shouldn't interfere.
+
             reply_req_id = self._reply_req_id_for_message(reply_to)
 
             if not reply_req_id and chat_id in self._last_chat_req_ids:
                 reply_req_id = self._last_chat_req_ids[chat_id]
 
             if reply_req_id:
-                response = await self._send_reply_markdown(reply_req_id, content)
+                try:
+                    response = await self._send_reply_markdown(reply_req_id, content)
+                except (asyncio.TimeoutError, RuntimeError) as passive_err:
+                    # Passive reply failed (req_id may be stale after WS reconnect).
+                    # Fall back to proactive aibot_send_msg which doesn't depend
+                    # on any prior req_id.
+                    logger.warning(
+                        "[%s] Passive reply failed (%s), falling back to proactive send",
+                        self.name, passive_err,
+                    )
+                    response = await self._send_request(
+                        APP_CMD_SEND,
+                        {
+                            "chatid": chat_id,
+                            "msgtype": "markdown",
+                            "markdown": {"content": content[:self.MAX_MESSAGE_LENGTH]},
+                        },
+                    )
             else:
                 response = await self._send_request(
                     APP_CMD_SEND,
@@ -1392,12 +1923,28 @@ class WeComAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Timeout sending message to WeCom")
         except Exception as exc:
             logger.error("[%s] Send failed: %s", self.name, exc)
+            # Detect 846609 (subscription lost) and trigger reconnect so
+            # subsequent messages don't fail for 2+ minutes while the dead
+            # WS connection lingers.
+            exc_str = str(exc)
+            if str(STREAM_NOT_SUBSCRIBED_ERRCODE) in exc_str:
+                asyncio.ensure_future(
+                    self._force_reconnect_on_stale_subscription(STREAM_NOT_SUBSCRIBED_ERRCODE)
+                )
             return SendResult(success=False, error=str(exc))
 
         error = self._response_error(response)
         if error:
+            # Also check the response-level errcode for 846609.
+            errcode = response.get("errcode", 0)
+            if errcode == STREAM_NOT_SUBSCRIBED_ERRCODE:
+                asyncio.ensure_future(
+                    self._force_reconnect_on_stale_subscription(errcode)
+                )
             return SendResult(success=False, error=error)
 
+        # Mark delivered so _keep_typing cannot open an orphan stream after
+        # this turn's reply already landed (regardless of which path was taken).
         return SendResult(
             success=True,
             message_id=self._payload_req_id(response) or uuid.uuid4().hex[:12],
@@ -1453,6 +2000,7 @@ class WeComAdapter(BasePlatformAdapter):
         **kwargs,
     ) -> SendResult:
         del kwargs
+        logger.info("[%s] send_document called: chat=%s file=%s", self.name, chat_id, file_path)
         return await self._send_media_source(
             chat_id=chat_id,
             media_source=file_path,
@@ -1493,8 +2041,304 @@ class WeComAdapter(BasePlatformAdapter):
             reply_to=reply_to,
         )
 
+    async def send_stream_frame(
+        self,
+        text: str,
+        *,
+        finalize: bool = False,
+        chat_id: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        **kwargs,
+    ) -> bool:
+        """Public entry-point for the gateway streaming consumer.
+
+        Native streaming lifecycle (per-turn):
+          * **First call** for a turn: resolve req_id, create StreamTurn,
+            and send an empty seed frame to trigger WeCom typing animation.
+          * **Subsequent calls**: reuse the same StreamTurn's stream_id
+
+        Args:
+            **kwargs: Additional platform-specific parameters. Currently supports:
+                - turn_id (str): Optional unique identifier for this turn. When
+                  provided, the StreamTurn is keyed by (chat_id, turn_id) instead
+                  of (chat_id, req_id), preventing concurrent consumers (e.g.,
+                  /background, parallel subagents) from interfering with each
+                  other. Mirrors official wecom-openclaw-plugin's per-message
+                  streamId model.
+            and push cumulative text (not deltas) for in-place updates.
+          * **finalize=True**: send closing frame and clean up turn state.
+
+        Each turn (chat_id + req_id) maintains independent state, allowing
+        concurrent messages without interference (e.g., approval during streaming).
+
+        Returns ``True`` when the frame landed; ``False`` when the
+        stream is unavailable (no req_id, expired session, transport
+        error). On ``False`` the caller should fall back to
+        :meth:`send` to deliver the remaining content as a one-shot
+        markdown reply.
+        """
+        chat = (chat_id or "").strip()
+        if not chat:
+            logger.warning(
+                "[%s] send_stream_frame: chat_id required",
+                self.name,
+            )
+            return False
+
+        # Extract turn_id early to decide whether to check chat-level expired
+        turn_id = kwargs.get("turn_id")
+
+        # Chat-level stream expiry only blocks NEW turn creation.
+        # Existing turns (identified by turn_id) can continue to finalize
+        # even after another turn in the same chat triggered WeComStreamExpiredError.
+        # This prevents cross-turn interference in concurrent scenarios.
+        if not turn_id and chat in self._stream_expired_chats:
+            # No turn_id provided, and chat is expired → block new turn creation
+            return False
+
+        if finalize:
+            # Finalize frame counts toward 30/min — go through the control queue
+            # (high priority) to prevent blocking by normal messages or other streams.
+            turn_id = kwargs.get("turn_id")
+            return await self._enqueue_chat_send(
+                chat,
+                lambda: self._send_stream_frame_inner(text, chat=chat, reply_to=reply_to, finalize=True, turn_id=turn_id),
+                is_control=True,
+            )
+        else:
+            # Intermediate frames: fire-and-forget, no queue, no rate limit.
+            # WeCom does NOT count them toward the 30/min quota.
+            turn_id = kwargs.get("turn_id")
+            return await self._send_stream_frame_inner(text, chat=chat, reply_to=reply_to, finalize=False, turn_id=turn_id)
+
+    async def _send_stream_frame_inner(
+        self,
+        text: str,
+        *,
+        chat: str,
+        reply_to: Optional[str] = None,
+        finalize: bool = False,
+        turn_id: Optional[str] = None,
+    ) -> bool:
+        """Actual stream frame logic with per-turn state.
+
+        Each turn (identified by chat_id + turn_id OR chat_id + req_id)
+        maintains its own stream state. This prevents concurrent messages
+        from interfering with each other.
+
+        When turn_id is provided (from GatewayStreamConsumer), the turn is
+        keyed by (chat, turn_id) instead of (chat, req_id). This ensures
+        concurrent consumers (e.g., /background, parallel subagents) maintain
+        independent streams.
+
+        IMPORTANT: Once a turn is created, it locks to its req_id. Even if
+        _last_chat_req_ids[chat] changes (e.g., user sends /approve), the
+        existing turn continues with its original req_id. This prevents the
+        stream from switching to a new req_id mid-turn.
+        """
+        try:
+            # If turn_id is provided, use it to find/create the turn.
+            # This is the true per-turn model that prevents concurrent
+            # consumers from interfering.
+            if turn_id:
+                turn_key = f"{chat}:{turn_id}"
+                turn = self._stream_turns.get(turn_key)
+                if not turn:
+                    # finalize=True should NOT create a new turn.
+                    # If the turn was already cleaned up (e.g., due to errcode 6000),
+                    # the caller should fallback to proactive send() instead of
+                    # creating a fresh turn just to finalize it (which would send
+                    # another seed + finish, potentially triggering more conflicts).
+                    if finalize:
+                        logger.debug(
+                            "[%s] send_stream_frame: cannot finalize non-existent turn (turn_id=%s, chat=%s)",
+                            self.name, turn_id, chat,
+                        )
+                        return False
+
+                    # First frame for this turn: need to create it.
+                    # Check if chat is expired (blocks NEW turn creation).
+                    if chat in self._stream_expired_chats:
+                        logger.debug(
+                            "[%s] send_stream_frame: chat %s is expired, cannot create new turn (turn_id=%s)",
+                            self.name, chat, turn_id,
+                        )
+                        return False
+
+                    # First frame for this turn: resolve req_id and create turn
+                    req_id = self._resolve_stream_req_id(chat, reply_to)
+                    if not req_id:
+                        logger.debug(
+                            "[%s] send_stream_frame: no req_id available for chat %s (turn_id=%s)",
+                            self.name, chat, turn_id,
+                        )
+                        return False
+                    turn = StreamTurn(chat, req_id)
+                    self._stream_turns[turn_key] = turn
+                    logger.debug(
+                        "[%s] send_stream_frame: created new turn %s (turn_id=%s, req_id=%s) for chat %s",
+                        self.name, turn.stream_id, turn_id, req_id, chat,
+                    )
+            else:
+                # Fallback: no turn_id provided (backward compatibility or direct calls).
+                # Check if we already have an active turn for this chat.
+                # If yes, reuse it (don't resolve req_id again).
+                existing_turn = self._find_active_turn_for_chat(chat)
+                if existing_turn and not existing_turn.finalized:
+                    turn = existing_turn
+                    logger.debug(
+                        "[%s] send_stream_frame: reusing existing turn %s for chat %s",
+                        self.name, turn.stream_id, chat,
+                    )
+                else:
+                    # No active turn, need to create a new one.
+                    # Check if chat is expired at the chat level (blocks NEW turn creation).
+                    if chat in self._stream_expired_chats:
+                        logger.debug(
+                            "[%s] send_stream_frame: chat %s is expired, cannot create new turn",
+                            self.name, chat,
+                        )
+                        return False
+
+                    req_id = self._resolve_stream_req_id(chat, reply_to)
+                    if not req_id:
+                        logger.debug(
+                            "[%s] send_stream_frame: no req_id available for chat %s",
+                            self.name, chat,
+                        )
+                        return False
+                    turn = self._get_or_create_stream_turn(chat, req_id)
+                    logger.debug(
+                        "[%s] send_stream_frame: created new turn %s (req_id=%s) for chat %s",
+                        self.name, turn.stream_id, req_id, chat,
+                    )
+
+            # Check if this turn has expired
+            if turn.expired:
+                return False
+
+            # First frame for this turn: send seed ONLY if not already seeded.
+            # The GatewayStreamConsumer sends the initial empty seed frame itself
+            # (stream_consumer.py:461), so we must not duplicate it here.
+            # The seeded flag prevents double-seed which causes WeCom errcode 6000
+            # (data version conflict).
+            if not turn.seeded and not turn.finalized:
+                # Seed frame with closed empty <think></think> — matches the
+                # official OpenClaw plugin's THINKING_MESSAGE constant.  This
+                # tells the WeCom client that a reasoning turn is starting;
+                # subsequent frames replace it with cumulative content.
+                await self._send_stream_reply(
+                    turn.req_id, turn.stream_id,
+                    "<think></think>", finish=False,
+                )
+                turn.seeded = True
+                # If caller sent empty text (consumer's explicit seed call),
+                # we're done — don't send another empty frame below.
+                if not text and not finalize:
+                    return True
+
+            # Send the frame
+            if finalize:
+                await self._send_stream_reply(
+                    turn.req_id,
+                    turn.stream_id,
+                    text,
+                    finish=True,
+                )
+                turn.finalized = True
+                # Clean up this turn's state
+                # If turn_id was provided, the key is chat:turn_id, otherwise chat:req_id
+                if turn_id:
+                    turn_key = f"{chat}:{turn_id}"
+                    self._stream_turns.pop(turn_key, None)
+                else:
+                    self._cleanup_stream_turn(chat, turn.req_id)
+            else:
+                # Throttle: skip this intermediate frame if either:
+                # 1) The previous frame was dispatched within the skip window, or
+                # 2) The per-turn frame cap has been reached.
+                # Cumulative text means the next frame (or finalize) will carry
+                # the full content — nothing is lost.
+                now = time.monotonic()
+                skip = False
+                if turn._intermediate_frames_sent >= MAX_INTERMEDIATE_FRAMES:
+                    skip = True
+                elif turn._last_frame_sent_at and (now - turn._last_frame_sent_at) < STREAM_FRAME_SKIP_WINDOW:
+                    skip = True
+
+                if skip:
+                    # Still update accumulated_text so finalize has the latest.
+                    turn.accumulated_text = text
+                    return True
+
+                await self._send_stream_reply(
+                    turn.req_id,
+                    turn.stream_id,
+                    text,
+                    finish=False,
+                )
+                turn._last_frame_sent_at = time.monotonic()
+                turn._intermediate_frames_sent += 1
+                turn.accumulated_text = text
+
+            return True
+
+        except WeComStreamExpiredError:
+            logger.info(
+                "[%s] Stream expired (errcode=%d) for chat %s — switching to proactive send",
+                self.name, STREAM_EXPIRED_ERRCODE, chat,
+            )
+            # Mark this specific turn as expired and clean it up
+            if 'turn' in locals():
+                turn.expired = True
+                if turn_id:
+                    turn_key = f"{chat}:{turn_id}"
+                    self._stream_turns.pop(turn_key, None)
+                else:
+                    self._cleanup_stream_turn(chat, turn.req_id)
+
+            # Mark the chat as stream-expired to prevent new stream attempts.
+            # Other concurrent turns may continue if they're already active.
+            self._stream_expired_chats.add(chat)
+            return False
+        except Exception as exc:
+            logger.warning(
+                "[%s] Stream frame failed (chat=%s): %s",
+                self.name, chat, exc,
+            )
+            # Clean up this turn on error
+            if 'turn' in locals():
+                if turn_id:
+                    turn_key = f"{chat}:{turn_id}"
+                    self._stream_turns.pop(turn_key, None)
+                else:
+                    self._cleanup_stream_turn(chat, turn.req_id)
+            return False
+
+    def supports_native_streaming(
+        self,
+        chat_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Probed by ``GatewayStreamConsumer`` to gate native streaming.
+
+        WeCom AI Bot supports stream frames in both DMs and groups; group
+        chats just need a cached inbound ``req_id`` (every group message
+        the bot receives populates ``_last_chat_req_ids``, so this is
+        effectively always satisfied for actively-used groups).
+        """
+        del chat_type, metadata
+        return True
+
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        """WeCom does not expose typing indicators in this adapter."""
+        """No-op: WeCom typing is handled by the stream consumer seed frame.
+
+        The stream consumer sends an empty seed frame at the start of run(),
+        which is what triggers WeCom's typing animation. _keep_typing loops
+        are designed for platforms where typing expires (Telegram 5s) — WeCom
+        streams stay open indefinitely, so repeated send_typing calls cause
+        orphan streams. Delegating entirely to the consumer avoids the race.
+        """
         del chat_id, metadata
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:

@@ -12500,6 +12500,7 @@ class GatewayRunner:
         text itself is already delivered — this only handles file attachments
         that the normal _process_message_background path would have caught.
         """
+        logger.info("[DEBUG] _deliver_media_from_response called: response=%r chat=%s", response[:100], event.source.chat_id)
         from pathlib import Path
         from urllib.parse import quote as _quote
 
@@ -15020,7 +15021,27 @@ class GatewayRunner:
 
         logger.info("User approved %d dangerous command(s) via /approve (%s)", count, choice)
         plural = "plural" if count > 1 else "singular"
-        return t(f"gateway.approve.{choice}_{plural}", count=count)
+
+        # Send confirmation message with is_approval_prompt to avoid closing
+        # the agent's stream when it resumes. The confirmation is an independent
+        # message that shouldn't interfere with the agent's ongoing output.
+        # Use await instead of fire-and-forget to ensure delivery and log failures.
+        confirmation_text = t(f"gateway.approve.{choice}_{plural}", count=count)
+        if _adapter:
+            try:
+                await _adapter.send(
+                    source.chat_id,
+                    confirmation_text,
+                    metadata={"is_approval_prompt": True}  # Correct metadata key
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to send /approve confirmation to %s: %s",
+                    source.chat_id, e, exc_info=True
+                )
+
+        # Return None so the default command handler doesn't send the message again
+        return None
 
     async def _handle_deny_command(self, event: MessageEvent) -> str:
         """Handle /deny command — reject pending dangerous command(s).
@@ -15056,9 +15077,26 @@ class GatewayRunner:
             _adapter.resume_typing_for_chat(source.chat_id)
 
         logger.info("User denied %d dangerous command(s) via /deny", count)
-        if count > 1:
-            return t("gateway.deny.denied_plural", count=count)
-        return t("gateway.deny.denied_singular")
+
+        # Send confirmation message with is_approval_prompt to avoid closing
+        # the agent's stream when it resumes. Similar to /approve handling.
+        # Use await instead of fire-and-forget to ensure delivery and log failures.
+        confirmation_text = t("gateway.deny.denied_plural", count=count) if count > 1 else t("gateway.deny.denied_singular")
+        if _adapter:
+            try:
+                await _adapter.send(
+                    source.chat_id,
+                    confirmation_text,
+                    metadata={"is_approval_prompt": True}  # Correct metadata key
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to send /deny confirmation to %s: %s",
+                    source.chat_id, e, exc_info=True
+                )
+
+        # Return None so the default command handler doesn't send the message again
+        return None
 
     # Built-in messaging platforms where the ``/update`` command is allowed.
     # ACP, API server, and webhooks are programmatic interfaces that should
@@ -17946,9 +17984,23 @@ class GatewayRunner:
                         # first message that can never be updated, resulting in
                         # duplicate messages (partial + final).
                         _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
-                        if not _adapter_supports_edit:
+                        # Adapters that can't edit messages but provide a
+                        # native-streaming transport (e.g. WeCom's
+                        # msgtype: "stream" via send_stream_frame) get
+                        # past the gate — the consumer's native branch
+                        # delivers the full turn through that transport.
+                        _adapter_supports_native_stream = bool(getattr(
+                            _adapter, "SUPPORTS_NATIVE_STREAMING", False,
+                        ))
+                        if not _adapter_supports_edit and not _adapter_supports_native_stream:
                             raise RuntimeError("skip streaming for non-editable platform")
                         _effective_cursor = _scfg.cursor
+                        # Native-only platforms render their own typing
+                        # animation while the stream is live; suppress the
+                        # consumer-injected cursor so the user doesn't see
+                        # a stray ▉ alongside the platform's UI.
+                        if not _adapter_supports_edit and _adapter_supports_native_stream:
+                            _effective_cursor = ""
                         # Some Matrix clients render the streaming cursor
                         # as a visible tofu/white-box artifact.  Keep
                         # streaming text on Matrix, but suppress the cursor.
@@ -18335,6 +18387,39 @@ class GatewayRunner:
                 # Typing resumes in _handle_approve_command/_handle_deny_command.
                 _status_adapter.pause_typing_for_chat(_status_chat_id)
 
+                # For WeCom native streaming: signal the stream consumer to close
+                # the current stream before showing the approval prompt.
+                # This goes through the consumer's queue for serial processing,
+                # avoiding race conditions with pending deltas.
+                _sc = stream_consumer_holder[0] if stream_consumer_holder else None
+                _boundary_ok = True
+                if _sc and getattr(_sc, "_use_native_streaming", False):
+                    _cancelled_flag = None
+                    try:
+                        _boundary_result = _sc.close_for_approval_prompt()
+                        # close_for_approval_prompt returns (future, cancelled_flag) or just future
+                        if isinstance(_boundary_result, tuple):
+                            _boundary_future, _cancelled_flag = _boundary_result
+                        else:
+                            _boundary_future = _boundary_result
+                        # Wait for consumer to process the boundary
+                        if hasattr(_boundary_future, "result"):
+                            _boundary_ok = _boundary_future.result(timeout=10)
+                            if not _boundary_ok:
+                                logger.warning(
+                                    "Approval boundary failed to close stream properly — "
+                                    "approval prompt may still appear in typing bubble"
+                                )
+                    except (TimeoutError, Exception) as _boundary_err:
+                        _boundary_ok = False
+                        # On timeout: mark boundary as cancelled so it won't send
+                        # visible finalize text after the approval prompt
+                        if _cancelled_flag is not None:
+                            _cancelled_flag["cancelled"] = True
+                        logger.warning(
+                            "Approval boundary timed out or failed: %s", _boundary_err,
+                        )
+
                 cmd = approval_data.get("command", "")
                 desc = approval_data.get("description", "dangerous command")
 
@@ -18379,11 +18464,15 @@ class GatewayRunner:
                     f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
                 )
                 try:
+                    # Mark as approval prompt so WeCom routes through control lane
+                    _approval_metadata = dict(_status_thread_metadata or {})
+                    _approval_metadata["is_approval_prompt"] = True
+
                     _approval_send_fut = safe_schedule_threadsafe(
                         _status_adapter.send(
                             _status_chat_id,
                             msg,
-                            metadata=_status_thread_metadata,
+                            metadata=_approval_metadata,
                         ),
                         _loop_for_step,
                         logger=logger,

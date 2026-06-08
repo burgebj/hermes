@@ -829,16 +829,36 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 adapter_ok = True
                 if text_to_send:
                     from agent.async_utils import safe_schedule_threadsafe
+                    logger.info(
+                        "Job '%s': scheduling live adapter send to %s:%s (content=%d chars, loop=%s)",
+                        job["id"], platform_name, chat_id, len(text_to_send), loop,
+                    )
                     future = safe_schedule_threadsafe(
                         runtime_adapter.send(chat_id, text_to_send, metadata=send_metadata),
                         loop,
                     )
                     if future is None:
+                        logger.warning(
+                            "Job '%s': safe_schedule_threadsafe returned None (loop closed or unavailable)",
+                            job["id"],
+                        )
                         adapter_ok = False
                     else:
+                        logger.info(
+                            "Job '%s': waiting for live adapter send result (timeout=60s)...",
+                            job["id"],
+                        )
                         try:
                             send_result = future.result(timeout=60)
+                            logger.info(
+                                "Job '%s': live adapter send completed (success=%s)",
+                                job["id"], getattr(send_result, "success", True),
+                            )
                         except TimeoutError:
+                            logger.warning(
+                                "Job '%s': live adapter send timed out after 60s, cancelling",
+                                job["id"],
+                            )
                             future.cancel()
                             raise
                         if send_result and not getattr(send_result, "success", True):
