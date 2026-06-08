@@ -6607,6 +6607,13 @@ def cmd_kanban(args):
     return kanban_command(args)
 
 
+def cmd_mission(args):
+    """Mission Control dry-run preview wrapper."""
+    from hermes_cli.mission import mission_command
+
+    sys.exit(mission_command(args))
+
+
 def cmd_hooks(args):
     """Shell-hook inspection and management."""
     from hermes_cli.hooks import hooks_command
@@ -12617,7 +12624,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "config", "cron", "curator", "dashboard", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
-        "model", "pairing", "plugins", "portal", "postinstall", "profile", "proxy",
+        "mission", "model", "pairing", "plugins", "portal", "postinstall", "profile", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
@@ -13320,6 +13327,14 @@ def main():
 
     kanban_parser = _build_kanban_parser(subparsers)
     kanban_parser.set_defaults(func=cmd_kanban)
+
+    # =========================================================================
+    # mission command — dry-run Mission Control graph preview
+    # =========================================================================
+    from hermes_cli.mission import build_parser as _build_mission_parser
+
+    mission_parser = _build_mission_parser(subparsers)
+    mission_parser.set_defaults(func=cmd_mission)
 
     # =========================================================================
     # hooks command — shell-hook inspection and management
