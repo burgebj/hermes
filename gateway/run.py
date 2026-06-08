@@ -1983,6 +1983,13 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         # Per-session reasoning effort overrides from /reasoning.
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
+        # Per-session codex app-server thread ids, so the codex_app_server
+        # runtime resumes the same Codex thread across turns instead of
+        # starting a fresh one each message (the gateway rebuilds the AIAgent
+        # per inbound message, which would otherwise discard the codex thread's
+        # working context). Key: session_key (stable across compaction's
+        # session_id rotation), Value: codex thread id string.
+        self._session_codex_threads: Dict[str, str] = {}
         self._kanban_notifier_profile = self._active_profile_name()
         # Teams meeting pipeline runtime (bound later when msgraph_webhook adapter exists).
         self._teams_pipeline_runtime = None
@@ -5215,6 +5222,10 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                         # be garbage-collected.  Otherwise the cache grows
                         # unbounded across the gateway's lifetime.
                         self._evict_cached_agent(key)
+                        # The session is ending — drop its codex thread mapping
+                        # so a future session reusing this key starts a fresh
+                        # codex thread instead of resuming the expired one.
+                        self._session_codex_threads.pop(key, None)
                         # Mark as finalized and persist to disk so the flag
                         # survives gateway restarts.
                         with self.session_store._lock:
@@ -8045,6 +8056,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             # or a queued "/model switched" note.
             self._session_model_overrides.pop(session_key, None)
             self._set_session_reasoning_override(session_key, None)
+            self._session_codex_threads.pop(session_key, None)
             if hasattr(self, "_pending_model_notes"):
                 self._pending_model_notes.pop(session_key, None)
         
@@ -8869,6 +8881,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 self._evict_cached_agent(session_key)
                 self._session_model_overrides.pop(session_key, None)
                 self._set_session_reasoning_override(session_key, None)
+                self._session_codex_threads.pop(session_key, None)
                 if hasattr(self, "_pending_model_notes"):
                     self._pending_model_notes.pop(session_key, None)
                 response = (response or "") + (
@@ -13959,6 +13972,18 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
             agent.status_callback = _status_callback_sync
 
+            # Resume this session's codex thread on the next codex_app_server
+            # turn so its working context (file reads, tool output, long tasks)
+            # survives the per-message agent rebuild and should_retire respawns.
+            # Keyed by the stable session_key; only the codex runtime reads it,
+            # so it's a harmless no-op for every other runtime. getattr-guarded
+            # like _pending_model_notes for runners built without full __init__.
+            if session_key:
+                _codex_threads = getattr(self, "_session_codex_threads", None)
+                agent._codex_resume_thread_id = (
+                    _codex_threads.get(session_key) if _codex_threads else None
+                )
+
             # Credits / out-of-band notices (usage bands, depletion, restored).
             # Messaging has no persistent status bar, so each notice is a
             # standalone push: render to a single plaintext line and deliver via
@@ -14399,6 +14424,24 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     pass
                 reset_current_session_key(_approval_session_token)
             result_holder[0] = result
+
+            # Persist this turn's codex thread id so the next turn for the
+            # same session resumes it (see _session_codex_threads). Keyed by
+            # the stable session_key so it survives compaction's session_id
+            # rotation; cleared on session reset / expiry boundaries. Skip the
+            # write when this run is no longer current (a /new or /stop bumped
+            # the generation mid-turn) — otherwise a discarded turn's thread id
+            # would repopulate the map AFTER the reset cleared it, and the next
+            # turn would wrongly resume the pre-reset thread. Mirrors the
+            # stale-run guard used for agent promotion below.
+            _codex_run_current = (
+                run_generation is None
+                or self._is_session_run_current(session_key, run_generation)
+            )
+            if session_key and _codex_run_current and isinstance(result, dict):
+                _codex_tid = result.get("codex_thread_id")
+                if _codex_tid and hasattr(self, "_session_codex_threads"):
+                    self._session_codex_threads[session_key] = _codex_tid
 
             # Signal the stream consumer that the agent is done
             if _stream_consumer is not None:
