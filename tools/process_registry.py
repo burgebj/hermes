@@ -182,10 +182,12 @@ class ProcessRegistry:
 
     @staticmethod
     def _clean_shell_noise(text: str) -> str:
-        """Strip shell startup warnings from the beginning of output."""
+        """Strip shell startup/exit warnings from the beginning and end of output."""
         lines = text.split("\n")
         while lines and any(noise in lines[0] for noise in ProcessRegistry._SHELL_NOISE_SUBSTRINGS):
             lines.pop(0)
+        while lines and any(noise in lines[-1] for noise in ProcessRegistry._SHELL_NOISE_SUBSTRINGS):
+            lines.pop()
         return "\n".join(lines)
 
     def _check_watch_patterns(self, session: ProcessSession, new_text: str) -> None:
@@ -877,6 +879,7 @@ class ProcessRegistry:
         if was_running and session.notify_on_complete:
             from tools.ansi_strip import strip_ansi
             output_tail = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
+            output_tail = ProcessRegistry._clean_shell_noise(output_tail)
             self.completion_queue.put({
                 "type": "completion",
                 "session_id": session.id,
@@ -1505,7 +1508,7 @@ def format_process_notification(evt: dict) -> "str | None":
 
     if evt_type == "watch_match":
         _pat = evt.get("pattern", "?")
-        _out = evt.get("output", "")
+        _out = ProcessRegistry._clean_shell_noise(evt.get("output", ""))
         _sup = evt.get("suppressed", 0)
         text = (
             f"[IMPORTANT: Background process {_sid} matched "
@@ -1519,7 +1522,7 @@ def format_process_notification(evt: dict) -> "str | None":
         return text
 
     _exit = evt.get("exit_code", "?")
-    _out = evt.get("output", "")
+    _out = ProcessRegistry._clean_shell_noise(evt.get("output", ""))
     return (
         f"[IMPORTANT: Background process {_sid} completed "
         f"(exit code {_exit}).\n"

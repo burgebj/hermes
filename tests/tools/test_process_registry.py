@@ -1225,3 +1225,53 @@ class TestTerminateHostPidPosix:
         pr.ProcessRegistry._terminate_host_pid(12345)
 
         assert kill_calls == [(12345, signal.SIGTERM)]
+
+
+class TestCleanShellNoise:
+    """Tests for _clean_shell_noise() — strip shell noise from output."""
+
+    def test_strips_tcsetattr_from_beginning(self):
+        from tools.process_registry import ProcessRegistry as pr
+        text = "tcsetattr: Inappropriate ioctl for device\nsome real output"
+        result = pr._clean_shell_noise(text)
+        assert result == "some real output"
+
+    def test_strips_tcsetattr_from_end(self):
+        from tools.process_registry import ProcessRegistry as pr
+        text = "some real output\ntcsetattr: Inappropriate ioctl for device"
+        result = pr._clean_shell_noise(text)
+        assert result == "some real output"
+
+    def test_strips_multiple_noise_lines_from_end(self):
+        from tools.process_registry import ProcessRegistry as pr
+        text = "real output\nbash: no job control in this shell\ntcsetattr: Inappropriate ioctl for device"
+        result = pr._clean_shell_noise(text)
+        assert result == "real output"
+
+    def test_strips_noise_from_both_ends(self):
+        from tools.process_registry import ProcessRegistry as pr
+        text = "bash: cannot set terminal process group\nreal output\ntcsetattr: Inappropriate ioctl for device"
+        result = pr._clean_shell_noise(text)
+        assert result == "real output"
+
+    def test_passthrough_clean_output(self):
+        from tools.process_registry import ProcessRegistry as pr
+        text = "line 1\nline 2\nline 3"
+        result = pr._clean_shell_noise(text)
+        assert result == text
+
+    def test_empty_string(self):
+        from tools.process_registry import ProcessRegistry as pr
+        assert pr._clean_shell_noise("") == ""
+
+    def test_only_noise_lines(self):
+        from tools.process_registry import ProcessRegistry as pr
+        text = "tcsetattr: Inappropriate ioctl for device\nbash: no job control in this shell"
+        result = pr._clean_shell_noise(text)
+        assert result == ""
+
+    def test_noise_in_middle_preserved(self):
+        from tools.process_registry import ProcessRegistry as pr
+        text = "line 1\ntcsetattr: Inappropriate ioctl for device\nline 3"
+        result = pr._clean_shell_noise(text)
+        assert result == text
