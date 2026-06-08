@@ -534,3 +534,76 @@ def _read_logging_config():
     except Exception:
         pass
     return (None, None, None)
+
+
+# ---------------------------------------------------------------------------
+# Request/response tracing (opt-in via HERMES_TRACE=1)
+# ---------------------------------------------------------------------------
+
+_trace_logger = logging.getLogger("hermes.trace")
+_TRACE_ENABLED = False
+
+
+def enable_tracing() -> None:
+    """Enable full request/response tracing to a dedicated trace log.
+
+    Sets up a rotating file handler at ``~/.hermes/logs/traces/trace.log``
+    with 100MB max size and 3 backup files. Only enabled when
+    ``HERMES_TRACE=1`` is set.
+    """
+    global _TRACE_ENABLED
+    _TRACE_ENABLED = True
+    trace_dir = get_hermes_home() / "logs" / "traces"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        trace_dir / "trace.log",
+        maxBytes=100 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter(
+        "[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    _trace_logger.propagate = False
+    _trace_logger.addHandler(handler)
+    _trace_logger.setLevel(logging.INFO)
+    _trace_logger.info("Tracing enabled — trace.log captures all API requests/responses")
+
+
+def log_api_request(provider: str, model: str, prompt_tokens: int, max_tokens: int) -> None:
+    """Log an outgoing API request.
+
+    Args:
+        provider: Provider name (e.g. "anthropic", "openai")
+        model: Model name (e.g. "claude-sonnet-4", "gpt-4o")
+        prompt_tokens: Number of prompt tokens sent
+        max_tokens: Maximum tokens requested
+    """
+    if not _TRACE_ENABLED:
+        return
+    _trace_logger.info(
+        "REQ provider=%s model=%s prompt_tokens=%s max_tokens=%s",
+        provider, model, prompt_tokens, max_tokens,
+    )
+
+
+def log_api_response(provider: str, model: str, status: str,
+                     completion_tokens: int, latency_ms: float,
+                     error: str = "") -> None:
+    """Log an incoming API response.
+
+    Args:
+        provider: Provider name
+        model: Model name
+        status: Status string ("success", "error", "timeout")
+        completion_tokens: Number of completion tokens received
+        latency_ms: Request latency in milliseconds
+        error: Error message if status is not "success"
+    """
+    if not _TRACE_ENABLED:
+        return
+    extra = f" error={error}" if error else ""
+    _trace_logger.info(
+        "RES provider=%s model=%s status=%s completion_tokens=%s latency_ms=%.0f%s",
+        provider, model, status, completion_tokens, latency_ms, extra,
+    )
