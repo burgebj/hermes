@@ -1507,15 +1507,21 @@ def _kill_process_group(proc, escalate: bool = False):
         for child in children:
             try:
                 child.terminate()
-            except psutil.NoSuchProcess:
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
         try:
             parent.terminate()
         except psutil.NoSuchProcess:
             pass
+        except psutil.AccessDenied as e:
+            logger.debug("Could not terminate parent process via psutil: %s", e, exc_info=True)
+            try:
+                proc.kill()
+            except Exception as e2:
+                logger.debug("Could not kill process: %s", e2, exc_info=True)
     except psutil.NoSuchProcess:
         pass
-    except (PermissionError, OSError) as e:
+    except (psutil.AccessDenied, PermissionError, OSError) as e:
         logger.debug("Could not terminate process tree: %s", e, exc_info=True)
         try:
             proc.kill()
@@ -1532,15 +1538,21 @@ def _kill_process_group(proc, escalate: bool = False):
                 for child in parent.children(recursive=True):
                     try:
                         child.kill()
-                    except psutil.NoSuchProcess:
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
                 try:
                     parent.kill()
                 except psutil.NoSuchProcess:
                     pass
+                except psutil.AccessDenied as e:
+                    logger.debug("Could not kill parent process via psutil: %s", e, exc_info=True)
+                    try:
+                        proc.kill()
+                    except Exception as e2:
+                        logger.debug("Could not kill process: %s", e2, exc_info=True)
             except psutil.NoSuchProcess:
                 pass
-            except (PermissionError, OSError) as e:
+            except (psutil.AccessDenied, PermissionError, OSError) as e:
                 logger.debug("Could not kill process tree: %s", e, exc_info=True)
                 try:
                     proc.kill()
