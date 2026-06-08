@@ -8002,6 +8002,137 @@ async def run_toolset_post_setup(name: str, body: ToolsetPostSetup):
 
 
 # ---------------------------------------------------------------------------
+# MCP servers endpoint
+# ---------------------------------------------------------------------------
+#
+# Read-only listing of MCP servers configured under ``mcp_servers`` in
+# config.yaml. Surfaces enough shape for dashboard UIs (e.g. hermes-workspace)
+# to render the configured servers without needing to parse YAML themselves.
+#
+# Secret-looking values in ``env`` and ``headers`` are masked before serving.
+# Mutating endpoints (add/remove/test) are intentionally out of scope for this
+# first cut — they live in ``hermes mcp`` CLI for now.
+
+
+_MCP_SECRET_HINTS = (
+    "token",
+    "secret",
+    "password",
+    "pass",
+    "apikey",
+    "api_key",
+    "auth",
+    "bearer",
+    "key",
+    "credential",
+)
+_MCP_MASK = "••••"
+
+
+def _mcp_mask_dict(value: Any) -> Dict[str, str]:
+    """Return a copy of ``value`` with secret-looking values masked.
+
+    Non-dict input is treated as empty. Non-string keys are dropped. Values
+    are stringified; empty values stay empty (so the UI can distinguish
+    "set" from "unset"). Keys whose lowercased name contains any of
+    :data:`_MCP_SECRET_HINTS` have their value replaced with the mask
+    sentinel when truthy.
+    """
+    if not isinstance(value, dict):
+        return {}
+    masked: Dict[str, str] = {}
+    for k, v in value.items():
+        if not isinstance(k, str):
+            continue
+        sval = "" if v is None else str(v)
+        kl = k.lower()
+        if sval and any(hint in kl for hint in _MCP_SECRET_HINTS):
+            masked[k] = _MCP_MASK
+        else:
+            masked[k] = sval
+    return masked
+
+
+def _mcp_serialize_server(name: str, raw: Any) -> Optional[Dict[str, Any]]:
+    """Convert a single ``mcp_servers[name]`` config entry to a serializable
+    dict with secrets masked. Returns ``None`` for non-dict entries."""
+    if not isinstance(raw, dict):
+        return None
+
+    # Transport: explicit field wins, otherwise infer from url/command.
+    transport = raw.get("transport") or raw.get("transportType")
+    if isinstance(transport, str) and transport.strip().lower() in ("stdio", "http"):
+        transport = transport.strip().lower()
+    elif isinstance(raw.get("url"), str) and raw["url"].strip():
+        transport = "http"
+    else:
+        transport = "stdio"
+
+    args = raw.get("args") or []
+    if not isinstance(args, list):
+        args = []
+    args = [str(a) for a in args if a is not None]
+
+    enabled = raw.get("enabled")
+    if not isinstance(enabled, bool):
+        enabled = True
+
+    server: Dict[str, Any] = {
+        "name": name,
+        "enabled": enabled,
+        "transport": transport,
+        "command": raw.get("command") if isinstance(raw.get("command"), str) else None,
+        "args": args,
+        "url": raw.get("url") if isinstance(raw.get("url"), str) else None,
+        "env": _mcp_mask_dict(raw.get("env")),
+        "headers": _mcp_mask_dict(raw.get("headers")),
+    }
+
+    # Pass-through optional fields the dashboard normalizer reads. Only
+    # include them when present so the response stays compact.
+    for key in (
+        "auth",
+        "tool_mode",
+        "toolMode",
+        "include_tools",
+        "includeTools",
+        "exclude_tools",
+        "excludeTools",
+        "timeout",
+        "connectTimeout",
+    ):
+        if key in raw:
+            server[key] = raw[key]
+
+    # Auth field — if it's a dict, mask token/secret-bearing children.
+    auth = server.get("auth")
+    if isinstance(auth, dict):
+        server["auth"] = _mcp_mask_dict(auth)
+
+    return server
+
+
+@app.get("/api/mcp")
+async def get_mcp_servers():
+    """List MCP servers configured under ``mcp_servers`` in config.yaml.
+
+    Returns ``{"servers": [...]}``. Read-only; secret-looking values in
+    ``env``, ``headers``, and ``auth`` are masked.
+    """
+    from hermes_cli.mcp_config import _get_mcp_servers
+
+    raw_servers = _get_mcp_servers()
+    servers: List[Dict[str, Any]] = []
+    for name, raw_config in raw_servers.items():
+        if not isinstance(name, str):
+            continue
+        entry = _mcp_serialize_server(name, raw_config)
+        if entry is not None:
+            servers.append(entry)
+    return {"servers": servers}
+
+
+# ---------------------------------------------------------------------------
 # Raw YAML config endpoint
 # ---------------------------------------------------------------------------
 

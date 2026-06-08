@@ -2331,6 +2331,70 @@ class TestNewEndpoints:
             },
         ]
 
+    def test_mcp_list_empty(self, monkeypatch):
+        import hermes_cli.mcp_config as mcp_config
+
+        monkeypatch.setattr(mcp_config, "_get_mcp_servers", lambda: {})
+        resp = self.client.get("/api/mcp")
+        assert resp.status_code == 200
+        assert resp.json() == {"servers": []}
+
+    def test_mcp_list_returns_configured_servers(self, monkeypatch):
+        import hermes_cli.mcp_config as mcp_config
+
+        fake_servers = {
+            "stdio-server": {
+                "command": "node",
+                "args": ["/path/to/server.js"],
+                "env": {"FOO_TOKEN": "supersecret", "DEBUG": "1"},
+            },
+            "http-server": {
+                "url": "https://mcp.example.com/sse",
+                "headers": {"Authorization": "Bearer xyz"},
+            },
+        }
+        monkeypatch.setattr(mcp_config, "_get_mcp_servers", lambda: fake_servers)
+
+        resp = self.client.get("/api/mcp")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "servers" in body
+        servers_by_name = {s["name"]: s for s in body["servers"]}
+
+        stdio = servers_by_name["stdio-server"]
+        assert stdio["transport"] == "stdio"
+        assert stdio["command"] == "node"
+        assert stdio["args"] == ["/path/to/server.js"]
+        assert stdio["enabled"] is True
+        # Token-bearing env keys must be masked.
+        assert stdio["env"]["FOO_TOKEN"] != "supersecret"
+        assert stdio["env"]["FOO_TOKEN"] == "••••"
+        # Non-secret env values pass through as-is.
+        assert stdio["env"]["DEBUG"] == "1"
+
+        http = servers_by_name["http-server"]
+        assert http["transport"] == "http"
+        assert http["url"] == "https://mcp.example.com/sse"
+        # Authorization header must be masked.
+        assert http["headers"]["Authorization"] != "Bearer xyz"
+        assert http["headers"]["Authorization"] == "••••"
+
+    def test_mcp_list_skips_malformed_entries(self, monkeypatch):
+        import hermes_cli.mcp_config as mcp_config
+
+        # Non-dict entries (e.g. user typo where they wrote a string) must
+        # be silently dropped rather than crashing the endpoint.
+        fake_servers = {
+            "good": {"command": "node", "args": []},
+            "bad": "this is not a dict",
+        }
+        monkeypatch.setattr(mcp_config, "_get_mcp_servers", lambda: fake_servers)
+
+        resp = self.client.get("/api/mcp")
+        assert resp.status_code == 200
+        names = [s["name"] for s in resp.json()["servers"]]
+        assert names == ["good"]
+
     def test_toolsets_list(self):
         resp = self.client.get("/api/tools/toolsets")
         assert resp.status_code == 200
