@@ -170,6 +170,20 @@ def _build_allowed_mentions():
     )
 
 
+def _discord_ready_timeout_seconds() -> float:
+    """Return the Discord ready wait timeout during gateway startup."""
+    raw = os.getenv("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT=%r",
+                raw,
+            )
+    return 30.0
+
+
 class VoiceReceiver:
     """Captures and decodes voice audio from a Discord voice channel.
 
@@ -895,7 +909,11 @@ class DiscordAdapter(BasePlatformAdapter):
             self._bot_task = asyncio.create_task(self._client.start(self.config.token))
 
             # Wait for ready
-            await asyncio.wait_for(self._ready_event.wait(), timeout=30)
+            ready_timeout = _discord_ready_timeout_seconds()
+            if ready_timeout <= 0:
+                await self._ready_event.wait()
+            else:
+                await asyncio.wait_for(self._ready_event.wait(), timeout=ready_timeout)
 
             self._running = True
             return True
