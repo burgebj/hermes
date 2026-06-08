@@ -127,3 +127,56 @@ class TestCronCommandLifecycle:
 
         out = capsys.readouterr().out
         assert "Repeat:    ∞" in out
+
+    def test_list_does_not_crash_when_deliver_is_null(self, tmp_cron_dir, capsys):
+        """A job can be persisted with ``"deliver": null``. ``cron list``
+        must render it gracefully rather than crashing on ``join(None)``.
+        After normalization, null deliver is fixed to 'local' at read time."""
+        from cron.jobs import load_jobs, save_jobs
+
+        create_job(prompt="No deliver", schedule="every 1h")
+        # Force deliver=null like a job created without a delivery target.
+        jobs = load_jobs()
+        jobs[0]["deliver"] = None
+        save_jobs(jobs)
+
+        cron_command(Namespace(cron_command="list", all=True))
+
+        out = capsys.readouterr().out
+        # _normalize_job_record now converts null → "local"
+        assert "Deliver:   local" in out
+
+    def test_normalize_job_record_fixes_null_deliver(self, tmp_cron_dir):
+        """_normalize_job_record should convert deliver=null to 'local'."""
+        from cron.jobs import _normalize_job_record
+
+        job = {"id": "test", "prompt": "p", "deliver": None}
+        normalized = _normalize_job_record(job)
+        assert normalized["deliver"] == "local"
+
+    def test_normalize_job_record_fixes_empty_string_deliver(self, tmp_cron_dir):
+        """_normalize_job_record should convert deliver='' to 'local'."""
+        from cron.jobs import _normalize_job_record
+
+        job = {"id": "test", "prompt": "p", "deliver": ""}
+        normalized = _normalize_job_record(job)
+        assert normalized["deliver"] == "local"
+
+    def test_update_job_normalizes_null_deliver(self, tmp_cron_dir):
+        """update_job should normalize deliver=null to 'local' on write."""
+        from cron.jobs import create_job, load_jobs, save_jobs, update_job
+
+        job = create_job(prompt="Test", schedule="every 1h")
+        # Force deliver=null in storage
+        jobs = load_jobs()
+        jobs[0]["deliver"] = None
+        save_jobs(jobs)
+
+        # Update something else — deliver should be normalized
+        updated = update_job(job["id"], {"name": "renamed"})
+        assert updated["deliver"] == "local"
+
+        # Verify storage was also fixed
+        from cron.jobs import load_jobs as reload
+        stored = reload()
+        assert stored[0]["deliver"] == "local"

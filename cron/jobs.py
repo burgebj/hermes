@@ -153,6 +153,12 @@ def _normalize_job_record(job: Dict[str, Any]) -> Dict[str, Any]:
     profile = _coerce_job_text(normalized.get("profile")).strip()
     normalized["profile"] = profile or None
 
+    # Normalize deliver: null/empty → "local" so downstream consumers
+    # (cron list, scheduler, gateway) never crash on join/format.
+    deliver = normalized.get("deliver")
+    if not deliver:
+        normalized["deliver"] = "local"
+
     return normalized
 
 
@@ -802,6 +808,12 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 updates["profile"] = _normalize_profile(_profile)
 
         updated = _apply_skill_fields({**job, **updates})
+
+        # Normalize deliver: null/empty → "local" so persisted jobs
+        # always have a valid delivery target (#41392).
+        if not updated.get("deliver"):
+            updated["deliver"] = "local"
+
         schedule_changed = "schedule" in updates
 
         if "skills" in updates or "skill" in updates:

@@ -89,10 +89,13 @@ def cron_list(show_all: bool = False):
         repeat_completed = repeat_info.get("completed", 0)
         repeat_str = f"{repeat_completed}/{repeat_times}" if repeat_times else "∞"
 
-        deliver = job.get("deliver", ["local"])
-        if isinstance(deliver, str):
-            deliver = [deliver]
-        deliver_str = ", ".join(deliver)
+        deliver = job.get("deliver")
+        if not deliver:
+            deliver_str = "—"
+        elif isinstance(deliver, str):
+            deliver_str = deliver
+        else:
+            deliver_str = ", ".join(deliver)
 
         skills = job.get("skills") or ([job["skill"]] if job.get("skill") else [])
         if state == "paused":
