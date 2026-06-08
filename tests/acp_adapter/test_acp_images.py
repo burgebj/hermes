@@ -39,7 +39,9 @@ def test_text_only_acp_blocks_stay_string_for_legacy_prompt_path():
 def test_acp_resource_link_file_is_inlined_as_text(tmp_path):
     attached = tmp_path / "notes.md"
     attached.write_text("# Notes\n\nAttached file body", encoding="utf-8")
-
+    # On Windows, Path.read_text() preserves CRLF; normalize for assertion.
+    # On Windows, Path.read_text() preserves CRLF; normalize for assertion.
+    expected_body = attached.read_text(encoding="utf-8").replace("\r\n", "\n")
     content = _content_blocks_to_openai_user_content([
         TextContentBlock(type="text", text="Please read this file"),
         ResourceContentBlock(
@@ -54,8 +56,8 @@ def test_acp_resource_link_file_is_inlined_as_text(tmp_path):
     assert content == (
         "Please read this file\n"
         "[Attached file: Project notes (notes.md)]\n"
-        f"URI: {attached.as_uri()}\n\n"
-        "# Notes\n\nAttached file body"
+        f"URI: {attached.as_uri()}\n\n" +
+        expected_body
     )
 
 
@@ -157,3 +159,20 @@ def test_acp_embedded_blob_image_is_inlined_as_image_url():
         "type": "image_url",
         "image_url": {"url": f"data:image/png;base64,{b64}"},
     }
+
+
+def test_acp_resource_link_blocks_secret_env_files(tmp_path):
+    secret = tmp_path / ".env"
+    secret.write_text("API_KEY=super-secret", encoding="utf-8")
+
+    content = _content_blocks_to_openai_user_content([
+        ResourceContentBlock(
+            type="resource_link",
+            name=".env",
+            uri=secret.as_uri(),
+            mimeType="text/plain",
+        ),
+    ])
+
+    assert "Resource blocked" in content
+    assert "super-secret" not in content

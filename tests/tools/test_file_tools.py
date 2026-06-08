@@ -464,6 +464,18 @@ class TestSensitivePathCheck:
         result = json.loads(write_file_tool("/tmp/other.txt", "hello"))
         assert result["status"] == "ok"
 
+    def test_v4a_move_file_header_rejects_traversal(self):
+        from tools.file_tools import patch_tool
+
+        payload = """*** Begin Patch
+*** Move File: safe.txt -> ../outside.txt
+*** End Patch
+"""
+        result = json.loads(patch_tool(mode="patch", patch=payload))
+
+        assert "error" in result
+        assert "traversal" in result["error"]
+
 
 class TestPatchSchemaShape:
     """PATCH_SCHEMA must advertise per-mode required params via description

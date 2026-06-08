@@ -283,6 +283,13 @@ def _normalize_multimodal_content(content: Any) -> Any:
                 raise ValueError(
                     "invalid_image_url:Image inputs must use http(s) URLs or data:image/... URLs."
                 )
+            else:
+                from tools.url_safety import is_safe_url
+                if not is_safe_url(url_value):
+                    raise ValueError(
+                        "invalid_image_url:Image URL points to a private/internal address "
+                        "and was blocked for SSRF protection."
+                    )
             image_part: Dict[str, Any] = {"type": "image_url", "image_url": {"url": url_value}}
             if detail is not None:
                 if not isinstance(detail, str) or not detail.strip():
@@ -1079,8 +1086,12 @@ class APIServerAdapter(BasePlatformAdapter):
 
         Returns gateway state, connected platforms, PID, and uptime so the
         dashboard can display full status without needing a shared PID file or
-        /proc access.  No authentication required.
+        /proc access.  Requires API auth when API_SERVER_KEY is configured.
         """
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
         from gateway.status import read_runtime_status
 
         runtime = read_runtime_status() or {}
@@ -1762,10 +1773,18 @@ class APIServerAdapter(BasePlatformAdapter):
                     return _multimodal_validation_error(exc, param=f"messages[{idx}].content")
                 conversation_messages.append({"role": role, "content": content})
 
-        # Extract the last user message as the primary input
+        # Extract the last user message as the primary input.  Chat Completions
+        # requests must end with a user turn; replaying a final assistant message
+        # as a fresh user prompt breaks role alternation and lets client-supplied
+        # assistant text become instructions for a new agent run.
         user_message: Any = ""
         history = []
         if conversation_messages:
+            if conversation_messages[-1].get("role") != "user":
+                return web.json_response(
+                    {"error": {"message": "Last non-system message must have role 'user'", "type": "invalid_request_error"}},
+                    status=400,
+                )
             user_message = conversation_messages[-1].get("content", "")
             history = conversation_messages[:-1]
 

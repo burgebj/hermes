@@ -73,6 +73,7 @@ from acp_adapter.events import (
 from acp_adapter.permissions import make_approval_callback
 from acp_adapter.session import SessionManager, SessionState, _expand_acp_enabled_toolsets
 from acp_adapter.tools import build_tool_complete, build_tool_start
+from agent.file_safety import get_read_block_error
 
 logger = logging.getLogger(__name__)
 
@@ -168,12 +169,16 @@ def _path_from_file_uri(uri: str) -> Path | None:
     else:
         path_text = unquote(raw)
 
-    # file:///C:/Users/... or C:\Users\...
+    # file:///C:/Users/... or C:\\Users\\...
     if len(path_text) >= 3 and path_text[0] == "/" and path_text[2] == ":" and path_text[1].isalpha():
+        if os.name == "nt":
+            return Path(path_text[1:])
         drive = path_text[1].lower()
         rest = path_text[3:].lstrip("/\\").replace("\\", "/")
         return Path("/mnt") / drive / rest
     if len(path_text) >= 2 and path_text[1] == ":" and path_text[0].isalpha():
+        if os.name == "nt":
+            return Path(path_text)
         drive = path_text[0].lower()
         rest = path_text[2:].lstrip("/\\").replace("\\", "/")
         return Path("/mnt") / drive / rest
@@ -236,6 +241,34 @@ def _resource_link_to_parts(block: ResourceContentBlock) -> list[dict[str, Any]]
             ),
         }]
 
+    try:
+        resolved_path = path.expanduser().resolve()
+    except OSError as exc:
+        logger.warning("ACP resource path resolution failed: %s", uri, exc_info=True)
+        return [{
+            "type": "text",
+            "text": _format_resource_text(
+                uri=uri,
+                name=name,
+                title=title,
+                body=f"[Could not resolve attached resource: {exc}]",
+            ),
+        }]
+
+    read_block_error = get_read_block_error(str(resolved_path))
+    if read_block_error:
+        return [{
+            "type": "text",
+            "text": _format_resource_text(
+                uri=uri,
+                name=name,
+                title=title,
+                body=f"[Resource blocked: {read_block_error}]",
+            ),
+        }]
+
+    path = resolved_path
+
     # Image files: emit a short text header + image_url data URL so vision
     # models can see the attachment instead of a "binary omitted" note.
     image_mime = mime_type if _is_image_resource(mime_type) else _guess_image_mime_from_path(path)
@@ -277,6 +310,9 @@ def _resource_link_to_parts(block: ResourceContentBlock) -> list[dict[str, Any]]
         with path.open("rb") as fh:
             data = fh.read(read_size)
         text = _decode_text_bytes(data, mime_type)
+        # Normalize CRLF to LF for cross-platform consistency
+        if text is not None:
+            text = text.replace("\r\n", "\n")
         if text is None:
             return [{
                 "type": "text",
