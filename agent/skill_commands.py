@@ -210,7 +210,7 @@ def _build_skill_message(
                 f"[Skill setup note: {loaded_skill['gateway_setup_hint']}]",
             ]
         )
-    elif loaded_skill.get("setup_needed") and loaded_skill.get("setup_note"):
+    elif loaded_skill.get("setup_note"):
         parts.extend(
             [
                 "",

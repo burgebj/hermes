@@ -8,6 +8,7 @@ import pytest
 
 import tools.skills_tool as skills_tool_module
 from agent.skill_commands import (
+    _build_skill_message,
     build_preloaded_skills_prompt,
     build_skill_invocation_message,
     resolve_skill_command_key,
@@ -36,6 +37,20 @@ description: Description for {name}.
 """
     (skill_dir / "SKILL.md").write_text(content)
     return skill_dir
+
+
+def test_build_skill_message_includes_available_setup_note(tmp_path):
+    message = _build_skill_message(
+        {
+            "content": "# Obsidian\n\nUse the vault.",
+            "setup_needed": False,
+            "setup_note": "Verified skill path: Obsidian vault: /tmp/vault.",
+        },
+        tmp_path,
+        "Loaded obsidian.",
+    )
+
+    assert "[Skill setup note: Verified skill path: Obsidian vault: /tmp/vault.]" in message
 
 
 def _symlink_category(skills_dir: Path, linked_root: Path, category: str) -> Path:

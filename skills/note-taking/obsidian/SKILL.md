@@ -2,6 +2,13 @@
 name: obsidian
 description: Read, search, create, and edit notes in the Obsidian vault.
 platforms: [linux, macos, windows]
+metadata:
+  hermes:
+    path_validations:
+      - name: Obsidian vault
+        env_var: OBSIDIAN_VAULT_PATH
+        default: ~/Documents/Obsidian Vault
+        type: directory
 ---
 
 # Obsidian Vault
@@ -10,13 +17,21 @@ Use this skill for filesystem-first Obsidian vault work: reading notes, listing 
 
 ## Vault path
 
-Use a known or resolved vault path before calling file tools.
+Before any vault operation, resolve and verify the vault path. Do not read,
+search, write, or patch notes until the path is concrete and accessible.
 
 The documented vault-path convention is the `OBSIDIAN_VAULT_PATH` environment variable, for example from `~/.hermes/.env`. If it is unset, use `~/Documents/Obsidian Vault`.
 
 File tools do not expand shell variables. Do not pass paths containing `$OBSIDIAN_VAULT_PATH` to `read_file`, `write_file`, `patch`, or `search_files`; resolve the vault path first and pass a concrete absolute path. Vault paths may contain spaces, which is another reason to prefer file tools over shell commands.
 
-If the vault path is unknown, `terminal` is acceptable for resolving `OBSIDIAN_VAULT_PATH` or checking whether the fallback path exists. Once the path is known, switch back to file tools.
+If the vault path is unknown, use `terminal` to read `OBSIDIAN_VAULT_PATH` or
+check whether the fallback path exists. Once the path is known, switch back to
+file tools.
+
+When the resolved path exists, state which vault path you are using before the
+first note operation. When neither `OBSIDIAN_VAULT_PATH` nor the fallback path
+resolves to an accessible directory, stop and ask the user to set
+`OBSIDIAN_VAULT_PATH` instead of guessing or searching unrelated folders.
 
 ## Read a note
 

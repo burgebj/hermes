@@ -921,6 +921,91 @@ class TestSkillViewPrerequisites:
         assert result["setup_needed"] is False
         assert result["required_environment_variables"] == []
 
+    def test_path_validation_uses_existing_env_path(self, tmp_path, monkeypatch):
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        monkeypatch.setenv("OBSIDIAN_VAULT_PATH", str(vault))
+        monkeypatch.setattr(skills_tool_module, "load_env", lambda: {})
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "obsidian",
+                frontmatter_extra=(
+                    "metadata:\n"
+                    "  hermes:\n"
+                    "    path_validations:\n"
+                    "      - name: Obsidian vault\n"
+                    "        env_var: OBSIDIAN_VAULT_PATH\n"
+                    "        default: ~/Documents/Obsidian Vault\n"
+                    "        type: directory\n"
+                ),
+            )
+            raw = skill_view("obsidian")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["setup_needed"] is False
+        assert result["path_validations"][0]["readiness_status"] == "available"
+        assert result["path_validations"][0]["path"] == str(vault.resolve())
+        assert "Verified skill path: Obsidian vault" in result["setup_note"]
+
+    def test_path_validation_uses_existing_default_path(self, tmp_path, monkeypatch):
+        vault = tmp_path / "default-vault"
+        vault.mkdir()
+        monkeypatch.delenv("OBSIDIAN_VAULT_PATH", raising=False)
+        monkeypatch.setattr(skills_tool_module, "load_env", lambda: {})
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "obsidian",
+                frontmatter_extra=(
+                    "metadata:\n"
+                    "  hermes:\n"
+                    "    path_validations:\n"
+                    "      - name: Obsidian vault\n"
+                    "        env_var: OBSIDIAN_VAULT_PATH\n"
+                    f"        default: \"{vault.as_posix()}\"\n"
+                    "        type: directory\n"
+                ),
+            )
+            raw = skill_view("obsidian")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["setup_needed"] is False
+        assert result["path_validations"][0]["source"] == "default"
+        assert result["path_validations"][0]["path"] == str(vault.resolve())
+
+    def test_path_validation_reports_missing_directory(self, tmp_path, monkeypatch):
+        missing_vault = tmp_path / "missing-vault"
+        monkeypatch.delenv("OBSIDIAN_VAULT_PATH", raising=False)
+        monkeypatch.setattr(skills_tool_module, "load_env", lambda: {})
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "obsidian",
+                frontmatter_extra=(
+                    "metadata:\n"
+                    "  hermes:\n"
+                    "    path_validations:\n"
+                    "      - name: Obsidian vault\n"
+                    "        env_var: OBSIDIAN_VAULT_PATH\n"
+                    f"        default: \"{missing_vault.as_posix()}\"\n"
+                    "        type: directory\n"
+                ),
+            )
+            raw = skill_view("obsidian")
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["setup_needed"] is True
+        assert result["missing_required_paths"] == ["Obsidian vault"]
+        assert result["path_validations"][0]["readiness_status"] == "setup_needed"
+        assert "Path setup needed: Obsidian vault does not exist" in result["setup_note"]
+
     def test_skill_view_treats_backend_only_env_as_setup_needed(
         self, tmp_path, monkeypatch
     ):

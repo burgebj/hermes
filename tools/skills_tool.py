@@ -43,6 +43,11 @@ SKILL.md Format (YAML Frontmatter, agentskills.io compatible):
       hermes:
         tags: [fine-tuning, llm]
         related_skills: [peft, lora]
+        path_validations:         # Optional runtime path checks on skill load
+          - name: Local vault
+            env_var: VAULT_PATH
+            default: ~/Documents/Vault
+            type: directory
     ---
 
     # Skill Title
@@ -449,6 +454,175 @@ def _remaining_required_environment_names(
         if name in missing_names or not _is_env_var_persisted(name, env_snapshot):
             remaining.append(name)
     return remaining
+
+
+def _get_hermes_skill_metadata(frontmatter: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = frontmatter.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    hermes_meta = metadata.get("hermes")
+    if not isinstance(hermes_meta, dict):
+        return {}
+    return hermes_meta
+
+
+def _normalize_path_validation_entries(
+    frontmatter: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    raw = _get_hermes_skill_metadata(frontmatter).get("path_validations")
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+
+    entries: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        env_var = str(item.get("env_var") or "").strip()
+        default = str(item.get("default") or "").strip()
+        if not env_var and not default:
+            continue
+        kind = str(item.get("type") or item.get("kind") or "directory").strip().lower()
+        if kind not in {"directory", "file", "path"}:
+            kind = "directory"
+        name = str(item.get("name") or item.get("label") or env_var or default).strip()
+        entries.append(
+            {
+                "name": name,
+                "env_var": env_var or None,
+                "default": default or None,
+                "type": kind,
+                "optional": bool(item.get("optional", False)),
+            }
+        )
+    return entries
+
+
+def _expand_skill_path(raw_path: str) -> Path:
+    expanded = os.path.expandvars(os.path.expanduser(raw_path))
+    return Path(expanded).resolve(strict=False)
+
+
+def _validate_skill_paths(
+    frontmatter: Dict[str, Any],
+    env_snapshot: Dict[str, str] | None = None,
+) -> List[Dict[str, Any]]:
+    if env_snapshot is None:
+        env_snapshot = load_env()
+
+    results: List[Dict[str, Any]] = []
+    for entry in _normalize_path_validation_entries(frontmatter):
+        env_var = entry.get("env_var")
+        configured = ""
+        source = ""
+        if env_var:
+            configured = str(env_snapshot.get(env_var) or os.getenv(env_var) or "").strip()
+            if configured:
+                source = f"env ${env_var}"
+
+        if not configured and entry.get("default"):
+            configured = str(entry["default"]).strip()
+            source = "default"
+
+        base_result = {
+            "name": entry["name"],
+            "env_var": env_var,
+            "type": entry["type"],
+            "source": source or None,
+            "optional": entry["optional"],
+        }
+
+        if not configured:
+            results.append(
+                {
+                    **base_result,
+                    "readiness_status": SkillReadinessStatus.SETUP_NEEDED.value,
+                    "error": f"{entry['name']} is not configured",
+                }
+            )
+            continue
+
+        try:
+            resolved_path = _expand_skill_path(configured)
+        except Exception as exc:
+            results.append(
+                {
+                    **base_result,
+                    "configured": configured,
+                    "readiness_status": SkillReadinessStatus.SETUP_NEEDED.value,
+                    "error": f"{entry['name']} could not be resolved: {exc}",
+                }
+            )
+            continue
+
+        kind = entry["type"]
+        exists = resolved_path.exists()
+        valid_kind = (
+            exists
+            if kind == "path"
+            else resolved_path.is_dir()
+            if kind == "directory"
+            else resolved_path.is_file()
+        )
+        readable = os.access(resolved_path, os.R_OK) if exists else False
+
+        if valid_kind and readable:
+            results.append(
+                {
+                    **base_result,
+                    "configured": configured,
+                    "path": str(resolved_path),
+                    "readiness_status": SkillReadinessStatus.AVAILABLE.value,
+                }
+            )
+            continue
+
+        if not exists:
+            error = f"{entry['name']} does not exist: {resolved_path}"
+        elif kind == "directory" and not resolved_path.is_dir():
+            error = f"{entry['name']} is not a directory: {resolved_path}"
+        elif kind == "file" and not resolved_path.is_file():
+            error = f"{entry['name']} is not a file: {resolved_path}"
+        else:
+            error = f"{entry['name']} is not readable: {resolved_path}"
+
+        results.append(
+            {
+                **base_result,
+                "configured": configured,
+                "path": str(resolved_path),
+                "readiness_status": SkillReadinessStatus.SETUP_NEEDED.value,
+                "error": error,
+            }
+        )
+
+    return results
+
+
+def _build_path_validation_note(path_validations: List[Dict[str, Any]]) -> str | None:
+    if not path_validations:
+        return None
+
+    verified = [
+        f"{item['name']}: {item['path']}"
+        for item in path_validations
+        if item.get("readiness_status") == SkillReadinessStatus.AVAILABLE.value
+        and item.get("path")
+    ]
+    blocked = [
+        item.get("error") or f"{item['name']} is not available"
+        for item in path_validations
+        if item.get("readiness_status") == SkillReadinessStatus.SETUP_NEEDED.value
+        and not item.get("optional")
+    ]
+
+    parts = []
+    if verified:
+        parts.append("Verified skill path: " + "; ".join(verified) + ".")
+    if blocked:
+        parts.append("Path setup needed: " + "; ".join(blocked) + ".")
+    return " ".join(parts) if parts else None
 
 
 def _gateway_setup_hint() -> str:
@@ -1303,10 +1477,8 @@ def skill_view(
 
         # Read tags/related_skills with backward compat:
         # Check metadata.hermes.* first (agentskills.io convention), fall back to top-level
-        hermes_meta = {}
         metadata = frontmatter.get("metadata")
-        if isinstance(metadata, dict):
-            hermes_meta = metadata.get("hermes", {}) or {}
+        hermes_meta = _get_hermes_skill_metadata(frontmatter)
 
         tags = _parse_tags(hermes_meta.get("tags") or frontmatter.get("tags", ""))
         related_skills = _parse_tags(
@@ -1356,6 +1528,15 @@ def skill_view(
             env_snapshot=env_snapshot,
         )
         setup_needed = bool(remaining_missing_required_envs)
+        path_validations = _validate_skill_paths(frontmatter, env_snapshot)
+        missing_required_paths = [
+            item
+            for item in path_validations
+            if item.get("readiness_status") == SkillReadinessStatus.SETUP_NEEDED.value
+            and not item.get("optional")
+        ]
+        if missing_required_paths:
+            setup_needed = True
 
         # Register available skill env vars so they pass through to sandboxed
         # execution environments (execute_code, terminal).  Only vars that are
@@ -1450,16 +1631,31 @@ def skill_view(
                 f"env ${env_name}" for env_name in remaining_missing_required_envs
             ] + [
                 f"file {path}" for path in missing_cred_files
+            ] + [
+                f"path {item['name']}" for item in missing_required_paths
             ]
             setup_note = _build_setup_note(
                 SkillReadinessStatus.SETUP_NEEDED,
                 missing_items,
                 setup_help,
             )
+            path_note = _build_path_validation_note(path_validations)
+            if path_note:
+                setup_note = f"{setup_note} {path_note}" if setup_note else path_note
             if backend in _REMOTE_ENV_BACKENDS and setup_note:
                 setup_note = f"{setup_note} {backend.upper()}-backed skills need these requirements available inside the remote environment as well."
             if setup_note:
                 result["setup_note"] = setup_note
+        else:
+            path_note = _build_path_validation_note(path_validations)
+            if path_note:
+                result["setup_note"] = path_note
+
+        if path_validations:
+            result["path_validations"] = path_validations
+            result["missing_required_paths"] = [
+                item["name"] for item in missing_required_paths
+            ]
 
         # Surface agentskills.io optional fields when present
         if frontmatter.get("compatibility"):
