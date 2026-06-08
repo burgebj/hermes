@@ -7,9 +7,15 @@ import logging
 import os
 import threading
 from pathlib import Path
+from typing import Optional
 
 from agent.file_safety import get_read_block_error
 from tools.binary_extensions import has_binary_extension
+from tools.read_extract import (
+    ExtractionError,
+    extract_document_text,
+    is_extractable_document,
+)
 from tools.file_operations import (
     ShellFileOperations,
     normalize_read_pagination,
@@ -689,6 +695,87 @@ def clear_file_ops_cache(task_id: str = None):
             _file_ops_cache.clear()
 
 
+def _read_extracted_document(
+    resolved_str: str,
+    display_path: str,
+    offset: int,
+    limit: int,
+    task_id: str = "default",
+) -> Optional[str]:
+    """Render a structured document (.ipynb/.docx/.xlsx) as a paginated read.
+
+    Extracts the document to plain text, then applies the same pagination,
+    line-numbering, char-limit and redaction semantics as a normal text read so
+    the output is indistinguishable in shape from reading a source file.
+
+    Returns:
+        A JSON string (the tool result) on success, or ``None`` if extraction
+        failed — in which case the caller falls through to the normal read path
+        so the file stays inspectable (raw text or the binary guard).
+    """
+    try:
+        text = extract_document_text(resolved_str)
+    except ExtractionError:
+        # Malformed/unsupported in practice — let the normal path handle it.
+        return None
+    except Exception:
+        logger.debug("document extraction failed for %s", display_path, exc_info=True)
+        return None
+
+    lines = text.split("\n")
+    # text ends with a trailing newline; drop the resulting empty final element
+    # so total_lines reflects real content lines (matches sed/wc behavior).
+    if lines and lines[-1] == "":
+        lines.pop()
+    total_lines = len(lines)
+
+    start_idx = offset - 1  # offset is 1-indexed
+    end_idx = start_idx + limit
+    page = lines[start_idx:end_idx]
+    page_text = "\n".join(page)
+
+    truncated = total_lines > (start_idx + limit)
+    end_line = start_idx + limit
+    hint = None
+    if truncated:
+        hint = (
+            f"Use offset={end_line + 1} to continue reading "
+            f"(showing {offset}-{min(end_line, total_lines)} of {total_lines} lines)"
+        )
+
+    # Line-number the page using the shared formatter so output matches a
+    # normal read exactly (LINE_NUM|CONTENT, long-line truncation, etc.).
+    file_ops = _get_file_ops(task_id)
+    numbered = file_ops._add_line_numbers(page_text, offset) if page_text else ""
+
+    # Char-count guard — same safety limit as the normal read path.
+    max_chars = _get_max_read_chars()
+    if len(numbered) > max_chars:
+        return json.dumps({
+            "error": (
+                f"Read produced {len(numbered):,} characters which exceeds "
+                f"the safety limit ({max_chars:,} chars). "
+                "Use offset and limit to read a smaller range. "
+                f"The document has {total_lines} lines of extracted text."
+            ),
+            "path": display_path,
+            "total_lines": total_lines,
+        }, ensure_ascii=False)
+
+    numbered = redact_sensitive_text(numbered, code_file=True)
+
+    result_dict = {
+        "content": numbered,
+        "total_lines": total_lines,
+        "truncated": truncated,
+        "extracted_document": True,
+    }
+    if hint:
+        result_dict["hint"] = hint
+
+    return json.dumps(result_dict, ensure_ascii=False)
+
+
 def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = "default") -> str:
     """Read a file with pagination and line numbers."""
     try:
@@ -706,6 +793,23 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
             })
 
         _resolved = _resolve_path_for_task(path, task_id)
+
+        # ── Structured-document extraction ────────────────────────────
+        # .ipynb / .docx / .xlsx render to plain text in-process so the
+        # agent can read their content directly. Raw .ipynb JSON drowns
+        # the model in metadata + output payloads, and .docx/.xlsx are
+        # otherwise rejected as binary. Extracted text flows through the
+        # same pagination / line-numbering / char-limit / redaction
+        # pipeline as a normal text read. Malformed documents fall back to
+        # the normal read path (raw text / binary guard) so they stay
+        # inspectable. Ported from Kilo-Org/kilocode #10733, #10737, #10740.
+        if is_extractable_document(str(_resolved)):
+            _doc_result = _read_extracted_document(
+                str(_resolved), path, offset, limit, task_id
+            )
+            if _doc_result is not None:
+                return _doc_result
+            # else: extraction failed → fall through to normal read path.
 
         # ── Binary file guard ─────────────────────────────────────────
         # Block binary files by extension (no I/O).
@@ -1374,7 +1478,7 @@ def _check_file_reqs():
 
 READ_FILE_SCHEMA = {
     "name": "read_file",
-    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are rejected; use offset and limit to read specific sections of large files. NOTE: Cannot read images or binary files — use vision_analyze for images.",
+    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are rejected; use offset and limit to read specific sections of large files. Jupyter notebooks (.ipynb), Word documents (.docx), and Excel workbooks (.xlsx) are auto-extracted to readable text. NOTE: Cannot read images or other binary files — use vision_analyze for images.",
     "parameters": {
         "type": "object",
         "properties": {
