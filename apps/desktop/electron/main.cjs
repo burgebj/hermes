@@ -30,6 +30,12 @@ const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
 const { serializeJsonBody, setJsonRequestHeaders } = require('./oauth-net-request.cjs')
 const {
+  buildHermesUpdateArgs,
+  buildManualHermesUpdateCommand,
+  createUpdaterLaunchPlan
+} = require('./update-handoff.cjs')
+const { killHermesRuntimeProcessesForUpdate } = require('./update-processes.cjs')
+const {
   buildPosixCleanupScript,
   buildWindowsCleanupScript,
   modeRemovesAgent,
@@ -1531,6 +1537,17 @@ async function releaseBackendLock(updateRoot, tag) {
   stopAllPoolBackends()
   for (const pid of pids) forceKillProcessTree(pid)
 
+  const runtimePids = killHermesRuntimeProcessesForUpdate(updateRoot, {
+    currentPid: process.pid,
+    killTree: forceKillProcessTree,
+    onListError: err =>
+      rememberLog(`[updates] could not enumerate Hermes runtime processes before update: ${err?.message || err}`),
+    onError: (pid, err) => rememberLog(`[updates] failed to stop Hermes runtime process ${pid}: ${err?.message || err}`)
+  })
+  if (runtimePids.length) {
+    rememberLog(`[updates] stopped ${runtimePids.length} Hermes runtime process(es) before update`)
+  }
+
   const shim = venvHermesShimPath(updateRoot)
   const deadlineMs = Date.now() + 15000
   while (Date.now() < deadlineMs) {
@@ -1577,21 +1594,22 @@ async function applyUpdates(opts = {}) {
       // hermes-setup.exe into HERMES_HOME). They DO have a working `hermes`
       // on PATH / in the venv, so the correct path is the one-liner in their
       // native medium. We show the EXACT command, branch-pinned to the
-      // checkout they're on — bare `hermes update` defaults to main and would
-      // silently switch a bb/gui (or any non-main) install off-branch. Mirror
-      // the GUI button's contract: append --branch <current> for non-main
-      // checkouts, keep it bare for main so the card stays clean.
+      // checkout they're on — unpinned `hermes update --backup` defaults to
+      // main and would silently switch a bb/gui (or any non-main) install
+      // off-branch. Mirror the GUI button's contract: append --branch
+      // <current> for non-main checkouts, omit it for main so the card stays
+      // clean.
       const updateRoot = resolveUpdateRoot()
-      let command = 'hermes update'
+      let command = buildManualHermesUpdateCommand()
       try {
         const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: updateRoot })
         const current = (head.stdout || '').trim()
         if (head.code === 0 && current && current !== 'HEAD') {
           const branch = await resolveHealedBranch(updateRoot, current)
-          if (branch !== 'main') command = `hermes update --branch ${branch}`
+          if (branch !== 'main') command = buildManualHermesUpdateCommand(branch)
         }
       } catch {
-        // Best-effort: fall back to bare `hermes update` if branch detection fails.
+        // Best-effort: fall back to branch-agnostic `hermes update --backup` if detection fails.
       }
       rememberLog(`[updates] no staged updater; surfacing manual \`${command}\` for CLI install at ${updateRoot}`)
       emitUpdateProgress({ stage: 'manual', message: command, percent: null })
@@ -1619,20 +1637,29 @@ async function applyUpdates(opts = {}) {
 
     // Detached so the updater outlives this process — it needs us GONE before
     // `hermes update` will run (the venv shim is locked while we live).
-    const child = spawn(updater, updaterArgs, {
+    const launch = createUpdaterLaunchPlan({
+      handoffDir: path.join(HERMES_HOME, 'logs'),
+      isWindows: IS_WINDOWS,
+      updater,
+      updaterArgs
+    })
+    const child = spawn(launch.command, launch.args, {
       cwd: HERMES_HOME,
       env: {
         ...process.env,
         HERMES_HOME,
         PATH: [path.join(HERMES_HOME, 'node', 'bin'), venvBin, process.env.PATH].filter(Boolean).join(path.delimiter)
       },
-      detached: true,
+      detached: launch.detached,
       stdio: 'ignore',
-      windowsHide: false
+      windowsHide: launch.windowsHide
     })
     child.unref()
 
-    rememberLog(`[updates] launched updater: ${updater} ${updaterArgs.join(' ')}; exiting desktop to release venv shim`)
+    rememberLog(
+      `[updates] launched updater: ${launch.command} ${launch.args.join(' ')}; ` +
+        `script=${launch.scriptPath || 'direct'}; exiting desktop to release venv shim`
+    )
 
     // Give the OS a beat to register the new process, then quit. The updater
     // rebuilds and relaunches us when it's done.
@@ -1702,8 +1729,9 @@ async function applyUpdatesPosixInApp() {
   const updateRoot = resolveUpdateRoot()
   const hermes = resolveHermesCliBinary(updateRoot)
   if (!hermes) {
-    emitUpdateProgress({ stage: 'manual', message: 'hermes update', percent: null })
-    return { ok: true, manual: true, command: 'hermes update', hermesRoot: updateRoot }
+    const command = buildManualHermesUpdateCommand()
+    emitUpdateProgress({ stage: 'manual', message: command, percent: null })
+    return { ok: true, manual: true, command, hermesRoot: updateRoot }
   }
 
   // Put the Hermes-managed Node and the venv on PATH so `hermes desktop`'s
@@ -1742,19 +1770,19 @@ async function applyUpdatesPosixInApp() {
 
   // Branch-pin so a non-main checkout doesn't get switched to main (and self-heal
   // to main when the pinned branch no longer exists on origin).
-  let branchArgs = []
+  let updateBranch = null
   try {
     const head = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: updateRoot })
     const current = (head.stdout || '').trim()
     if (head.code === 0 && current && current !== 'HEAD') {
-      branchArgs = ['--branch', await resolveHealedBranch(updateRoot, current)]
+      updateBranch = await resolveHealedBranch(updateRoot, current)
     }
   } catch {
     // best effort
   }
 
   emitUpdateProgress({ stage: 'update', message: 'Updating Hermes (git + dependencies)…', percent: 10 })
-  const updated = await runStreamedUpdate(hermes, ['update', '--yes', ...branchArgs], {
+  const updated = await runStreamedUpdate(hermes, buildHermesUpdateArgs({ assumeYes: true, branch: updateBranch }), {
     cwd: updateRoot,
     env,
     stage: 'update'
