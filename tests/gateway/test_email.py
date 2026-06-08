@@ -868,6 +868,42 @@ class TestFetchNewMessages(unittest.TestCase):
 
         self.assertEqual(results, [])
 
+    def test_fetch_uses_body_peek(self):
+        """IMAP fetch should use BODY.PEEK[] instead of RFC822.
+
+        Some IMAP servers (e.g. iCloud) return only the UID metadata line
+        with (RFC822) — no message literal.  BODY.PEEK[] reliably returns
+        the full message and does not mark it as Seen.
+        """
+        adapter = self._make_adapter()
+
+        raw_email = MIMEText("Hello", "plain", "utf-8")
+        raw_email["From"] = "user@test.com"
+        raw_email["Subject"] = "Test"
+        raw_email["Message-ID"] = "<msg@test.com>"
+
+        mock_imap = MagicMock()
+        fetch_calls = []
+
+        def uid_handler(command, *args):
+            if command == "search":
+                return ("OK", [b"1"])
+            if command == "fetch":
+                fetch_calls.append(args)
+                return ("OK", [(b"1", raw_email.as_bytes())])
+            return ("NO", [])
+
+        mock_imap.uid.side_effect = uid_handler
+
+        with patch("imaplib.IMAP4_SSL", return_value=mock_imap):
+            results = adapter._fetch_new_messages()
+
+        self.assertEqual(len(results), 1)
+        # Verify the fetch used BODY.PEEK[] (not RFC822)
+        self.assertTrue(len(fetch_calls) > 0)
+        fetch_item = fetch_calls[0][-1] if fetch_calls[0] else ""
+        self.assertIn("BODY.PEEK[]", str(fetch_item))
+
     def test_fetch_extracts_sender_name(self):
         """Sender name should be extracted from 'Name <addr>' format."""
         adapter = self._make_adapter()
