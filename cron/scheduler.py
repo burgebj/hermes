@@ -1348,6 +1348,27 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         return _run_job_impl(job)
 
 
+def _end_no_agent_session(
+    session_db: object, session_id: str | None, end_reason: str
+) -> None:
+    """Close a no_agent cron session row in state.db.
+
+    Safe to call with *session_db*=``None`` or *session_id*=``None``
+    (e.g. when SessionDB failed to initialise).  All exceptions are
+    swallowed and logged — this is cleanup, not business logic.
+    """
+    if session_db is None or session_id is None:
+        return
+    try:
+        session_db.end_session(session_id, end_reason)
+    except Exception as e:
+        logger.debug("no_agent session %s: end_session failed: %s", session_id, e)
+    try:
+        session_db.close()
+    except Exception as e:
+        logger.debug("no_agent session %s: close failed: %s", session_id, e)
+
+
 def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     """
     Execute a single cron job.
@@ -1383,6 +1404,37 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             logger.error("Job '%s': %s", job_id, err)
             return False, "", "", err
 
+        # Initialize SQLite session store for no_agent jobs so the session
+        # row is properly closed when the script finishes.  Without this, the
+        # outer finally block's end_session is never reached because the
+        # no_agent path returns early, and zombie rows accumulate in state.db.
+        # (issue #41935)
+        _session_db = None
+        _cron_session_id = None
+        try:
+            from hermes_state import SessionDB
+            _session_db = SessionDB()
+        except Exception as e:
+            logger.debug(
+                "Job '%s': SQLite session store not available: %s", job_id, e
+            )
+
+        if _session_db is not None:
+            _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
+            try:
+                _session_db.create_session(
+                    _cron_session_id,
+                    platform="cron",
+                    source="cron",
+                    model="no_agent",
+                    provider="script",
+                )
+            except Exception as e:
+                logger.debug(
+                    "Job '%s': failed to create session: %s", job_id, e
+                )
+                _cron_session_id = None
+
         # Apply workdir if configured — lets scripts use predictable relative
         # paths. For no_agent jobs this is just the subprocess cwd (not an
         # agent TERMINAL_CWD bridge).
@@ -1406,10 +1458,9 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
         now_iso = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # Determine the end_reason for the session row.
         if not ok:
-            # Script crashed / timed out / exited non-zero.  Deliver the
-            # error so the user knows the watchdog itself broke — silent
-            # failure for an alerting job is the worst-case outcome.
+            end_reason = "cron_script_failed"
             alert = (
                 f"⚠ Cron watchdog '{job_name}' script failed\n\n"
                 f"{output}\n\n"
@@ -1423,14 +1474,14 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"**Status:** script failed\n\n"
                 f"{output}\n"
             )
+            _end_no_agent_session(_session_db, _cron_session_id, end_reason)
             return False, doc, alert, output
 
-        # Honour the wakeAgent gate as a silent signal — `wakeAgent: false`
-        # means "nothing to report this tick", same as empty stdout.
         if not _parse_wake_gate(output):
             logger.info(
                 "Job '%s' (no_agent): wakeAgent=false gate — silent run", job_id
             )
+            end_reason = "cron_silent_wake"
             silent_doc = (
                 f"# Cron Job: {job_name}\n\n"
                 f"**Job ID:** {job_id}\n"
@@ -1438,10 +1489,12 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"**Mode:** no_agent (script)\n"
                 f"**Status:** silent (wakeAgent=false)\n"
             )
+            _end_no_agent_session(_session_db, _cron_session_id, end_reason)
             return True, silent_doc, SILENT_MARKER, None
 
         if not output.strip():
             logger.info("Job '%s' (no_agent): empty stdout — silent run", job_id)
+            end_reason = "cron_silent_empty"
             silent_doc = (
                 f"# Cron Job: {job_name}\n\n"
                 f"**Job ID:** {job_id}\n"
@@ -1449,8 +1502,10 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 f"**Mode:** no_agent (script)\n"
                 f"**Status:** silent (empty output)\n"
             )
+            _end_no_agent_session(_session_db, _cron_session_id, end_reason)
             return True, silent_doc, SILENT_MARKER, None
 
+        end_reason = "cron_complete"
         doc = (
             f"# Cron Job: {job_name}\n\n"
             f"**Job ID:** {job_id}\n"
@@ -1459,6 +1514,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             f"---\n\n"
             f"{output}\n"
         )
+        _end_no_agent_session(_session_db, _cron_session_id, end_reason)
         return True, doc, output, None
 
     # ---------------------------------------------------------------
