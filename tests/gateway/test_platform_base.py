@@ -912,6 +912,34 @@ class TestMediaDeliveryDefaultMode:
 
         assert BasePlatformAdapter.validate_media_delivery_path(str(config_file)) is None
 
+    @pytest.mark.parametrize(
+        "rel",
+        [
+            "mcp-tokens/github.json",
+            "mcp-tokens/github.client.json",
+            "mcp-tokens/github.meta.json",
+        ],
+    )
+    def test_denylist_blocks_mcp_oauth_tokens(self, tmp_path, monkeypatch, rel):
+        """Live MCP OAuth tokens/client creds under ~/.hermes/mcp-tokens/ must
+        never deliver as native media — same exfil class as auth.json/.env.
+        Sibling follow-up to the config.yaml denylist (commit 4ec0adebe).
+        """
+        self._patch_roots(monkeypatch)
+
+        fake_home = tmp_path / "home"
+        hermes_dir = fake_home / ".hermes"
+        (hermes_dir / "mcp-tokens").mkdir(parents=True)
+        secret = hermes_dir / rel
+        secret.write_text('{"access_token": "live-bearer-abc123"}')
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(
+            "gateway.platforms.base._HERMES_HOME",
+            hermes_dir,
+        )
+
+        assert BasePlatformAdapter.validate_media_delivery_path(str(secret)) is None
+
     def test_strict_mode_envvar_restores_legacy_behavior(self, tmp_path, monkeypatch):
         """Setting HERMES_MEDIA_DELIVERY_STRICT=1 reactivates the older
         allowlist+recency logic. A stale file outside the allowlist is

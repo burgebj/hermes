@@ -963,6 +963,13 @@ def _media_delivery_denied_paths() -> List[Path]:
         denied.append(hermes_root / "auth.json")
         denied.append(hermes_root / "credentials")
         denied.append(hermes_root / "config.yaml")
+        # mcp-tokens/ holds live MCP OAuth access tokens (<server>.json) and
+        # dynamically-registered client credentials (<server>.client.json); see
+        # tools/mcp_oauth.py. Same credential class as auth.json/credentials/.
+        # The write side already denies it (file_tools _check_sensitive_path);
+        # this pairs the media-delivery (exfil) side so a prompt-injection MEDIA
+        # tag can't deliver a live bearer token as a native attachment.
+        denied.append(hermes_root / "mcp-tokens")
     return denied
 
 
