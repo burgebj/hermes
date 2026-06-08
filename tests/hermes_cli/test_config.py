@@ -1,6 +1,8 @@
 """Tests for hermes_cli configuration management."""
 
+import copy
 import os
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1056,3 +1058,106 @@ class TestEnvWriteDenylist:
         # But the write path still refuses to update it
         with pytest.raises(ValueError, match="denylist"):
             save_env_value("LD_PRELOAD", "/tmp/evil.so")
+
+
+class TestConfigCacheThreadSafety:
+    """_CONFIG_LOCK must guard all mutable module-level config caches."""
+
+    def setup_method(self):
+        from hermes_cli import config as cfg_mod
+        self._warned_snapshot = set(cfg_mod._CONFIG_PARSE_WARNED)
+        self._last_expanded_snapshot = dict(cfg_mod._LAST_EXPANDED_CONFIG_BY_PATH)
+        self._load_snapshot = dict(cfg_mod._LOAD_CONFIG_CACHE)
+        self._raw_snapshot = dict(cfg_mod._RAW_CONFIG_CACHE)
+
+    def teardown_method(self):
+        from hermes_cli import config as cfg_mod
+        cfg_mod._CONFIG_PARSE_WARNED.clear()
+        cfg_mod._CONFIG_PARSE_WARNED.update(self._warned_snapshot)
+        cfg_mod._LAST_EXPANDED_CONFIG_BY_PATH.clear()
+        cfg_mod._LAST_EXPANDED_CONFIG_BY_PATH.update(self._last_expanded_snapshot)
+        cfg_mod._LOAD_CONFIG_CACHE.clear()
+        cfg_mod._LOAD_CONFIG_CACHE.update(self._load_snapshot)
+        cfg_mod._RAW_CONFIG_CACHE.clear()
+        cfg_mod._RAW_CONFIG_CACHE.update(self._raw_snapshot)
+
+    def test_warn_config_parse_failure_dedup_under_contention(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """Parallel calls for the same broken file must back up exactly once."""
+        from hermes_cli import config as cfg_mod
+        cfg_mod._CONFIG_PARSE_WARNED.clear()
+
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text("\tbroken indent:\n")
+
+        try:
+            with open(cfg_path, encoding="utf-8") as f:
+                yaml.safe_load(f)
+        except Exception as exc:
+            parse_exc = exc
+
+        backup_calls = []
+        original_backup = cfg_mod._backup_corrupt_config
+
+        def mock_backup(path):
+            backup_calls.append(path)
+            return original_backup(path)
+
+        monkeypatch.setattr(cfg_mod, "_backup_corrupt_config", mock_backup)
+
+        def worker():
+            cfg_mod._warn_config_parse_failure(cfg_path, parse_exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(backup_calls) == 1, (
+            f"expected exactly 1 backup call under contention, got {len(backup_calls)}"
+        )
+
+        captured = capsys.readouterr().err
+        assert captured.count("hermes config:") == 1
+
+    def test_save_config_cache_survives_parallel_writes(self, tmp_path, monkeypatch):
+        """Concurrent save_config calls to the same path must not corrupt the cache entry."""
+        from hermes_cli import config as cfg_mod
+
+        cfg_mod._CONFIG_PARSE_WARNED.clear()
+        cfg_mod._LAST_EXPANDED_CONFIG_BY_PATH.clear()
+        cfg_mod._LOAD_CONFIG_CACHE.clear()
+
+        fixed_path = tmp_path / "config.yaml"
+        monkeypatch.setattr(cfg_mod, "get_config_path", lambda: fixed_path)
+
+        configs = []
+        for name in ("a", "b", "c", "d", "e"):
+            cfg = copy.deepcopy(DEFAULT_CONFIG)
+            cfg["model"] = {"provider": "openai", "name": f"gpt-{name}"}
+            configs.append((name, cfg))
+
+        errors = []
+
+        def save(name_cfg):
+            name, cfg = name_cfg
+            try:
+                with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+                    save_config(cfg)
+            except Exception as e:
+                errors.append((name, e))
+
+        threads = [threading.Thread(target=save, args=(nc,)) for nc in configs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"workers raised: {errors}"
+
+        cache = cfg_mod._LAST_EXPANDED_CONFIG_BY_PATH
+        assert len(cache) == 1, f"expected 1 cache entry, got {len(cache)}: {list(cache.keys())}"
+        final_name = cache[str(fixed_path)]["model"]["name"]
+        assert final_name in {f"gpt-{n}" for n, _ in configs}, f"unexpected cache value: {final_name}"
