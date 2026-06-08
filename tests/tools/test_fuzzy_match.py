@@ -167,6 +167,37 @@ class TestReplaceAll:
         assert new == "ccc bbb ccc"
 
 
+class TestSelfOverlappingPattern:
+    """A pattern that overlaps itself (repeated chars/tokens like '--', 'aa',
+    'a a') must be matched non-overlapping, exactly like ``str.replace``.
+    Otherwise the exact strategy emits overlapping ranges that double-count
+    occurrences and, with replace_all, rewrite shared bytes — silently
+    deleting content."""
+
+    def test_replace_all_no_data_loss(self):
+        # "a a a a" contains two non-overlapping "a a" occurrences.
+        content = "a a a a"
+        new, count, _, err = fuzzy_find_and_replace(content, "a a", "b", replace_all=True)
+        assert err is None
+        assert count == 2
+        assert new == content.replace("a a", "b") == "b b"
+
+    def test_replace_all_repeated_dashes(self):
+        content = "----\n----\n"
+        new, count, _, err = fuzzy_find_and_replace(content, "--", "X", replace_all=True)
+        assert err is None
+        assert count == 4
+        assert new == content.replace("--", "X") == "XX\nXX\n"
+
+    def test_no_spurious_multiple_match_error(self):
+        # "aaa" has only one non-overlapping "aa"; must not report 2 matches.
+        content = "sentinel: aaa end"
+        new, count, _, err = fuzzy_find_and_replace(content, "aa", "X", replace_all=False)
+        assert err is None
+        assert count == 1
+        assert new == content.replace("aa", "X", 1) == "sentinel: Xa end"
+
+
 class TestUnicodeNormalized:
     """Tests for the unicode_normalized strategy (Bug 5)."""
 
