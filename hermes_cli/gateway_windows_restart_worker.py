@@ -613,9 +613,10 @@ def _probe_task_registration(task_name: str) -> bool | None:
         if output.startswith("HRESULT:"):
             try:
                 hr = int(output.split(":")[1]) & 0xFFFFFFFF  # signed → unsigned
-                # FILE_NOT_FOUND / PATH_NOT_FOUND → definitely absent
-                if hr in (0x80070002, 0x80070003):
-                    return False
+                if hr == 0x80070002:
+                    return False    # FILE_NOT_FOUND → definitely absent
+                if hr == 0x80070003:
+                    return None     # PATH_NOT_FOUND → ambiguous, fail closed
             except (ValueError, IndexError):
                 pass
             return None         # Other HRESULT → ambiguous

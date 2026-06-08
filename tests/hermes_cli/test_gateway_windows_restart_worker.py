@@ -2420,8 +2420,8 @@ class TestTriStateProbe:
 
         assert mod._probe_task_registration("Hermes_Gateway") is False
 
-    def test_com_path_not_found_returns_false(self, worker_env, monkeypatch):
-        """COM GetTask returns PATH_NOT_FOUND HRESULT (0x80070003) → probe=False."""
+    def test_com_path_not_found_returns_none(self, worker_env, monkeypatch):
+        """COM GetTask returns PATH_NOT_FOUND HRESULT (0x80070003) → probe=None (fail closed)."""
         import hermes_cli.gateway_windows_restart_worker as mod
         import subprocess
 
@@ -2430,7 +2430,7 @@ class TestTriStateProbe:
         )
         monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock_result)
 
-        assert mod._probe_task_registration("Hermes_Gateway") is False
+        assert mod._probe_task_registration("Hermes_Gateway") is None
 
     def test_com_timeout_returns_none(self, worker_env, monkeypatch):
         """PowerShell timeout → probe=None (ambiguous)."""
