@@ -160,6 +160,25 @@ class TestRequiredEnvironmentVariablesNormalization:
             }
         ]
 
+    def test_normalize_prerequisite_values_drops_none_and_strips(self):
+        """``None`` entries and surrounding whitespace must not survive normalisation.
+
+        YAML parsers commonly produce ``None`` for empty list items
+        (``env_vars: [FOO, , BAR]``) and editors leave incidental
+        whitespace.  Before the fix, ``str(None) == "None"`` (truthy) was
+        kept verbatim and ``str(item)`` was not stripped, so the agent
+        ended up trying to satisfy a prerequisite literally named
+        ``"None"`` or ``"  TENOR_API_KEY "``.
+        """
+        from tools.skills_tool import _normalize_prerequisite_values
+
+        assert _normalize_prerequisite_values([None, "FOO"]) == ["FOO"]
+        assert _normalize_prerequisite_values(["FOO", None, "BAR"]) == ["FOO", "BAR"]
+        assert _normalize_prerequisite_values([None]) == []
+        assert _normalize_prerequisite_values(["  FOO  "]) == ["FOO"]
+        assert _normalize_prerequisite_values(None) == []
+        assert _normalize_prerequisite_values("BAR") == ["BAR"]
+
     def test_empty_env_file_value_is_treated_as_missing(self, monkeypatch):
         monkeypatch.setenv("FILLED_KEY", "value")
         monkeypatch.setenv("EMPTY_HOST_KEY", "")

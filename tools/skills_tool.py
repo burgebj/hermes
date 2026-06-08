@@ -203,7 +203,7 @@ def _normalize_prerequisite_values(value: Any) -> List[str]:
         return []
     if isinstance(value, str):
         value = [value]
-    return [str(item) for item in value if str(item).strip()]
+    return [str(item).strip() for item in value if item is not None and str(item).strip()]
 
 
 def _collect_prerequisite_values(
