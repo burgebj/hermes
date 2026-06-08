@@ -402,10 +402,13 @@ def _make_adapter(api_key: str = "", cors_origins=None) -> APIServerAdapter:
     return APIServerAdapter(config)
 
 
-def _create_app(adapter: APIServerAdapter) -> web.Application:
+def _create_app(adapter: APIServerAdapter, client_max_size: int = None) -> web.Application:
     """Create the aiohttp app from the adapter (without starting the full server)."""
     mws = [mw for mw in (cors_middleware, security_headers_middleware) if mw is not None]
-    app = web.Application(middlewares=mws)
+    app_kwargs = {}
+    if client_max_size is not None:
+        app_kwargs["client_max_size"] = client_max_size
+    app = web.Application(middlewares=mws, **app_kwargs)
     app["api_server_adapter"] = adapter
     app.router.add_get("/health", adapter._handle_health)
     app.router.add_get("/health/detailed", adapter._handle_health_detailed)
@@ -858,6 +861,64 @@ class TestChatCompletionsEndpoint:
             assert resp.status == 400
             data = await resp.json()
             assert "Invalid JSON" in data["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_oversized_body_returns_413_not_invalid_json(self, adapter):
+        """An oversized upload must surface as 413, not a misleading 400 (#32986).
+
+        Base64 image uploads can exceed the request-size limit; aiohttp raises
+        HTTPRequestEntityTooLarge from request.json(), which previously got
+        swallowed into a generic "Invalid JSON in request body" 400.
+        """
+        app = _create_app(adapter, client_max_size=256)
+        async with TestClient(TestServer(app)) as cli:
+            big_image = "data:image/png;base64," + ("A" * 4096)
+            resp = await cli.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "test",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image_url", "image_url": {"url": big_image}}
+                            ],
+                        }
+                    ],
+                },
+            )
+            assert resp.status == 413
+            data = await resp.json()
+            assert data["error"]["code"] == "body_too_large"
+
+    @pytest.mark.asyncio
+    async def test_invalid_json_message_includes_reason(self, adapter):
+        """Malformed JSON 400s should explain why, to aid client debugging."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                data="{not valid",
+                headers={"Content-Type": "application/json"},
+            )
+            assert resp.status == 400
+            data = await resp.json()
+            assert data["error"]["message"] != "Invalid JSON in request body"
+            assert "Invalid JSON in request body:" in data["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_non_object_json_body_returns_400(self, adapter):
+        """A valid-but-non-object JSON body returns a clean 400, not a 500."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                data="[1, 2, 3]",
+                headers={"Content-Type": "application/json"},
+            )
+            assert resp.status == 400
+            data = await resp.json()
+            assert "JSON object" in data["error"]["message"]
 
     @pytest.mark.asyncio
     async def test_missing_messages_returns_400(self, adapter):

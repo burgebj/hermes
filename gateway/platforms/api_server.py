@@ -43,7 +43,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from aiohttp import web
@@ -575,6 +575,42 @@ def _openai_error(message: str, err_type: str = "invalid_request_error", param: 
             "code": code,
         }
     }
+
+
+async def _read_json_body(
+    request: "web.Request",
+) -> Tuple[Optional[Any], Optional["web.Response"]]:
+    """Parse the request JSON body, distinguishing the real failure modes.
+
+    Returns ``(body, None)`` on success or ``(None, error_response)`` on a
+    client error.
+
+    An oversized body is surfaced as 413 rather than being swallowed into a
+    misleading "Invalid JSON in request body" 400.  ``aiohttp`` raises
+    ``HTTPRequestEntityTooLarge`` from ``request.json()`` when a streamed
+    (chunked, no Content-Length) upload exceeds ``client_max_size`` — the
+    earlier ``body_limit_middleware`` can only pre-check requests that carry a
+    Content-Length header, so chunked uploads slip past it.  Base64-encoded
+    image uploads are the common trigger (see #32986).
+    """
+    try:
+        body = await request.json()
+    except web.HTTPRequestEntityTooLarge:
+        return None, web.json_response(
+            _openai_error("Request body too large.", code="body_too_large"),
+            status=413,
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        return None, web.json_response(
+            _openai_error(f"Invalid JSON in request body: {exc}"),
+            status=400,
+        )
+    if not isinstance(body, dict):
+        return None, web.json_response(
+            _openai_error("Request body must be a JSON object."),
+            status=400,
+        )
+    return body, None
 
 
 if AIOHTTP_AVAILABLE:
@@ -1726,10 +1762,9 @@ class APIServerAdapter(BasePlatformAdapter):
             return auth_err
 
         # Parse request body
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, Exception):
-            return web.json_response(_openai_error("Invalid JSON in request body"), status=400)
+        body, parse_err = await _read_json_body(request)
+        if parse_err is not None:
+            return parse_err
 
         messages = body.get("messages")
         if not messages or not isinstance(messages, list):
@@ -2800,13 +2835,9 @@ class APIServerAdapter(BasePlatformAdapter):
             return key_err
 
         # Parse request body
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, Exception):
-            return web.json_response(
-                {"error": {"message": "Invalid JSON in request body", "type": "invalid_request_error"}},
-                status=400,
-            )
+        body, parse_err = await _read_json_body(request)
+        if parse_err is not None:
+            return parse_err
 
         raw_input = body.get("input")
         if raw_input is None:
