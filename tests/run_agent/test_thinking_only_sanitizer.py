@@ -104,6 +104,85 @@ class TestIsThinkingOnlyAssistant:
         }
         assert AIAgent._is_thinking_only_assistant(msg)
 
+    def test_codex_reasoning_items_only_is_thinking_only_for_non_codex_target(self):
+        # Codex Responses returns no visible content but encrypted reasoning
+        # state. On a non-codex target (e.g. an Anthropic fallback) such turns
+        # would survive into the request as "(empty)" assistant text →
+        # trailing assistant prefill. See #29205.
+        msg = {
+            "role": "assistant",
+            "content": "",
+            "finish_reason": "incomplete",
+            "codex_reasoning_items": [
+                {"type": "reasoning", "encrypted_content": "..."}
+            ],
+        }
+        assert AIAgent._is_thinking_only_assistant(msg, "anthropic_messages")
+        # Default (unknown) target also drops — safe for Anthropic-family.
+        assert AIAgent._is_thinking_only_assistant(msg)
+
+    def test_codex_reasoning_items_kept_for_codex_responses_target(self):
+        # When the target IS codex_responses the encrypted reasoning items are
+        # legitimate replay state and must not be dropped.
+        msg = {
+            "role": "assistant",
+            "content": "",
+            "finish_reason": "incomplete",
+            "codex_reasoning_items": [
+                {"type": "reasoning", "encrypted_content": "..."}
+            ],
+        }
+        assert not AIAgent._is_thinking_only_assistant(msg, "codex_responses")
+
+    def test_codex_reasoning_items_with_tool_calls_is_not_thinking_only(self):
+        msg = {
+            "role": "assistant",
+            "content": "",
+            "codex_reasoning_items": [{"type": "reasoning", "encrypted_content": "..."}],
+            "tool_calls": [{"id": "c1", "function": {"name": "terminal", "arguments": "{}"}}],
+        }
+        assert not AIAgent._is_thinking_only_assistant(msg, "anthropic_messages")
+
+    def test_empty_codex_reasoning_items_is_not_thinking_only(self):
+        msg = {"role": "assistant", "content": "", "codex_reasoning_items": []}
+        assert not AIAgent._is_thinking_only_assistant(msg, "anthropic_messages")
+
+    def test_drops_codex_reasoning_only_turns_and_merges_for_anthropic(self):
+        # Two consecutive Codex reasoning-only empty turns before an Anthropic
+        # fallback would otherwise merge into a trailing assistant "(empty)"
+        # block, which Anthropic rejects as assistant prefill.
+        msgs = [
+            {"role": "user", "content": "u1"},
+            {
+                "role": "assistant",
+                "content": "",
+                "codex_reasoning_items": [{"encrypted_content": "a"}],
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "codex_reasoning_items": [{"encrypted_content": "b"}],
+            },
+            {"role": "user", "content": "u2"},
+        ]
+        out = AIAgent._drop_thinking_only_and_merge_users(msgs, "anthropic_messages")
+        assert len(out) == 1
+        assert out[0]["role"] == "user"
+        assert out[0]["content"] == "u1\n\nu2"
+
+    def test_keeps_codex_reasoning_only_turns_for_codex_responses(self):
+        msgs = [
+            {"role": "user", "content": "u1"},
+            {
+                "role": "assistant",
+                "content": "",
+                "codex_reasoning_items": [{"encrypted_content": "a"}],
+            },
+        ]
+        out = AIAgent._drop_thinking_only_and_merge_users(msgs, "codex_responses")
+        # No drop → identity return.
+        assert out is msgs
+
     def test_user_message_never_thinking_only(self):
         assert not AIAgent._is_thinking_only_assistant({"role": "user", "content": ""})
 
