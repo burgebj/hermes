@@ -9999,6 +9999,10 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             agent_cfg = user_config.get("agent") or {}
             disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
 
+            _bg_extras_cfg = user_config.get("extras") or {}
+            _bg_hermes_meta_cfg = _bg_extras_cfg.get("hermes_metadata") or {}
+            _bg_hermes_outbound_metadata = bool(_bg_hermes_meta_cfg.get("enabled", False))
+
             pr = self._provider_routing
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
             reasoning_config = self._resolve_session_reasoning_config(source=source)
@@ -10052,6 +10056,8 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     thread_id=source.thread_id,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
+                    hermes_outbound_metadata=_bg_hermes_outbound_metadata,
+                    command_origin="scheduled",
                 )
                 try:
                     return agent.run_conversation(
@@ -12873,6 +12879,10 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         agent_cfg_local = user_config.get("agent") or {}
         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
 
+        _extras_cfg = user_config.get("extras") or {}
+        _hermes_meta_cfg = _extras_cfg.get("hermes_metadata") or {}
+        _hermes_outbound_metadata = bool(_hermes_meta_cfg.get("enabled", False))
+
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):
             display_config = {}
@@ -13803,6 +13813,8 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     gateway_session_key=session_key,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
+                    hermes_outbound_metadata=_hermes_outbound_metadata,
+                    command_origin="user",
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
