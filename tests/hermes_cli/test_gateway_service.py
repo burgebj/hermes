@@ -114,7 +114,7 @@ class TestSystemdServiceRefresh:
             ["systemctl", "--user", "daemon-reload"],
             ["systemctl", "--user", "show", gateway_cli.get_service_name(), "--no-pager", "--property", "ActiveState,SubState,Result,ExecMainStatus,MainPID"],
             ["systemctl", "--user", "reset-failed", gateway_cli.get_service_name()],
-            ["systemctl", "--user", "restart", gateway_cli.get_service_name()],
+            ["systemctl", "--user", "--no-block", "restart", gateway_cli.get_service_name()],
             ("wait", False, None),
         ]
 
@@ -1013,7 +1013,7 @@ class TestGatewaySystemServiceRouting:
                 return SimpleNamespace(stdout="ActiveState=inactive\nSubState=dead\nResult=success\nExecMainStatus=0\nMainPID=0\n", stderr="", returncode=0)
             if args[0] == "reset-failed":
                 return SimpleNamespace(stdout="", stderr="", returncode=0)
-            if args[0] == "restart":
+            if args[0] == "--no-block" and args[1] == "restart":
                 raise subprocess.CalledProcessError(
                     1,
                     ["systemctl", "--user", *args],
@@ -1025,7 +1025,7 @@ class TestGatewaySystemServiceRouting:
 
         gateway_cli.systemd_restart()
 
-        assert ["restart", gateway_cli.get_service_name()] in calls
+        assert ["--no-block", "restart", gateway_cli.get_service_name()] in calls
         out = capsys.readouterr().out.lower()
         assert "rate-limited by systemd" in out
         assert "reset-failed" in out
