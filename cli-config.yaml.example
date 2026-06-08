@@ -156,6 +156,29 @@ model:
 #   response_cache_ttl: 300      # Cache TTL in seconds, 1-86400 (default: 300)
 
 # =============================================================================
+# External Secret Sources
+# =============================================================================
+# Pull API keys from an external secret manager at process startup.
+# Bootstrap credentials stay in ~/.hermes/.env; provider keys live in the
+# secret manager and are injected into os.environ before Hermes builds config.
+#
+# secrets:
+#   infisical:
+#     enabled: false
+#     api_url: "https://app.infisical.com"  # or your self-hosted URL
+#     project_id: ""                        # falls back to INFISICAL_PROJECT_ID
+#     env: "prod"
+#     path: "/"
+#     client_id_env: "INFISICAL_CLIENT_ID"
+#     client_secret_env: "INFISICAL_CLIENT_SECRET"
+#     project_id_env: "INFISICAL_PROJECT_ID"
+#     override_existing: true
+#     cache_ttl_seconds: 300
+#     recursive: false
+#     include_imports: true
+#     expand_secret_references: true
+
+# =============================================================================
 # Git Worktree Isolation
 # =============================================================================
 # When enabled, each CLI session creates an isolated git worktree so multiple

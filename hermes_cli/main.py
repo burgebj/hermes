@@ -13101,16 +13101,16 @@ def main():
     fallback_parser.set_defaults(func=cmd_fallback)
 
     # =========================================================================
-    # secrets command — external secret managers (currently: Bitwarden)
+    # secrets command — external secret managers
     # =========================================================================
     secrets_parser = subparsers.add_parser(
         "secrets",
-        help="Manage external secret sources (Bitwarden Secrets Manager)",
+        help="Manage external secret sources (Bitwarden, Infisical)",
         description=(
             "Pull API keys from an external secret manager at process startup "
-            "instead of storing them in ~/.hermes/.env.  Currently supports "
-            "Bitwarden Secrets Manager.  See: "
-            "https://hermes-agent.nousresearch.com/docs/user-guide/secrets/bitwarden"
+            "instead of storing them in ~/.hermes/.env. Currently supports "
+            "Bitwarden Secrets Manager and Infisical. See: "
+            "https://hermes-agent.nousresearch.com/docs/user-guide/secrets"
         ),
     )
     secrets_subparsers = secrets_parser.add_subparsers(dest="secrets_command")
@@ -13120,16 +13120,26 @@ def main():
         aliases=["bw"],
         help="Bitwarden Secrets Manager integration",
     )
+    secrets_inf = secrets_subparsers.add_parser(
+        "infisical",
+        aliases=["inf"],
+        help="Infisical Universal Auth integration",
+    )
 
     # Lazy import — only pays for itself when this subcommand is actually used.
     from hermes_cli import secrets_cli as _secrets_cli
+    from hermes_cli import infisical_secrets_cli as _infisical_secrets_cli
 
     _secrets_cli.register_cli(secrets_bw)
+    _infisical_secrets_cli.register_cli(secrets_inf)
 
     def _dispatch_secrets(args):  # noqa: ANN001
         sub = getattr(args, "secrets_command", None)
         bw_sub = getattr(args, "secrets_bw_command", None)
+        inf_sub = getattr(args, "secrets_infisical_command", None)
         if sub in ("bitwarden", "bw") and bw_sub is not None:
+            return args.func(args)
+        if sub in ("infisical", "inf") and inf_sub is not None:
             return args.func(args)
         secrets_parser.print_help()
         return 0

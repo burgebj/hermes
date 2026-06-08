@@ -240,6 +240,8 @@ _CONFIG_LOCK = threading.RLock()
 _EXTRA_ENV_KEYS = frozenset({
     "OPENAI_API_KEY", "OPENAI_BASE_URL",
     "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN",
+    "INFISICAL_CLIENT_ID", "INFISICAL_CLIENT_SECRET",
+    "INFISICAL_PROJECT_ID", "INFISICAL_API_URL",
     "DISCORD_HOME_CHANNEL", "DISCORD_HOME_CHANNEL_NAME",
     "TELEGRAM_HOME_CHANNEL", "TELEGRAM_HOME_CHANNEL_NAME",
     "SLACK_HOME_CHANNEL", "SLACK_HOME_CHANNEL_NAME",
@@ -2410,6 +2412,37 @@ DEFAULT_CONFIG = {
             # as BWS_SERVER_URL.  Prompted for during
             # `hermes secrets bitwarden setup`.
             "server_url": "",
+        },
+        "infisical": {
+            # Master switch. When false, Infisical is never contacted.
+            "enabled": False,
+            # Infisical API base URL. Use your self-hosted URL when not
+            # using Infisical Cloud.
+            "api_url": "https://app.infisical.com",
+            # Env var names that hold the Machine Identity Universal Auth
+            # bootstrap credentials. These live in ~/.hermes/.env or the
+            # parent shell; never in config.yaml.
+            "client_id_env": "INFISICAL_CLIENT_ID",
+            "client_secret_env": "INFISICAL_CLIENT_SECRET",
+            # UUID of the Infisical project to sync from. If this is empty,
+            # Hermes falls back to project_id_env for compatibility with
+            # existing infisical run / wrapper deployments.
+            "project_id": "",
+            "project_id_env": "INFISICAL_PROJECT_ID",
+            # Infisical environment slug and secret path to sync.
+            "env": "prod",
+            "path": "/",
+            # Optional organization slug for Universal Auth setups that
+            # require disambiguation.
+            "organization_slug": "",
+            # Seconds to cache fetched secrets in-process. 0 disables.
+            "cache_ttl_seconds": 300,
+            # When True, Infisical values overwrite existing env vars.
+            "override_existing": True,
+            # v4 list-secrets request options.
+            "recursive": False,
+            "include_imports": True,
+            "expand_secret_references": True,
         },
     },
 

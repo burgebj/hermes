@@ -10,4 +10,7 @@ Currently shipped:
   - ``bitwarden`` — Bitwarden Secrets Manager (`bws` CLI).  See
     ``agent.secret_sources.bitwarden`` for the integration and
     ``hermes_cli.secrets_cli`` for the user-facing setup wizard.
+  - ``infisical`` — Infisical Universal Auth.  See
+    ``agent.secret_sources.infisical`` for the integration and
+    ``hermes_cli.infisical_secrets_cli`` for the user-facing setup wizard.
 """

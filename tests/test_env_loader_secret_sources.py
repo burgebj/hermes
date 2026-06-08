@@ -53,6 +53,14 @@ def test_format_secret_source_suffix_bitwarden_uses_proper_name():
     )
 
 
+def test_format_secret_source_suffix_infisical_uses_proper_name():
+    env_loader._SECRET_SOURCES["ANTHROPIC_API_KEY"] = "infisical"
+    assert (
+        env_loader.format_secret_source_suffix("ANTHROPIC_API_KEY")
+        == " (from Infisical)"
+    )
+
+
 def test_format_secret_source_suffix_generic_label_for_future_sources():
     # Future-proofing: a new secret source (e.g. "vault") should still
     # produce a sensible label without needing to edit every call site.
@@ -119,6 +127,117 @@ def test_apply_external_secret_sources_noop_when_disabled(tmp_path, monkeypatch)
     env_loader._apply_external_secret_sources(tmp_path)
 
     assert env_loader.get_secret_source("ANTHROPIC_API_KEY") is None
+
+
+def test_apply_external_secret_sources_records_infisical_origin(tmp_path, monkeypatch):
+    """Infisical-applied keys are tracked for source labels."""
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "secrets:\n"
+        "  infisical:\n"
+        "    enabled: true\n"
+        "    project_id: test-project\n"
+        "    client_id_env: INFISICAL_CLIENT_ID\n"
+        "    client_secret_env: INFISICAL_CLIENT_SECRET\n",
+        encoding="utf-8",
+    )
+
+    from agent.secret_sources.infisical import FetchResult
+
+    fake_result = FetchResult(
+        secrets={"ANTHROPIC_API_KEY": "sk-ant-test"},
+        applied=["ANTHROPIC_API_KEY"],
+    )
+
+    def _fake_apply(**_kwargs):
+        return fake_result
+
+    import agent.secret_sources.infisical as inf_module
+
+    monkeypatch.setattr(inf_module, "apply_infisical_secrets", _fake_apply)
+
+    env_loader._apply_external_secret_sources(tmp_path)
+
+    assert env_loader.get_secret_source("ANTHROPIC_API_KEY") == "infisical"
+    assert (
+        env_loader.format_secret_source_suffix("ANTHROPIC_API_KEY")
+        == " (from Infisical)"
+    )
+
+
+def test_apply_external_secret_sources_defaults_bad_infisical_cache_ttl(
+    tmp_path,
+    monkeypatch,
+):
+    """A typo in cache_ttl_seconds must not break dotenv loading."""
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "secrets:\n"
+        "  infisical:\n"
+        "    enabled: true\n"
+        "    project_id: test-project\n"
+        "    cache_ttl_seconds: not-a-number\n",
+        encoding="utf-8",
+    )
+
+    from agent.secret_sources.infisical import FetchResult
+
+    captured = {}
+
+    def _fake_apply(**kwargs):
+        captured.update(kwargs)
+        return FetchResult()
+
+    import agent.secret_sources.infisical as inf_module
+
+    monkeypatch.setattr(inf_module, "apply_infisical_secrets", _fake_apply)
+
+    env_loader._apply_external_secret_sources(tmp_path)
+
+    assert captured["cache_ttl_seconds"] == 300.0
+
+
+def test_apply_external_secret_sources_does_not_return_after_bitwarden_disabled(
+    tmp_path,
+    monkeypatch,
+):
+    """A disabled Bitwarden section must not prevent Infisical from running."""
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "secrets:\n"
+        "  bitwarden:\n"
+        "    enabled: false\n"
+        "  infisical:\n"
+        "    enabled: true\n"
+        "    project_id: test-project\n",
+        encoding="utf-8",
+    )
+
+    from agent.secret_sources.infisical import FetchResult
+
+    call_count = {"n": 0}
+
+    def _fake_apply(**_kwargs):
+        call_count["n"] += 1
+        return FetchResult(
+            secrets={"ANTHROPIC_API_KEY": "sk-ant-test"},
+            applied=["ANTHROPIC_API_KEY"],
+        )
+
+    import agent.secret_sources.infisical as inf_module
+
+    monkeypatch.setattr(inf_module, "apply_infisical_secrets", _fake_apply)
+
+    env_loader._apply_external_secret_sources(tmp_path)
+
+    assert call_count["n"] == 1
+    assert env_loader.get_secret_source("ANTHROPIC_API_KEY") == "infisical"
 
 
 def test_apply_external_secret_sources_dedupes_within_process(tmp_path, monkeypatch):
