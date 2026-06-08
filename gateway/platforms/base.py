@@ -3380,13 +3380,22 @@ class BasePlatformAdapter(ABC):
                     logger.debug("[%s] Could not send delivery-failure notice: %s", self.name, notify_err)
                 return result
 
-        # Non-network / post-retry formatting failure: try plain text as fallback
+        # Non-network / post-retry formatting failure: try plain text as fallback.
+        # Strip thread_id and reply_to_message_id from metadata so the fallback
+        # goes out as a top-level chat message rather than a thread reply — a
+        # stale or invalid thread_id causes Feishu to return 99992402 field
+        # validation failure, making the fallback fail too.
         logger.warning("[%s] Send failed: %s — trying plain-text fallback", self.name, error_str)
+        fallback_metadata = (
+            {k: v for k, v in metadata.items() if k not in ("thread_id", "reply_to_message_id")} or None
+            if metadata
+            else None
+        )
         fallback_result = await self.send(
             chat_id=chat_id,
             content=f"(Response formatting failed, plain text:)\n\n{content[:3500]}",
             reply_to=reply_to,
-            metadata=metadata,
+            metadata=fallback_metadata,
         )
         if not fallback_result.success:
             logger.error("[%s] Fallback send also failed: %s", self.name, fallback_result.error)

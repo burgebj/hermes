@@ -4590,6 +4590,19 @@ class FeishuAdapter(BasePlatformAdapter):
             self,
         )
 
+        def _on_ws_thread_done(fut: "asyncio.Future[None]") -> None:
+            # Guard against normal shutdown or an error already being set.
+            if not self._running or self.has_fatal_error:
+                return
+            exc = fut.exception() if not fut.cancelled() else None
+            detail = repr(exc) if exc else "thread exited without exception"
+            msg = f"Feishu websocket thread exited unexpectedly: {detail}"
+            logger.error("[Feishu] %s — triggering in-process reconnect", msg)
+            self._set_fatal_error("feishu_ws_exited", msg, retryable=True)
+            loop.create_task(self._notify_fatal_error())
+
+        self._ws_future.add_done_callback(_on_ws_thread_done)
+
     async def _connect_webhook(self) -> None:
         if not FEISHU_WEBHOOK_AVAILABLE:
             raise RuntimeError("aiohttp not installed; webhook mode unavailable")
