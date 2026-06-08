@@ -140,6 +140,30 @@ def test_cli_get_tool_definitions_briefly_waits_for_fast_mcp_thread(monkeypatch)
     assert not thread.is_alive()
 
 
+def test_cli_get_tool_definitions_honors_mcp_wait_env(monkeypatch):
+    thread = threading.Thread(target=lambda: time.sleep(0.12), daemon=True)
+    thread.start()
+    mcp_startup._mcp_discovery_thread = thread
+    monkeypatch.setenv("HERMES_MCP_DISCOVERY_WAIT", "0.25")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "model_tools",
+        types.SimpleNamespace(get_tool_definitions=lambda *_a, **_k: ["ok"]),
+    )
+
+    result = cli_mod.get_tool_definitions(enabled_toolsets=["web"], quiet_mode=True)
+
+    assert result == ["ok"]
+    assert not thread.is_alive()
+
+
+def test_wait_for_mcp_discovery_invalid_env_falls_back(monkeypatch):
+    monkeypatch.setenv("HERMES_MCP_DISCOVERY_WAIT", "not-a-float")
+
+    assert mcp_startup._configured_mcp_discovery_wait() == 3.0
+
+
 def test_init_agent_waits_for_mcp_discovery_before_agent_build(monkeypatch):
     waited = {"done": False}
 

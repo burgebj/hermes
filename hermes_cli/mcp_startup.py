@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import Optional
+
+_DEFAULT_MCP_DISCOVERY_WAIT = 3.0
+_MCP_DISCOVERY_WAIT_ENV = "HERMES_MCP_DISCOVERY_WAIT"
 
 _mcp_discovery_lock = threading.Lock()
 _mcp_discovery_started = False
@@ -51,9 +55,27 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
         thread.start()
 
 
-def wait_for_mcp_discovery(timeout: float = 0.75) -> None:
-    """Briefly wait for background MCP discovery before the first tool snapshot."""
+def _configured_mcp_discovery_wait() -> float:
+    """Return the bounded first-snapshot wait for background MCP discovery."""
+    raw = os.environ.get(_MCP_DISCOVERY_WAIT_ENV)
+    if raw is None or raw.strip() == "":
+        return _DEFAULT_MCP_DISCOVERY_WAIT
+    try:
+        timeout = float(raw)
+    except ValueError:
+        return _DEFAULT_MCP_DISCOVERY_WAIT
+    return max(0.0, timeout)
+
+
+def wait_for_mcp_discovery(timeout: float | None = None) -> None:
+    """Wait for background MCP discovery before the first tool snapshot.
+
+    Headless one-shot sessions snapshot tools once, so the default wait is long
+    enough for normal stdio/container MCP cold starts. Users with slower servers
+    can tune it with ``HERMES_MCP_DISCOVERY_WAIT``; explicit test/caller timeouts
+    still take precedence.
+    """
     thread = _mcp_discovery_thread
     if thread is None or not thread.is_alive():
         return
-    thread.join(timeout=timeout)
+    thread.join(timeout=_configured_mcp_discovery_wait() if timeout is None else timeout)
