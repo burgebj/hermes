@@ -869,6 +869,10 @@ def _group_voice_message(
     from_user_name="Alice Example",
     caption=None,
 ):
+    file_obj = SimpleNamespace(
+        file_path="voice/group.ogg",
+        download_as_bytearray=AsyncMock(return_value=bytearray(b"group voice bytes")),
+    )
     return SimpleNamespace(
         message_id=51,
         text=None,
@@ -890,9 +894,7 @@ def _group_voice_message(
         photo=None,
         video=None,
         audio=None,
-        voice=SimpleNamespace(
-            get_file=AsyncMock(side_effect=Exception("simulated download failure"))
-        ),
+        voice=SimpleNamespace(get_file=AsyncMock(return_value=file_obj)),
         document=None,
     )
 

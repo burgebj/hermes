@@ -9,6 +9,7 @@ Uses python-telegram-bot library for:
 
 import asyncio
 import dataclasses
+import inspect
 import json
 import logging
 import os
@@ -5026,6 +5027,119 @@ class TelegramAdapter(BasePlatformAdapter):
         return None, "", "", None
 
     @staticmethod
+    def _env_int_clamped(
+        name: str,
+        default: int,
+        *,
+        min_value: int = 1,
+        max_value: int = 10,
+    ) -> int:
+        """Read an integer env var and clamp it to safe bounds."""
+        raw = os.getenv(name)
+        try:
+            value = int(raw) if raw is not None else int(default)
+        except (TypeError, ValueError):
+            value = int(default)
+        return max(min_value, min(max_value, value))
+
+    async def _download_telegram_media_bytes(
+        self,
+        media_source: Any,
+        media_label: str,
+    ) -> bytes:
+        """Download Telegram media bytes with bounded retry/backoff.
+
+        Telegram's Bot API/CDN occasionally times out while resolving the file
+        handle or reading the bytes. Retrying here prevents transient failures
+        from becoming lost user input, while the caller remains responsible for
+        failing closed after retry exhaustion.
+        """
+        attempts = self._env_int_clamped(
+            "HERMES_TELEGRAM_MEDIA_DOWNLOAD_ATTEMPTS",
+            2,
+            min_value=1,
+            max_value=5,
+        )
+        delay = self._env_float_clamped(
+            "HERMES_TELEGRAM_MEDIA_DOWNLOAD_RETRY_DELAY_SECONDS",
+            0.5,
+            min_value=0.0,
+            max_value=10.0,
+        )
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                file_obj = await media_source.get_file()
+                return bytes(await file_obj.download_as_bytearray())
+            except Exception as exc:  # noqa: BLE001 - preserve prior broad media-download guard
+                last_error = exc
+                if attempt >= attempts:
+                    break
+                logger.warning(
+                    "[Telegram] %s download failed (attempt %d/%d), retrying in %.2fs: %s",
+                    media_label,
+                    attempt,
+                    attempts,
+                    delay,
+                    exc,
+                )
+                if delay > 0:
+                    await asyncio.sleep(delay)
+        assert last_error is not None
+        raise last_error
+
+    async def _send_media_cache_failure_notice(
+        self,
+        msg: Message,
+        media_label: str,
+        error: Exception,
+    ) -> None:
+        """Tell the user a media message could not be downloaded.
+
+        This intentionally bypasses ``handle_message``. A failed media cache has
+        no trustworthy user content for the LLM; dispatching an empty event makes
+        the agent guess and creates misleading sessions.
+        """
+        error_text = str(error).strip()
+        error_suffix = (
+            f" ({type(error).__name__}: {error_text})"
+            if error_text
+            else f" ({type(error).__name__})"
+        )
+        notice = (
+            f"⚠️ I received your {media_label}, but couldn't download it from Telegram"
+            f"{error_suffix}. Please resend it."
+        )
+        try:
+            reply_text = getattr(msg, "reply_text", None)
+            if callable(reply_text):
+                maybe_result = reply_text(notice)
+                if inspect.isawaitable(maybe_result):
+                    await maybe_result
+                return
+
+            # Fallback for tests or unusual PTB objects without reply_text().
+            if self._bot and getattr(msg, "chat", None):
+                send_kwargs: Dict[str, Any] = {
+                    "chat_id": int(msg.chat.id),
+                    "text": notice,
+                }
+                thread_id = getattr(msg, "message_thread_id", None)
+                if thread_id is not None:
+                    send_kwargs["message_thread_id"] = thread_id
+                message_id = getattr(msg, "message_id", None)
+                if message_id is not None:
+                    send_kwargs["reply_to_message_id"] = int(message_id)
+                await self._bot.send_message(**send_kwargs)
+        except Exception as send_err:  # noqa: BLE001 - user notification is best-effort
+            logger.warning(
+                "[Telegram] Failed to notify user about %s cache failure: %s",
+                media_label,
+                send_err,
+                exc_info=True,
+            )
+
+    @staticmethod
     def _append_observed_note(existing: Optional[str], note: str) -> str:
         if not note:
             return existing or ""
@@ -5469,27 +5583,31 @@ class TelegramAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache photo: %s", e, exc_info=True)
 
-        # Download voice/audio messages to cache for STT transcription
+        # Download voice/audio messages to cache for STT transcription.  If
+        # Telegram media retrieval fails, fail closed: tell the user to resend
+        # instead of dispatching an empty turn into the agent.
         if msg.voice:
             try:
-                file_obj = await msg.voice.get_file()
-                audio_bytes = await file_obj.download_as_bytearray()
-                cached_path = cache_audio_from_bytes(bytes(audio_bytes), ext=".ogg")
+                audio_bytes = await self._download_telegram_media_bytes(msg.voice, "voice")
+                cached_path = cache_audio_from_bytes(audio_bytes, ext=".ogg")
                 event.media_urls = [cached_path]
                 event.media_types = ["audio/ogg"]
                 logger.info("[Telegram] Cached user voice at %s", cached_path)
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache voice: %s", e, exc_info=True)
+                await self._send_media_cache_failure_notice(msg, "voice message", e)
+                return
         elif msg.audio:
             try:
-                file_obj = await msg.audio.get_file()
-                audio_bytes = await file_obj.download_as_bytearray()
-                cached_path = cache_audio_from_bytes(bytes(audio_bytes), ext=".mp3")
+                audio_bytes = await self._download_telegram_media_bytes(msg.audio, "audio")
+                cached_path = cache_audio_from_bytes(audio_bytes, ext=".mp3")
                 event.media_urls = [cached_path]
                 event.media_types = ["audio/mp3"]
                 logger.info("[Telegram] Cached user audio at %s", cached_path)
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache audio: %s", e, exc_info=True)
+                await self._send_media_cache_failure_notice(msg, "audio file", e)
+                return
 
         elif msg.video:
             try:
