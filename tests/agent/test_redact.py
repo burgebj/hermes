@@ -482,3 +482,70 @@ class TestXaiToken:
     def test_prefix_visible_in_masked_output(self):
         result = redact_sensitive_text(self.KEY, force=True)
         assert result.startswith("xai-AB")
+
+
+class TestCodeFileParameter:
+    """Verify code_file=True suppresses false-positive redaction in code output."""
+
+    def test_code_file_skips_env_assignment(self):
+        # Without code_file, MAX_TOKENS is not a secret name so it passes through already;
+        # use a real secret-named var to confirm the flag suppresses _ENV_ASSIGN_RE.
+        text = "MAX_TOKENS=100"
+        assert redact_sensitive_text(text, code_file=True) == text
+        # A secret-named var IS redacted without the flag.
+        secret_text = "MY_SECRET_TOKEN=plainvalue123456789"
+        assert redact_sensitive_text(secret_text, code_file=True) == secret_text
+        assert "plainvalue" not in redact_sensitive_text(secret_text)
+
+    def test_code_file_skips_json_field(self):
+        text = '"apiKey": "test-value"'
+        assert redact_sensitive_text(text, code_file=True) == text
+        # Without the flag the value is redacted.
+        assert "test-value" not in redact_sensitive_text(text)
+
+    def test_code_file_still_redacts_bare_prefix(self):
+        # A real sk- credential that is NOT in a template context must still be masked.
+        text = "key is sk-proj-abc123def456ghi789jkl012"
+        result = redact_sensitive_text(text, code_file=True)
+        assert "abc123def456" not in result
+        assert "sk-pro" in result
+
+    def test_code_file_preserves_github_actions_template(self):
+        # A prefix-shaped token inside ${{ }} is a variable reference, not a literal.
+        text = "run: echo ${{ secrets.sk-proj-abc123def456ghi789jkl012 }}"
+        result = redact_sensitive_text(text, code_file=True)
+        assert "abc123def456" in result
+
+    def test_code_file_preserves_shell_variable_ref(self):
+        # A prefix-shaped token after $ is a variable reference, not a literal.
+        text = "AUTH=${ghp_1234567890abcdef}"
+        result = redact_sensitive_text(text, code_file=True)
+        assert "1234567890abcdef" in result
+
+    def test_code_file_still_redacts_prefix_after_template(self):
+        # A real credential after a template expression must still be masked.
+        text = "${{ secrets.NAME }} sk-proj-abc123def456ghi789jkl012"
+        result = redact_sensitive_text(text, code_file=True)
+        assert "abc123def456" not in result
+
+    def test_code_file_still_redacts_auth_header(self):
+        token = "mytoken123456789012345678"
+        text = f"Authorization: Bearer {token}"
+        result = redact_sensitive_text(text, code_file=True)
+        assert token not in result
+        assert "Authorization: Bearer" in result
+
+    def test_code_file_still_redacts_jwt(self):
+        jwt = (
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+            ".eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+            ".abc123def456ghi789jkl"
+        )
+        result = redact_sensitive_text(jwt, code_file=True)
+        assert "eyJzdWIi" not in result
+
+    def test_code_file_still_redacts_private_key(self):
+        key_block = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----"
+        result = redact_sensitive_text(key_block, code_file=True)
+        assert "MIIEowIBAAKCAQEA" not in result
+        assert "[REDACTED PRIVATE KEY]" in result

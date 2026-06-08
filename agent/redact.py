@@ -192,6 +192,28 @@ _PREFIX_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(" + "|".join(_PREFIX_PATTERNS) + r")(?![A-Za-z0-9_-])"
 )
 
+# Template-context patterns that precede a prefix match in source code.
+# When a match is preceded by one of these, it is a reference (variable name,
+# CI secret expression) rather than a literal credential value.
+_TEMPLATE_CONTEXT_RE = re.compile(
+    r"\$\{\{[^}]*$"     # GitHub Actions ${{ secrets.FOO or mid-expression
+    r"|\$\{[^}]*$"      # Shell/JS ${VAR style (unclosed, so preceding the match)
+    r"|\$[A-Z_]*$"      # Shell variable ref like $GH_TOKEN or bare $
+)
+
+
+def _preserve_template_prefix(m: re.Match, full_text: str) -> str:
+    """Return the match unchanged when it follows a template/variable reference.
+
+    Checks up to 60 chars before the match start for a shell variable or CI
+    template prefix. Returns the original match when found, otherwise masks.
+    """
+    start = m.start()
+    preceding = full_text[max(0, start - 60):start]
+    if _TEMPLATE_CONTEXT_RE.search(preceding):
+        return m.group(0)
+    return _mask_token(m.group(1))
+
 
 def mask_secret(
     value: str,
@@ -356,7 +378,10 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
 
     # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
     if _has_known_prefix_substring(text):
-        text = _PREFIX_RE.sub(lambda m: _mask_token(m.group(1)), text)
+        if code_file:
+            text = _PREFIX_RE.sub(lambda m: _preserve_template_prefix(m, text), text)
+        else:
+            text = _PREFIX_RE.sub(lambda m: _mask_token(m.group(1)), text)
 
     # ENV assignments: OPENAI_API_KEY=***  (skip for code files — false positives)
     if not code_file:

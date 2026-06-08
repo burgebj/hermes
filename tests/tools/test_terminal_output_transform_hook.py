@@ -128,9 +128,12 @@ def test_terminal_output_transform_still_runs_strip_and_redact(monkeypatch, tmp_
     )
 
     assert "\x1b" not in result["output"]
+    # The sk- prefix is still redacted by _PREFIX_RE even with code_file=True.
+    # ENV-assignment redaction is intentionally skipped (code_file=True) to
+    # avoid corrupting constants like MAX_TOKENS=100 in code output.
     assert secret not in result["output"]
     assert "OPENAI_API_KEY=" in result["output"]
-    assert "***" in result["output"]
+    assert "..." in result["output"]
 
 
 def test_terminal_output_transform_hook_exception_falls_back(monkeypatch, tmp_path):
@@ -170,6 +173,19 @@ def test_terminal_output_transform_does_not_change_approval_or_exit_code_meaning
         "Command required approval (dangerous command) and was approved by the user."
     )
     assert result["exit_code_meaning"] == "No matches found (not an error)"
+
+
+def test_terminal_output_code_file_skips_env_assignment(monkeypatch, tmp_path):
+    """Terminal output passes code_file=True so code constants are not corrupted."""
+    monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+
+    result, _mock_env = _run_terminal(
+        monkeypatch,
+        tmp_path,
+        output="MAX_TOKENS=100",
+    )
+
+    assert result["output"] == "MAX_TOKENS=100"
 
 
 def test_terminal_output_transform_integration_with_real_plugin(monkeypatch, tmp_path):
