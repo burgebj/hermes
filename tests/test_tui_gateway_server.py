@@ -2510,7 +2510,15 @@ def test_session_compress_uses_compress_helper(monkeypatch):
     emit.assert_any_call("session.info", "sid", {"model": "x"})
     # Final status.update clears the pinned "compressing" indicator so the
     # status bar can revert to the neutral state when compaction finishes.
-    emit.assert_any_call("status.update", "sid", {"kind": "status", "text": "ready"})
+    status_updates = [
+        call.args[2]
+        for call in emit.call_args_list
+        if call.args[:2] == ("status.update", "sid")
+    ]
+    assert any(
+        update.get("kind") == "status" and update.get("text") == "ready"
+        for update in status_updates
+    )
 
 
 def test_session_compress_syncs_session_key_after_rotation(monkeypatch):
