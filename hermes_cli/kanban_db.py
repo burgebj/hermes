@@ -2841,10 +2841,10 @@ def _synthesize_ended_run(
 # ---------------------------------------------------------------------------
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Return True when ``task_id`` is sticky-blocked by an explicit
-    worker/operator ``kanban_block`` call (#28712).
+    """Return True when ``task_id`` is sticky-blocked and must not be
+    auto-promoted by ``recompute_ready`` (#28712, #32747).
 
-    A ``blocked`` status can come from two very different sources:
+    A ``blocked`` status can come from three sources:
 
     * **Worker- or operator-initiated** — a worker called
       ``kanban_block(reason="review-required: ...")`` (or somebody ran
@@ -2852,30 +2852,57 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
       should stay blocked until an operator unblocks it.  The block tool
       emits a ``"blocked"`` event row in ``task_events``.
 
-    * **Circuit-breaker** — ``_record_task_failure`` tripped after
-      repeated crashes / spawn failures / timeouts.  This emits
-      ``"gave_up"``, *not* ``"blocked"``, and is meant to recover
-      automatically once the underlying conditions change (e.g. parents
-      finish, transient infra error clears).
+    * **Protocol violation** — the worker subprocess exited cleanly
+      (rc=0) without calling ``kanban_complete`` / ``kanban_block``.
+      ``detect_crashed_workers`` emits a ``"protocol_violation"`` event
+      and immediately trips the circuit breaker.  Re-spawning is
+      deterministically futile (the next worker will do exactly the
+      same thing), so this is treated as sticky too — see #32747 for
+      the respawn-loop incidents this avoids.  A stale
+      ``kanban_complete`` rejected after its run was reclaimed emits
+      ``"completion_rejected"`` and is sticky for the same reason.
 
-    The cheapest signal that distinguishes the two is the most recent
-    ``"blocked"`` / ``"unblocked"`` event for the task.  If the most
-    recent one is ``"blocked"`` (or there is a ``"blocked"`` event and
-    no ``"unblocked"`` event has fired since), the task is sticky and
-    ``recompute_ready`` must *not* auto-promote it.
+    * **Transient circuit-breaker** — ``_record_task_failure`` tripped
+      after repeated crashes / spawn failures / timeouts that are NOT
+      protocol violations.  This emits ``"gave_up"`` (and a preceding
+      ``"crashed"`` / ``"timed_out"`` event) but no ``"blocked"`` /
+      ``"protocol_violation"`` / ``"completion_rejected"``, and is
+      meant to recover automatically once the underlying conditions
+      change (parents finish, transient infra error clears).
+
+    The cheapest signal that distinguishes the three is the most recent
+    ``"blocked"`` / ``"unblocked"`` / ``"protocol_violation"`` /
+    ``"completion_rejected"`` event for the task.  ``"blocked"``,
+    ``"protocol_violation"``, and ``"completion_rejected"`` all make
+    the task sticky; ``"unblocked"`` clears the stickiness; the
+    transient-breaker case leaves no event in this set at all and falls
+    through to ``False``.
 
     Returns ``False`` when there is no such event at all (e.g. the task
-    was set to ``status='blocked'`` by the circuit breaker or by direct
-    DB manipulation) — preserves the pre-#28712 auto-recover semantics
-    for that path.
+    was set to ``status='blocked'`` by the transient circuit breaker
+    or by direct DB manipulation) — preserves the pre-#28712
+    auto-recover semantics for that path.
     """
     row = conn.execute(
         "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "WHERE task_id = ? "
+        "AND kind IN ('blocked', 'unblocked', 'protocol_violation', "
+        "'completion_rejected') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    return bool(row) and row["kind"] == "blocked"
+    if not row:
+        return False
+    if row["kind"] in ("blocked", "protocol_violation"):
+        return True
+    if row["kind"] == "completion_rejected":
+        task_row = conn.execute(
+            "SELECT last_failure_error FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        last_error = task_row["last_failure_error"] if task_row else None
+        return str(last_error or "").startswith("kanban_complete rejected ")
+    return False
 
 
 def recompute_ready(
@@ -2921,10 +2948,11 @@ def recompute_ready(
             task_id = row["id"]
             cur_status = row["status"]
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
-                # Worker / operator asked for human review — do not
-                # silently auto-recover.  ``unblock_task`` is the only
-                # legitimate exit (it emits ``"unblocked"`` which flips
-                # this predicate back).
+                # Worker / operator asked for human review, or worker
+                # tripped a protocol violation (deterministic respawn
+                # loop) — do not silently auto-recover.  ``unblock_task``
+                # is the only legitimate exit (it emits ``"unblocked"``
+                # which flips this predicate back).
                 continue
             parents = conn.execute(
                 "SELECT t.status FROM tasks t "
@@ -3598,6 +3626,7 @@ def complete_task(
     and never blocks.
     """
     now = int(time.time())
+    rejected_completion_error: Optional[str] = None
 
     # Gate: verify created_cards BEFORE the main write txn. A rejected
     # completion still needs an auditable event, so we emit it in a
@@ -3659,55 +3688,95 @@ def complete_task(
                 (result, now, task_id, int(expected_run_id)),
             )
         if cur.rowcount != 1:
-            return False
-        run_id = _end_run(
-            conn, task_id,
-            outcome="completed", status="done",
-            summary=summary if summary is not None else result,
-            metadata=metadata,
-        )
-        # If complete_task was called on a never-claimed task (ready or
-        # blocked → done with no run in flight), synthesize a
-        # zero-duration run so the handoff fields are persisted in
-        # attempt history instead of silently lost.
-        if run_id is None and (summary or metadata or result):
-            run_id = _synthesize_ended_run(
+            row = conn.execute(
+                "SELECT status, current_run_id FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if (
+                expected_run_id is not None
+                and row is not None
+                and row["status"] == "ready"
+                and row["current_run_id"] is None
+            ):
+                rejected_completion_error = (
+                    "kanban_complete rejected because run "
+                    f"{int(expected_run_id)} is no longer active"
+                )
+                _append_event(
+                    conn, task_id, "completion_rejected",
+                    {
+                        "expected_run_id": int(expected_run_id),
+                        "status": row["status"],
+                        "current_run_id": None,
+                    },
+                )
+            else:
+                return False
+        if rejected_completion_error is None:
+            run_id = _end_run(
                 conn, task_id,
-                outcome="completed",
+                outcome="completed", status="done",
                 summary=summary if summary is not None else result,
                 metadata=metadata,
             )
-        # Carry the handoff summary in the event payload so gateway
-        # notifiers and dashboard WS consumers can render it without a
-        # second SQL round-trip. First line only, 400 char cap — the
-        # full summary stays on the run row.
-        ev_summary = (summary if summary is not None else result) or ""
-        ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
-        completed_payload: dict = {
-            "result_len": len(result) if result else 0,
-            "summary": ev_summary or None,
-        }
-        if verified_cards:
-            completed_payload["verified_cards"] = verified_cards
-        # Carry artifact paths in the event payload so the gateway
-        # notifier can upload them as native attachments alongside the
-        # completion message. Workers pass these via
-        # ``kanban_complete(artifacts=[...])`` which stashes the list in
-        # ``metadata["artifacts"]`` — we promote it onto the event so
-        # consumers don't have to fetch the run row to find it.
-        if isinstance(metadata, dict):
-            md_artifacts = metadata.get("artifacts")
-            if isinstance(md_artifacts, (list, tuple)):
-                cleaned_artifacts = [
-                    str(p).strip() for p in md_artifacts if isinstance(p, str) and str(p).strip()
-                ]
-                if cleaned_artifacts:
-                    completed_payload["artifacts"] = cleaned_artifacts
-        _append_event(
-            conn, task_id, "completed",
-            completed_payload,
-            run_id=run_id,
+            # If complete_task was called on a never-claimed task (ready or
+            # blocked → done with no run in flight), synthesize a
+            # zero-duration run so the handoff fields are persisted in
+            # attempt history instead of silently lost.
+            if run_id is None and (summary or metadata or result):
+                run_id = _synthesize_ended_run(
+                    conn, task_id,
+                    outcome="completed",
+                    summary=summary if summary is not None else result,
+                    metadata=metadata,
+                )
+            # Carry the handoff summary in the event payload so gateway
+            # notifiers and dashboard WS consumers can render it without a
+            # second SQL round-trip. First line only, 400 char cap — the
+            # full summary stays on the run row.
+            ev_summary = (summary if summary is not None else result) or ""
+            ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
+            completed_payload: dict = {
+                "result_len": len(result) if result else 0,
+                "summary": ev_summary or None,
+            }
+            if verified_cards:
+                completed_payload["verified_cards"] = verified_cards
+            # Carry artifact paths in the event payload so the gateway
+            # notifier can upload them as native attachments alongside the
+            # completion message. Workers pass these via
+            # ``kanban_complete(artifacts=[...])`` which stashes the list in
+            # ``metadata["artifacts"]`` — we promote it onto the event so
+            # consumers don't have to fetch the run row to find it.
+            if isinstance(metadata, dict):
+                md_artifacts = metadata.get("artifacts")
+                if isinstance(md_artifacts, (list, tuple)):
+                    cleaned_artifacts = [
+                        str(p).strip()
+                        for p in md_artifacts
+                        if isinstance(p, str) and str(p).strip()
+                    ]
+                    if cleaned_artifacts:
+                        completed_payload["artifacts"] = cleaned_artifacts
+            _append_event(
+                conn, task_id, "completed",
+                completed_payload,
+                run_id=run_id,
+            )
+    if rejected_completion_error is not None:
+        # The watchdog already reclaimed this run, so the worker's
+        # terminal tool call cannot safely complete the task. Count it
+        # as a non-success attempt; repeated late completions must trip
+        # the same breaker as crashes and timeouts.
+        _record_task_failure(
+            conn, task_id,
+            error=rejected_completion_error,
+            outcome="completion_rejected",
+            release_claim=False,
+            end_run=False,
+            event_payload_extra={"expected_run_id": int(expected_run_id)},
         )
+        return False
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
     # its own txn so the completion itself is already durable by the
