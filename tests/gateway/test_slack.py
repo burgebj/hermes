@@ -3423,6 +3423,113 @@ class TestSlackReplyToText:
         assert "メール要約" in msg_event.reply_to_text
 
     @pytest.mark.asyncio
+    async def test_thread_context_includes_github_alert_attachment_fields(self, adapter):
+        """GitHub deployment alerts often put all content in attachments.
+
+        A channel-thread mention should prepend the parent alert fields so the
+        agent can answer without the user pasting the alert separately.
+        """
+        adapter._channel_team = {"C_ALERTS": "T1"}
+        adapter._team_bot_user_ids = {"T1": "U_BOT"}
+
+        adapter._app.client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {
+                    "ts": "1779476410.975849",
+                    "bot_id": "B_GITHUB",
+                    "username": "GitHub",
+                    "text": "",
+                    "attachments": [
+                        {
+                            "fallback": "deployment failed",
+                            "pretext": "Deployment to hetzner-staging by simjak",
+                            "fields": [
+                                {"title": "Status", "value": "Failed", "short": True},
+                                {"title": "Commit", "value": "`53b9d90 (main)`", "short": True},
+                                {
+                                    "title": "Workflow",
+                                    "value": "Terraform Drift #102 / Drift hetzner-staging",
+                                    "short": False,
+                                },
+                            ],
+                            "footer": "jakit-labs/manibo | Added by GitHub",
+                        }
+                    ],
+                },
+                {
+                    "ts": "1779477700.000000",
+                    "user": "U_USER",
+                    "text": "<@U_BOT> please explain",
+                },
+            ]
+        })
+
+        event = {
+            "text": "<@U_BOT> please explain",
+            "user": "U_USER",
+            "channel": "C_ALERTS",
+            "channel_type": "channel",
+            "team": "T1",
+            "ts": "1779477700.000000",
+            "thread_ts": "1779476410.975849",
+        }
+
+        with patch.object(
+            adapter, "_resolve_user_name", new=AsyncMock(return_value="Simonas")
+        ):
+            await adapter._handle_slack_message(event)
+
+        adapter.handle_message.assert_awaited_once()
+        msg_event = adapter.handle_message.call_args[0][0]
+
+        assert "[Thread context" in msg_event.text
+        assert "[thread parent] GitHub:" in msg_event.text
+        assert "Deployment to hetzner-staging by simjak" in msg_event.text
+        assert "deployment failed" in msg_event.text
+        assert "- Status: Failed" in msg_event.text
+        assert "- Commit: `53b9d90 (main)`" in msg_event.text
+        assert "- Workflow: Terraform Drift #102 / Drift hetzner-staging" in msg_event.text
+        assert "please explain" in msg_event.text
+
+        assert msg_event.reply_to_text is not None
+        assert "Terraform Drift #102 / Drift hetzner-staging" in msg_event.reply_to_text
+        assert "- Status: Failed" in msg_event.reply_to_text
+
+    @pytest.mark.asyncio
+    async def test_fetch_thread_parent_text_uses_attachment_fields_when_text_empty(self, adapter):
+        """Cold reply_to_text fetch must work even if only attachment fields exist."""
+        adapter._channel_team = {"C_ALERTS": "T1"}
+        adapter._team_bot_user_ids = {"T1": "U_BOT"}
+        adapter._app.client.conversations_replies = AsyncMock(return_value={
+            "messages": [
+                {
+                    "ts": "1779476410.975849",
+                    "bot_id": "B_GITHUB",
+                    "text": "",
+                    "attachments": [
+                        {
+                            "pretext": "Deployment to hetzner-staging by simjak",
+                            "fields": [
+                                {"title": "Status", "value": "Failed"},
+                                {"title": "Workflow", "value": "Terraform Drift #102"},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        })
+
+        parent_text = await adapter._fetch_thread_parent_text(
+            channel_id="C_ALERTS",
+            thread_ts="1779476410.975849",
+            team_id="T1",
+        )
+
+        assert "Deployment to hetzner-staging by simjak" in parent_text
+        assert "- Status: Failed" in parent_text
+        assert "- Workflow: Terraform Drift #102" in parent_text
+
+    @pytest.mark.asyncio
     async def test_slack_reply_to_text_none_for_top_level_message(self, adapter):
         """Top-level messages (no thread_ts) must not set reply_to_text."""
         event = {
