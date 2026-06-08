@@ -518,15 +518,19 @@ async def test_discord_voice_linked_channel_skips_mention_requirement_and_auto_t
 
 
 @pytest.mark.asyncio
-async def test_discord_free_response_channel_skips_auto_thread(adapter, monkeypatch):
-    """Free-response channels should reply inline, never spawn a new thread.
+async def test_discord_free_response_channel_auto_threads(adapter, monkeypatch):
+    """Free-response channels SHOULD still spawn auto-threads when DISCORD_AUTO_THREAD=true.
 
-    Without this, every message in a free-response channel would auto-create
-    a fresh thread (since the channel bypasses the @mention gate, every
-    message looks like a fresh trigger).  That turns a "lightweight chat"
-    channel into a thread-spawning machine — see the docs at
-    website/docs/user-guide/messaging/discord.md which already describe
-    this as the intended behavior.
+    LOCAL OVERRIDE (carry `fix(discord): restore auto-thread in free-response channels`):
+    Theo's usage pattern wants both free-response (no @mention required) AND
+    auto-thread per message. Upstream's `is_free_channel` suppression contradicts
+    the long-standing local config where `free_response_channels='*'` relies on
+    each conversation getting its own thread for isolation.
+
+    Original upstream test asserted `_auto_create_thread.assert_not_awaited()`;
+    this carry flips the assertion to match the restored behavior. If upstream
+    re-introduces the suppression in a way that respects an opt-out flag, switch
+    to honoring that flag here instead.
     """
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
     monkeypatch.setenv("DISCORD_FREE_RESPONSE_CHANNELS", "789")
@@ -541,11 +545,13 @@ async def test_discord_free_response_channel_skips_auto_thread(adapter, monkeypa
 
     await adapter._handle_message(message)
 
-    adapter._auto_create_thread.assert_not_awaited()
+    adapter._auto_create_thread.assert_awaited_once()
     adapter.handle_message.assert_awaited_once()
     event = adapter.handle_message.await_args.args[0]
     assert event.text == "casual chat in free-response channel"
-    assert event.source.chat_type == "group"
+    # With auto-thread restored, the event's source is the newly created thread,
+    # not the parent channel — chat_type flips from "group" to "thread".
+    assert event.source.chat_type == "thread"
 
 
 
