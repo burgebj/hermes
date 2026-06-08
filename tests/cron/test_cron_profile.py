@@ -377,6 +377,61 @@ class TestRunJobProfileContext:
         assert observed["hermes_home_during_init"] == str(root)
         assert os.environ["HERMES_HOME"] == str(root)
 
+    def test_profile_delivery_uses_profile_home_channel_and_restores_env(
+        self, isolated_cron_profile_home, monkeypatch
+    ):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import cron.scheduler as sched
+        from gateway.config import Platform
+
+        root, profile_home = isolated_cron_profile_home
+        (profile_home / ".env").write_text(
+            "TELEGRAM_HOME_CHANNEL=profile-chat\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(sched, "_hermes_home", None)
+        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "root-chat")
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        root_adapter = AsyncMock()
+        root_adapter.send.return_value = MagicMock(success=True)
+        loop = MagicMock()
+        loop.is_running.return_value = True
+
+        job = {
+            "id": "profile-delivery",
+            "name": "profile-delivery-job",
+            "profile": "support",
+            "deliver": "telegram",
+        }
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch(
+                 "tools.send_message_tool._send_to_platform",
+                 new=AsyncMock(return_value={"success": True}),
+             ) as send_mock, \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}):
+            err = sched._deliver_result(
+                job,
+                "profile payload",
+                adapters={Platform.TELEGRAM: root_adapter},
+                loop=loop,
+            )
+
+        assert err is None
+        root_adapter.send.assert_not_called()
+        send_mock.assert_called_once()
+        args, _kwargs = send_mock.call_args
+        assert args[2] == "profile-chat"
+        assert args[3] == "profile payload"
+        assert os.environ["TELEGRAM_HOME_CHANNEL"] == "root-chat"
+        assert os.environ["HERMES_HOME"] == str(root)
+        assert sched._get_hermes_home() == root
+
 
 class TestTickProfilePartition:
     def test_profile_and_workdir_combined(self, isolated_cron_profile_home, monkeypatch):

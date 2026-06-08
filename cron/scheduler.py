@@ -732,6 +732,27 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
     Returns None on success, or an error string on failure.
     """
+    profile = (job.get("profile") or "").strip()
+    if profile:
+        with _job_profile_context(job.get("id", "?"), profile):
+            try:
+                from dotenv import load_dotenv
+                try:
+                    load_dotenv(str(_get_hermes_home() / ".env"), override=True, encoding="utf-8")
+                except UnicodeDecodeError:
+                    load_dotenv(str(_get_hermes_home() / ".env"), override=True, encoding="latin-1")
+            except Exception as exc:
+                logger.debug("Job '%s': failed to load profile .env before delivery: %s", job.get("id", "?"), exc)
+            # Profile-scoped cron deliveries must use the job profile's own
+            # platform credentials and home-channel configuration, not the
+            # scheduler/gateway process profile's live adapter.
+            return _deliver_result_impl(job, content, adapters=None, loop=None)
+
+    return _deliver_result_impl(job, content, adapters=adapters, loop=loop)
+
+
+def _deliver_result_impl(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
+    """Implementation for _deliver_result; caller is responsible for profile scoping."""
     targets = _resolve_delivery_targets(job)
     if not targets:
         if job.get("deliver", "local") != "local":
