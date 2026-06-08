@@ -1014,3 +1014,139 @@ class TestHandoffRequestId:
         result = worker_mod._wait_for_handoff(
             "default", "wrong-request-id", "some-token", timeout=1.0)
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# P1-1: sanitize_intent requires lease.json
+# ---------------------------------------------------------------------------
+
+class TestSanitizeRequiresLease:
+    """P1-1: sanitize_intent requires lease.json."""
+
+    def test_sanitize_rejects_missing_lease(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            create_intent, sanitize_intent, read_intent,
+        )
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+        nonce = intent["nonce"]
+
+        # No lease.json exists
+        result = sanitize_intent("default", rid, expected_nonce=nonce,
+                                owner_token="some-token", worker_pid=os.getpid())
+        assert result is False
+        stored = read_intent("default", rid)
+        assert stored["nonce"] == nonce  # Nonce unchanged
+
+    def test_sanitize_rejects_wrong_owner(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            create_intent, RestartLock, sanitize_intent, read_intent,
+        )
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+        nonce = intent["nonce"]
+
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+        assert lock.claim_lease(rid, nonce) is True
+
+        result = sanitize_intent("default", rid, expected_nonce=nonce,
+                                owner_token="wrong-token", worker_pid=os.getpid())
+        assert result is False
+        stored = read_intent("default", rid)
+        assert stored["nonce"] == nonce
+
+    def test_sanitize_rejects_wrong_pid(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            create_intent, RestartLock, sanitize_intent, read_intent,
+        )
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+        nonce = intent["nonce"]
+
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+        assert lock.claim_lease(rid, nonce) is True
+
+        result = sanitize_intent("default", rid, expected_nonce=nonce,
+                                owner_token=lock.owner_token, worker_pid=99999)
+        assert result is False
+        stored = read_intent("default", rid)
+        assert stored["nonce"] == nonce
+
+
+# ---------------------------------------------------------------------------
+# P1-2: Orphan claim.lock GC
+# ---------------------------------------------------------------------------
+
+class TestOrphanClaimLockGC:
+    """P1-2: Orphan claim.lock GC."""
+
+    def test_orphan_claim_lock_gc_after_ttl(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
+        import hermes_cli.gateway_restart_state as state_mod
+
+        # Create a request dir with an old claim.lock
+        profile_dir = state_mod._get_profile_dir("default")
+        rid = "orphan-request-123"
+        req_dir = profile_dir / rid
+        req_dir.mkdir(parents=True)
+
+        clp = req_dir / "claim.lock"
+        old_time = time.time() - 7200  # 2 hours ago
+        clp.write_text(json.dumps({
+            "request_id": rid,
+            "worker_pid": 99999,
+            "created_at": old_time,
+        }))
+
+        # Also set directory mtime to be old (GC checks mtime for no-status dirs)
+        os.utime(str(req_dir), (old_time, old_time))
+
+        removed = state_mod.gc_expired_request_dirs("default", max_age_s=3600)
+        assert removed == 1
+        assert not req_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# P1-2: lease.json publish failure → intent rollback
+# ---------------------------------------------------------------------------
+
+class TestLeasePublishRollback:
+    """P1-2: lease.json publish failure → intent rollback."""
+
+    def test_lease_publish_failure_rollback(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            RestartLock, create_intent, read_intent,
+        )
+        import hermes_cli.gateway_restart_state as state_mod
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+        nonce = intent["nonce"]
+
+        # Monkey-patch _atomic_write_json to fail on lease.json
+        original_awj = state_mod._atomic_write_json
+        def failing_awj(path, data):
+            if "lease.json" in str(path):
+                raise OSError("disk full")
+            return original_awj(path, data)
+
+        monkeypatch.setattr(state_mod, "_atomic_write_json", failing_awj)
+
+        lock = RestartLock("default")
+        result = lock.claim_lease(rid, nonce)
+        assert result is False
+
+        # Intent should be rolled back to scheduled
+        stored = read_intent("default", rid)
+        assert stored is not None
+        assert stored["state"] == "scheduled"

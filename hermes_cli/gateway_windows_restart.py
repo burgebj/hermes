@@ -190,35 +190,36 @@ def schedule_restart_handoff(
             "detail": "Another restart is already in progress",
         }
 
-    # Lock acquired — write intent to per-request directory
-    intent = create_intent(
-        request_id=request_id,
-        profile=profile,
-        target_pid=old_pid,
-        task_name=task_name,
-        origin=origin,
-    )
-
-    write_status(profile, "scheduled", request_id=request_id, old_pid=old_pid)
-    append_restart_log(
-        request_id=request_id, profile=profile, old_pid=old_pid,
-        origin=origin, state="scheduled",
-    )
-
-    # Spawn detached worker
+    # Lock acquired — initialize transaction
     try:
+        intent = create_intent(
+            request_id=request_id,
+            profile=profile,
+            target_pid=old_pid,
+            task_name=task_name,
+            origin=origin,
+        )
+
+        write_status(profile, "scheduled", request_id=request_id, old_pid=old_pid)
+        append_restart_log(
+            request_id=request_id, profile=profile, old_pid=old_pid,
+            origin=origin, state="scheduled",
+        )
+
+        # Spawn detached worker
         worker_pid = _spawn_worker(intent, profile, request_id)
     except Exception as e:
         lock.release()
         cleanup_intent(profile, request_id)
         append_restart_log(
             request_id=request_id, profile=profile, old_pid=old_pid,
-            origin=origin, state="failed", error=f"worker spawn: {e}",
+            origin=origin, state="initialization_failed", error=str(e),
         )
         return {
             "request_id": request_id,
             "scheduled": False,
-            "detail": f"Failed to spawn worker: {e}",
+            "completed": False,
+            "detail": f"Failed to initialize restart transaction: {e}",
         }
 
     # P0-3: Update lock with worker_pid and claim_deadline for recovery
@@ -243,6 +244,7 @@ def schedule_restart_handoff(
 
     # Wait for worker to claim lease
     claimed = _wait_for_worker_claim(profile, request_id, timeout_s=10.0)
+    handoff_succeeded = False
     if claimed:
         # P0-1 + P0-2: Hand off active.lock to Worker instead of releasing
         lease_data = _read_lease_data(profile, request_id)
@@ -255,13 +257,23 @@ def schedule_restart_handoff(
             )
             if handoff_ok:
                 # Worker now owns active.lock — Coordinator must NOT release
-                pass
+                handoff_succeeded = True
             else:
                 # Handoff failed — release to avoid permanent lock
                 lock.release()
+                append_restart_log(
+                    request_id=request_id, profile=profile, old_pid=old_pid,
+                    origin=origin, state="failed",
+                    reason="handoff_active_lock_failed",
+                )
         else:
             # Lease disappeared (Worker crashed?) — release active.lock
             lock.release()
+            append_restart_log(
+                request_id=request_id, profile=profile, old_pid=old_pid,
+                origin=origin, state="failed",
+                reason="lease_data_missing_for_handoff",
+            )
     else:
         # Worker failed to claim — lock stays (P1-1 recovery will handle it)
         append_restart_log(
@@ -272,10 +284,12 @@ def schedule_restart_handoff(
 
     result: dict[str, Any] = {
         "request_id": request_id,
-        "scheduled": True,
+        "scheduled": handoff_succeeded,
         "detail": f"Restart scheduled (worker PID: {worker_pid})",
         "old_pid": old_pid,
     }
+    if not handoff_succeeded:
+        result["detail"] = "Restart handoff failed — worker may not have started"
 
     # If external CLI with wait, poll for completion
     if wait:

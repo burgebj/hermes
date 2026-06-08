@@ -199,6 +199,22 @@ def _run_restart_transaction(
 
         # --- Phase 4: Verify ---
         _verify_new_gateway(profile, request_id, old_pid, new_pid, origin, launcher)
+    except Exception as exc:
+        # P0-1: Winner must write terminal failed status on exception
+        if lease_owned:
+            from hermes_cli.gateway_restart_state import (
+                write_status as _ws,
+                append_restart_log as _arl,
+            )
+            try:
+                _ws(profile, "failed", request_id=request_id,
+                    error=str(exc))
+                _arl(request_id=request_id, profile=profile,
+                     old_pid=old_pid, origin=origin, state="failed",
+                     error=str(exc))
+            except Exception:
+                pass
+        raise
     finally:
         # P1-2: Order matters — release active.lock first, then lease, then intent
         # All operations are owner-scoped.
@@ -529,6 +545,12 @@ def _start_new_gateway(
                 origin=origin, state="starting_task",
                 error=f"schtasks_run_exception: {e}",
             )
+            # P0-2: schtasks exception → fail closed, no direct spawn
+            raise RuntimeError(
+                f"schtasks /Run exception: {e}.  "
+                "Cannot determine if Scheduled Task was accepted. "
+                "Will NOT direct-spawn to avoid dual gateway."
+            )
 
         if code == 0:
             new_pid = _wait_for_launch_evidence(old_pid, timeout=15.0)
@@ -551,13 +573,19 @@ def _start_new_gateway(
                 "Will NOT direct-spawn to avoid dual gateway."
             )
 
+        # Non-zero code from schtasks → fail closed
         append_restart_log(
             request_id=request_id, profile=profile, old_pid=old_pid,
-            origin=origin, state="starting_task",
-            reason=f"schtasks_run_code={code}, falling through to direct spawn",
+            origin=origin, state="failed",
+            error=f"schtasks_run_code={code}, will NOT direct-spawn",
+        )
+        raise RuntimeError(
+            f"schtasks /Run returned code {code}.  "
+            "Cannot determine if Scheduled Task was accepted. "
+            "Will NOT direct-spawn to avoid dual gateway."
         )
 
-    # Direct detached spawn (only when schtasks not installed or schtasks failed)
+    # Direct detached spawn (only when schtasks not installed)
     write_status(profile, "starting_direct_fallback", request_id=request_id)
     append_restart_log(
         request_id=request_id, profile=profile, old_pid=old_pid,

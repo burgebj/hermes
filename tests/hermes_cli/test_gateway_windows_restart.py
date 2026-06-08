@@ -114,22 +114,36 @@ class TestScheduleRestartHandoff:
         }):
             import hermes_cli.gateway_windows_restart as mod
 
-            # Override module-level functions directly on the module object
-            mod.preflight_check = lambda **kw: (True, "ok")
-            mod._spawn_worker = lambda intent, profile, request_id: 5678
-            mod._wait_for_worker_claim = lambda profile, request_id, timeout_s=10.0: True
-            mod._read_lease_data = lambda profile, request_id: {
-                "request_id": request_id, "owner_token": "lease-token",
-                "worker_pid": 5678,
-            }
-            mod._wait_for_completion = lambda profile, timeout_s, request_id="": (True, "completed")
-            mod._read_final_status = lambda profile, request_id: {
-                "state": "completed", "new_pid": 5678, "launcher": "direct_spawn",
-            }
+            # Save originals to restore after test
+            orig_preflight = mod.preflight_check
+            orig_spawn = mod._spawn_worker
+            orig_wait_claim = mod._wait_for_worker_claim
+            orig_read_lease = mod._read_lease_data
+            orig_wait_comp = mod._wait_for_completion
+            orig_read_final = mod._read_final_status
+            try:
+                mod.preflight_check = lambda **kw: (True, "ok")
+                mod._spawn_worker = lambda intent, profile, request_id: 5678
+                mod._wait_for_worker_claim = lambda profile, request_id, timeout_s=10.0: True
+                mod._read_lease_data = lambda profile, request_id: {
+                    "request_id": request_id, "owner_token": "lease-token",
+                    "worker_pid": 5678,
+                }
+                mod._wait_for_completion = lambda profile, timeout_s, request_id="": (True, "completed")
+                mod._read_final_status = lambda profile, request_id: {
+                    "state": "completed", "new_pid": 5678, "launcher": "direct_spawn",
+                }
 
-            result = mod.schedule_restart_handoff(origin="test", wait=True)
-            assert "request_id" in result
-            assert result["scheduled"] is True
+                result = mod.schedule_restart_handoff(origin="test", wait=True)
+                assert "request_id" in result
+                assert result["scheduled"] is True
+            finally:
+                mod.preflight_check = orig_preflight
+                mod._spawn_worker = orig_spawn
+                mod._wait_for_worker_claim = orig_wait_claim
+                mod._read_lease_data = orig_read_lease
+                mod._wait_for_completion = orig_wait_comp
+                mod._read_final_status = orig_read_final
 
     def test_intermediate_states_do_not_report_success(self, coordinator_env, monkeypatch):
         """P1-2: intermediate states like 'draining' should not be treated as success."""
@@ -161,23 +175,37 @@ class TestScheduleRestartHandoff:
         }):
             import hermes_cli.gateway_windows_restart as mod
 
-            mod.preflight_check = lambda **kw: (True, "ok")
-            mod._spawn_worker = lambda intent, profile, request_id: 5678
-            mod._wait_for_worker_claim = lambda profile, request_id, timeout_s=10.0: True
-            mod._read_lease_data = lambda profile, request_id: {
-                "request_id": request_id, "owner_token": "lease-token",
-                "worker_pid": 5678,
-            }
-            # _wait_for_completion returns False with intermediate state
-            mod._wait_for_completion = lambda profile, timeout_s, request_id="": (False, "draining")
-            # _read_final_status returns an intermediate state
-            mod._read_final_status = lambda profile, request_id: {"state": "draining"}
+            orig_preflight = mod.preflight_check
+            orig_spawn = mod._spawn_worker
+            orig_wait_claim = mod._wait_for_worker_claim
+            orig_read_lease = mod._read_lease_data
+            orig_wait_comp = mod._wait_for_completion
+            orig_read_final = mod._read_final_status
+            try:
+                mod.preflight_check = lambda **kw: (True, "ok")
+                mod._spawn_worker = lambda intent, profile, request_id: 5678
+                mod._wait_for_worker_claim = lambda profile, request_id, timeout_s=10.0: True
+                mod._read_lease_data = lambda profile, request_id: {
+                    "request_id": request_id, "owner_token": "lease-token",
+                    "worker_pid": 5678,
+                }
+                # _wait_for_completion returns False with intermediate state
+                mod._wait_for_completion = lambda profile, timeout_s, request_id="": (False, "draining")
+                # _read_final_status returns an intermediate state
+                mod._read_final_status = lambda profile, request_id: {"state": "draining"}
 
-            result = mod.schedule_restart_handoff(origin="test", wait=True)
-            assert result["scheduled"] is True
-            assert result["completed"] is False
-            # Intermediate state should not produce a success message
-            assert "successfully" not in result["detail"].lower()
+                result = mod.schedule_restart_handoff(origin="test", wait=True)
+                assert result["scheduled"] is True
+                assert result["completed"] is False
+                # Intermediate state should not produce a success message
+                assert "successfully" not in result["detail"].lower()
+            finally:
+                mod.preflight_check = orig_preflight
+                mod._spawn_worker = orig_spawn
+                mod._wait_for_worker_claim = orig_wait_claim
+                mod._read_lease_data = orig_read_lease
+                mod._wait_for_completion = orig_wait_comp
+                mod._read_final_status = orig_read_final
 
 
 class TestWorkerSpawn:
@@ -217,3 +245,130 @@ class TestWorkerSpawn:
             assert "default" in captured_argv
             assert "--request-id" in captured_argv
             assert "test-rid" in captured_argv
+
+
+# ---------------------------------------------------------------------------
+# P0-3: Coordinator init exception releases active.lock
+# ---------------------------------------------------------------------------
+
+class TestCoordinatorInitFailure:
+    """P0-3: Coordinator initialization failure releases active.lock."""
+
+    def test_create_intent_failure_releases_lock(self, coordinator_env, monkeypatch):
+        """create_intent() OSError → active.lock released."""
+        from hermes_cli.gateway_restart_state import RestartLock, lock_path
+        import hermes_cli.gateway_windows_restart as mod
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        mod.preflight_check = lambda **kw: (True, "ok")
+
+        import hermes_cli.gateway_restart_state as state_mod
+        monkeypatch.setattr(state_mod, "create_intent",
+                          MagicMock(side_effect=OSError("disk full")))
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda: 1234)
+        monkeypatch.setattr("hermes_cli.gateway_windows.get_task_name", lambda: "Hermes_Gateway")
+
+        result = mod.schedule_restart_handoff(origin="test", wait=False)
+        assert result["scheduled"] is False
+        assert not lock_path("default").exists()
+
+    def test_write_status_failure_releases_lock(self, coordinator_env, monkeypatch):
+        """write_status("scheduled") OSError → active.lock released."""
+        from hermes_cli.gateway_restart_state import lock_path
+        import hermes_cli.gateway_windows_restart as mod
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        mod.preflight_check = lambda **kw: (True, "ok")
+
+        call_count = [0]
+        def failing_write_status(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:  # First call is "scheduled"
+                raise OSError("disk full")
+
+        import hermes_cli.gateway_restart_state as state_mod
+        monkeypatch.setattr(state_mod, "write_status", failing_write_status)
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda: 1234)
+        monkeypatch.setattr("hermes_cli.gateway_windows.get_task_name", lambda: "Hermes_Gateway")
+
+        result = mod.schedule_restart_handoff(origin="test", wait=False)
+        assert result["scheduled"] is False
+        assert not lock_path("default").exists()
+
+    def test_spawn_worker_failure_releases_lock(self, coordinator_env, monkeypatch):
+        """_spawn_worker() exception → active.lock released + cleanup."""
+        from hermes_cli.gateway_restart_state import lock_path
+        import hermes_cli.gateway_windows_restart as mod
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        mod.preflight_check = lambda **kw: (True, "ok")
+        mod._spawn_worker = MagicMock(side_effect=OSError("spawn failed"))
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda: 1234)
+        monkeypatch.setattr("hermes_cli.gateway_windows.get_task_name", lambda: "Hermes_Gateway")
+
+        result = mod.schedule_restart_handoff(origin="test", wait=False)
+        assert result["scheduled"] is False
+        assert not lock_path("default").exists()
+
+
+# ---------------------------------------------------------------------------
+# P1-3: Handoff failure returns clear status
+# ---------------------------------------------------------------------------
+
+class TestHandoffFailure:
+    """P1-3: handoff failure returns clear status."""
+
+    def test_handoff_failure_returns_not_scheduled(self, coordinator_env, monkeypatch):
+        """handoff_active_lock() returns False → scheduled=False."""
+        import hermes_cli.gateway_windows_restart as mod
+        import hermes_cli.gateway_restart_state as state_mod
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        orig_preflight = mod.preflight_check
+        orig_spawn = mod._spawn_worker
+        orig_wait_claim = mod._wait_for_worker_claim
+        orig_read_lease = mod._read_lease_data
+        try:
+            mod.preflight_check = lambda **kw: (True, "ok")
+            mod._spawn_worker = lambda *a, **kw: 5678
+            mod._wait_for_worker_claim = lambda *a, **kw: True
+            mod._read_lease_data = lambda *a, **kw: {"worker_pid": 5678, "owner_token": "bad"}
+            monkeypatch.setattr("gateway.status.get_running_pid", lambda: 1234)
+            monkeypatch.setattr("hermes_cli.gateway_windows.get_task_name", lambda: "Hermes_Gateway")
+
+            # Make handoff_active_lock return False
+            monkeypatch.setattr(state_mod.RestartLock, "handoff_active_lock", lambda *a, **kw: False)
+
+            result = mod.schedule_restart_handoff(origin="test", wait=False)
+            assert result["scheduled"] is False
+            assert "handoff" in result.get("detail", "").lower()
+        finally:
+            mod.preflight_check = orig_preflight
+            mod._spawn_worker = orig_spawn
+            mod._wait_for_worker_claim = orig_wait_claim
+            mod._read_lease_data = orig_read_lease
+
+    def test_lease_disappears_handoff_failure(self, coordinator_env, monkeypatch):
+        """lease.json disappears → no handoff, scheduled=False."""
+        import hermes_cli.gateway_windows_restart as mod
+
+        monkeypatch.setattr(sys, "platform", "win32")
+        orig_preflight = mod.preflight_check
+        orig_spawn = mod._spawn_worker
+        orig_wait_claim = mod._wait_for_worker_claim
+        orig_read_lease = mod._read_lease_data
+        try:
+            mod.preflight_check = lambda **kw: (True, "ok")
+            mod._spawn_worker = lambda *a, **kw: 5678
+            mod._wait_for_worker_claim = lambda *a, **kw: True
+            mod._read_lease_data = lambda *a, **kw: None  # lease disappeared
+            monkeypatch.setattr("gateway.status.get_running_pid", lambda: 1234)
+            monkeypatch.setattr("hermes_cli.gateway_windows.get_task_name", lambda: "Hermes_Gateway")
+
+            result = mod.schedule_restart_handoff(origin="test", wait=False)
+            assert result["scheduled"] is False
+        finally:
+            mod.preflight_check = orig_preflight
+            mod._spawn_worker = orig_spawn
+            mod._wait_for_worker_claim = orig_wait_claim
+            mod._read_lease_data = orig_read_lease

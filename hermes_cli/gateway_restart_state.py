@@ -248,16 +248,18 @@ def sanitize_intent(profile: str, request_id: str,
         return False
     # Verify ownership via lease
     lp = lease_json_path(profile, request_id)
-    if lp.exists():
-        try:
-            lease_data = json.loads(lp.read_text(encoding="utf-8"))
-            if isinstance(lease_data, dict):
-                if lease_data.get("owner_token") != owner_token:
-                    return False
-                if lease_data.get("worker_pid") != worker_pid:
-                    return False
-        except (OSError, json.JSONDecodeError):
+    if not lp.exists():
+        return False
+    try:
+        lease_data = json.loads(lp.read_text(encoding="utf-8"))
+        if not isinstance(lease_data, dict):
             return False
+        if lease_data.get("owner_token") != owner_token:
+            return False
+        if lease_data.get("worker_pid") != worker_pid:
+            return False
+    except (OSError, json.JSONDecodeError):
+        return False
     # Clear nonce
     ip = intent_path(profile, request_id)
     try:
@@ -293,9 +295,33 @@ def gc_expired_request_dirs(profile: str = "default",
             # Never delete the active request
             if d.name == active_request_id:
                 continue
-            # Skip if lease still exists (worker still running)
-            if (d / "claim.lock").exists() or (d / "lease.json").exists():
+            # Check for orphan claim.lock
+            clp = d / "claim.lock"
+            ljp = d / "lease.json"
+            if ljp.exists():
+                # Active lease — skip
                 continue
+            if clp.exists():
+                # Check if claim.lock is orphaned
+                try:
+                    import json as _json
+                    cl_data = _json.loads(clp.read_text(encoding="utf-8"))
+                    if isinstance(cl_data, dict):
+                        cl_age = now - cl_data.get("created_at", d.stat().st_mtime)
+                        cl_pid = cl_data.get("worker_pid", 0)
+                        # Only GC if claim is old enough AND worker is dead
+                        if cl_age < max_age_s:
+                            continue
+                        if cl_pid > 0 and _pid_exists(cl_pid):
+                            continue
+                    # Orphaned claim.lock — allow GC
+                except (OSError, ValueError, json.JSONDecodeError):
+                    # Can't parse claim.lock — check mtime
+                    try:
+                        if now - d.stat().st_mtime < max_age_s:
+                            continue
+                    except OSError:
+                        continue
             sp = d / "status.json"
             if not sp.exists():
                 # No status = stale/orphaned, check age by directory mtime
@@ -583,10 +609,18 @@ class RestartLock:
         except (OSError, json.JSONDecodeError):
             return False
 
-        # Phase 1: O_EXCL claim.lock (race barrier)
+        # Phase 1: O_EXCL claim.lock with metadata
+        claim_data = {
+            "request_id": request_id,
+            "worker_pid": os.getpid(),
+            "created_at": time.time(),
+        }
         try:
             fd = os.open(str(clp), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.close(fd)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(claim_data, f)
+                f.flush()
+                os.fsync(f.fileno())
         except FileExistsError:
             return False
         except OSError:
@@ -615,6 +649,12 @@ class RestartLock:
         try:
             _atomic_write_json(ljp, lease_data)
         except OSError:
+            # Rollback: restore intent state to scheduled
+            try:
+                update_intent_state(self._profile(), request_id, "scheduled",
+                                   expected_state="claimed")
+            except Exception:
+                pass
             try:
                 clp.unlink(missing_ok=True)
             except OSError:

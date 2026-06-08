@@ -532,12 +532,12 @@ class TestWorkerStatusFallback:
             main()
         assert exc_info.value.code == 1
 
-        # P0-4: main() no longer writes "failed" status on exception.
-        # The last status written by the worker ("preflight_ok") is preserved.
+        # P0-1: _run_restart_transaction now writes "failed" status on exception
         from hermes_cli.gateway_restart_state import read_status
         status = read_status("default", request_id)
         assert status is not None
-        assert status["state"] == "preflight_ok"
+        assert status["state"] == "failed"
+        assert "drain exploded" in status.get("error", "")
 
     def test_status_ignores_old_request_id(self, worker_env, monkeypatch):
         """Coordinator _wait_for_completion returns False when status has
@@ -664,12 +664,13 @@ class TestWorkerStatusFallback:
         with pytest.raises(SystemExit):
             main()
 
-        # P0-4: main() no longer writes "failed" status on exception.
-        # The last status ("preflight_ok") has the correct request_id.
+        # P0-1: _run_restart_transaction now writes "failed" status on exception.
+        # The status has the correct request_id.
         from hermes_cli.gateway_restart_state import read_status
         status = read_status("default", request_id)
         assert status is not None
         assert status["request_id"] == request_id
+        assert status["state"] == "failed"
 
     def test_coordinator_completed_with_matching_request_id(self, worker_env, monkeypatch):
         """Coordinator _wait_for_completion returns True when status
@@ -843,7 +844,8 @@ class TestTransactionIsolation:
         result = schedule_restart_handoff(
             origin="test", profile="default", wait=False
         )
-        assert result["scheduled"] is True
+        # P1-3: handoff failure → scheduled=False (worker didn't claim)
+        assert result["scheduled"] is False
 
         request_id = result["request_id"]
 
@@ -910,9 +912,8 @@ class TestTransactionIsolation:
         result = schedule_restart_handoff(
             origin="test", profile="default", wait=False
         )
-        assert result["scheduled"] is True
-
-        # Lock should still be on disk (coordinator preserved it)
+        # P1-3: handoff failure → scheduled=False (worker didn't claim)
+        assert result["scheduled"] is False
         lock_data = self._read_lock_from_disk(worker_env)
         assert lock_data is not None, "Lock file should still exist after claim timeout"
 
@@ -1004,11 +1005,14 @@ class TestTransactionIsolation:
 
     def test_wait_claim_ignores_old_request_id(self, worker_env, monkeypatch):
         """Write a lock file with request_id='old' and claimed_at set.
-        Call _wait_for_worker_claim(profile, request_id='new', timeout_s=1).
+        Call _wait_for_worker_claim(profile, request_id='unique-new-claim-test', timeout_s=1).
         Assert returns False."""
         from hermes_cli.gateway_windows_restart import _wait_for_worker_claim
-        from hermes_cli.gateway_restart_state import lock_path
+        from hermes_cli.gateway_restart_state import lock_path, lease_json_path
         import time as _time
+
+        # Use a unique request_id to avoid test pollution
+        unique_rid = "unique-new-claim-" + uuid.uuid4().hex
 
         # Write a lock file with request_id="old" and claimed_at
         lp = lock_path("default")
@@ -1025,8 +1029,12 @@ class TestTransactionIsolation:
         }
         lp.write_text(json.dumps(lock_data, indent=2), encoding="utf-8")
 
+        # Verify the unique lease path doesn't exist
+        ljp = lease_json_path("default", unique_rid)
+        assert not ljp.exists(), f"Lease path {ljp} should not exist yet"
+
         # Wait for a DIFFERENT request_id — should NOT match
-        result = _wait_for_worker_claim("default", "new", timeout_s=1.0)
+        result = _wait_for_worker_claim("default", unique_rid, timeout_s=1.0)
         assert result is False
 
     def test_intermediate_state_not_completed(self, worker_env, monkeypatch):
@@ -1132,29 +1140,18 @@ class TestTransactionIsolation:
     def test_wait_claim_matches_only_when_request_id_and_unclaimed(
         self, worker_env, monkeypatch
     ):
-        """_wait_for_worker_claim should return True only when both
-        request_id matches AND claimed_at is set."""
+        """_wait_for_worker_claim should return True only when
+        lease.json exists for the given request_id."""
         from hermes_cli.gateway_windows_restart import _wait_for_worker_claim
-        from hermes_cli.gateway_restart_state import lock_path
-        import time as _time
+        from hermes_cli.gateway_restart_state import lease_json_path
 
-        # Lock with matching request_id but NO claimed_at
-        lp = lock_path("default")
-        lp.parent.mkdir(parents=True, exist_ok=True)
-        lock_data = {
-            "schema_version": 1,
-            "request_id": "req-match",
-            "owner_token": "tok",
-            "owner_pid": 9999,
-            "profile": "default",
-            "created_at": _time.time(),
-            "expires_at": _time.time() + 300,
-            # NO claimed_at
-        }
-        lp.write_text(json.dumps(lock_data, indent=2), encoding="utf-8")
+        # Use a unique request_id — no lease.json should exist for it
+        unique_rid = "unique-req-match-" + uuid.uuid4().hex
+        ljp = lease_json_path("default", unique_rid)
+        assert not ljp.exists()
 
-        # Should NOT match (no claimed_at)
-        result = _wait_for_worker_claim("default", "req-match", timeout_s=1.0)
+        # Should NOT match (no lease.json)
+        result = _wait_for_worker_claim("default", unique_rid, timeout_s=1.0)
         assert result is False
 
 
@@ -1384,15 +1381,12 @@ class TestClaimThenWriteStatusError:
                 1234, "test", "/fake/hermes", "Hermes_Gateway",
             )
 
-        # P0-4: After the transaction, the request directory is preserved
-        # (Worker uses release_lease + sanitize_intent, NOT cleanup_intent).
-        # The last status before the crash ("preflight_ok") is retained
-        # for the Coordinator to read.
+        # P0-1: After the transaction, the exception handler writes "failed" status
         from hermes_cli.gateway_restart_state import read_status
         status = read_status("default", request_id)
         assert status is not None, "Terminal status must be preserved"
-        assert status["state"] == "preflight_ok", (
-            "Last status before crash should be preserved"
+        assert status["state"] == "failed", (
+            "P0-1: Winner exception must write terminal failed status"
         )
 
         # Lease must be released
@@ -2032,3 +2026,136 @@ class TestHandoffCleanup:
             disk_intent, "default", request_id, nonce,
             1234, "test", "/fake/hermes", "Hermes_Gateway",
         )
+
+
+# ===========================================================================
+# P0-1: Winner writes terminal failed on exception
+# ===========================================================================
+
+class TestWinnerWritesTerminalFailed:
+    def test_port_release_exception_writes_failed(self, worker_env, monkeypatch):
+        """P0-1: Winner exception in _wait_for_port_release → status.json.state == failed."""
+        from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        from hermes_cli.gateway_restart_state import create_intent, read_status, RestartLock
+
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        rid = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        # Pre-create a lock and claim lease
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_handoff", lambda *a, **kw: True)
+        monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._drain_and_stop", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._detect_gateway_port", lambda: 8080)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_port_release",
+                          MagicMock(side_effect=RuntimeError("port stuck")))
+
+        with pytest.raises(RuntimeError, match="port stuck"):
+            _run_restart_transaction(disk_intent, "default", rid, nonce, 1234, "test", "/fake/hermes", "Hermes_Gateway")
+
+        status = read_status("default", rid)
+        assert status is not None
+        assert status["state"] == "failed"
+        assert "port stuck" in status.get("error", "")
+
+    def test_start_gateway_exception_writes_failed(self, worker_env, monkeypatch):
+        """P0-1: Winner exception in _start_new_gateway → status.json.state == failed."""
+        from hermes_cli.gateway_windows_restart_worker import _run_restart_transaction
+        from hermes_cli.gateway_restart_state import create_intent, read_status, RestartLock
+
+        disk_intent = create_intent(profile="default", target_pid=1234, origin="test")
+        rid = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        # Pre-create a lock and claim lease
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_handoff", lambda *a, **kw: True)
+        monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._drain_and_stop", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._detect_gateway_port", lambda: 0)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._start_new_gateway",
+                          MagicMock(side_effect=RuntimeError("spawn failed")))
+
+        with pytest.raises(RuntimeError, match="spawn failed"):
+            _run_restart_transaction(disk_intent, "default", rid, nonce, 1234, "test", "/fake/hermes", "Hermes_Gateway")
+
+        status = read_status("default", rid)
+        assert status is not None
+        assert status["state"] == "failed"
+
+
+# ===========================================================================
+# P0-2: schtasks fail-closed strict
+# ===========================================================================
+
+class TestSchtasksFailClosedStrict:
+    def test_schtasks_timeout_no_direct_spawn(self, worker_env, monkeypatch):
+        """P0-2: schtasks /Run timeout → no direct spawn."""
+        from hermes_cli.gateway_windows_restart_worker import _start_new_gateway
+        from hermes_cli.gateway_restart_state import create_intent
+        from unittest.mock import MagicMock
+        import sys
+
+        disk_intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = disk_intent["request_id"]
+
+        mock_gw_windows = MagicMock()
+        mock_gw_windows.is_task_registered = MagicMock(return_value=True)
+        mock_gw_windows._exec_schtasks = MagicMock(return_value=(124, "", ""))  # timeout
+        monkeypatch.setitem(sys.modules, "hermes_cli.gateway_windows", mock_gw_windows)
+
+        direct_spawn_mock = MagicMock(return_value=9999)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._direct_spawn_gateway", direct_spawn_mock)
+
+        with pytest.raises(RuntimeError, match="124|Will NOT direct-spawn"):
+            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway")
+        direct_spawn_mock.assert_not_called()
+
+    def test_schtasks_exception_no_direct_spawn(self, worker_env, monkeypatch):
+        """P0-2: _exec_schtasks() throws → no direct spawn."""
+        from hermes_cli.gateway_windows_restart_worker import _start_new_gateway
+        from hermes_cli.gateway_restart_state import create_intent
+        from unittest.mock import MagicMock
+        import sys
+
+        disk_intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = disk_intent["request_id"]
+
+        mock_gw_windows = MagicMock()
+        mock_gw_windows.is_task_registered = MagicMock(return_value=True)
+        mock_gw_windows._exec_schtasks = MagicMock(side_effect=TimeoutError("schtasks hung"))
+        monkeypatch.setitem(sys.modules, "hermes_cli.gateway_windows", mock_gw_windows)
+
+        direct_spawn_mock = MagicMock(return_value=9999)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._direct_spawn_gateway", direct_spawn_mock)
+
+        with pytest.raises(RuntimeError, match="exception|Will NOT direct-spawn"):
+            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway")
+        direct_spawn_mock.assert_not_called()
+
+    def test_schtasks_ambiguous_nonzero_fails_closed(self, worker_env, monkeypatch):
+        """P0-2: schtasks /Run ambiguous non-zero → fail closed."""
+        from hermes_cli.gateway_windows_restart_worker import _start_new_gateway
+        from hermes_cli.gateway_restart_state import create_intent
+        from unittest.mock import MagicMock
+        import sys
+
+        disk_intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = disk_intent["request_id"]
+
+        mock_gw_windows = MagicMock()
+        mock_gw_windows.is_task_registered = MagicMock(return_value=True)
+        mock_gw_windows._exec_schtasks = MagicMock(return_value=(1, "access denied", ""))
+        monkeypatch.setitem(sys.modules, "hermes_cli.gateway_windows", mock_gw_windows)
+
+        direct_spawn_mock = MagicMock(return_value=9999)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._direct_spawn_gateway", direct_spawn_mock)
+
+        with pytest.raises(RuntimeError, match="Will NOT direct-spawn"):
+            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway")
+        direct_spawn_mock.assert_not_called()
