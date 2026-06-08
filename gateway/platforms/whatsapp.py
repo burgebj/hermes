@@ -27,11 +27,55 @@ import subprocess
 
 _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, NamedTuple
 
 from hermes_constants import get_hermes_dir
 
 logger = logging.getLogger(__name__)
+
+_WHATSAPP_CONNECT_TIMEOUT_DEFAULT_SECS = 30.0
+_WHATSAPP_CONNECT_TIMEOUT_GATEWAY_GRACE_SECS = 5.0
+
+
+class ConnectWaitBudget(NamedTuple):
+    total_secs: float
+    http_ready_attempts: int
+    whatsapp_ready_attempts: int
+
+
+def whatsapp_connect_timeout_secs() -> float:
+    """Return the WhatsApp bridge connect timeout budget in seconds."""
+    raw = os.getenv("WHATSAPP_CONNECT_TIMEOUT", "").strip()
+    if raw:
+        try:
+            timeout = float(raw)
+        except ValueError:
+            logger.warning("Ignoring invalid WHATSAPP_CONNECT_TIMEOUT=%r", raw)
+        else:
+            if timeout > 0:
+                return timeout
+            logger.warning("Ignoring non-positive WHATSAPP_CONNECT_TIMEOUT=%r", raw)
+    return _WHATSAPP_CONNECT_TIMEOUT_DEFAULT_SECS
+
+
+def whatsapp_gateway_connect_timeout_secs() -> float:
+    """Return the gateway wait_for timeout for WhatsApp connect()."""
+    return whatsapp_connect_timeout_secs() + _WHATSAPP_CONNECT_TIMEOUT_GATEWAY_GRACE_SECS
+
+
+def _connect_wait_budget() -> ConnectWaitBudget:
+    """Split the WhatsApp connect timeout across bridge and login phases."""
+    total_secs = whatsapp_connect_timeout_secs()
+    per_phase_attempts = max(1, int(round(total_secs / 2)))
+    return ConnectWaitBudget(
+        total_secs=total_secs,
+        http_ready_attempts=per_phase_attempts,
+        whatsapp_ready_attempts=per_phase_attempts,
+    )
+
+
+def _format_timeout_secs(seconds: float) -> str:
+    return f"{seconds:g}s"
 
 
 def _kill_port_process(port: int) -> None:
@@ -676,12 +720,13 @@ class WhatsAppAdapter(BasePlatformAdapter):
             _write_bridge_pidfile(self._session_path, self._bridge_process.pid)
             
             # Wait for the bridge to connect to WhatsApp.
-            # Phase 1: wait for the HTTP server to come up (up to 15s).
-            # Phase 2: wait for WhatsApp status: connected (up to 15s more).
+            # Phase 1: wait for the HTTP server to come up.
+            # Phase 2: wait for WhatsApp status: connected.
+            connect_budget = _connect_wait_budget()
             import aiohttp
             http_ready = False
             data = {}
-            for attempt in range(15):
+            for attempt in range(connect_budget.http_ready_attempts):
                 await asyncio.sleep(1)
                 if self._bridge_process.poll() is not None:
                     print(f"[{self.name}] Bridge process died (exit code {self._bridge_process.returncode})")
@@ -704,7 +749,10 @@ class WhatsAppAdapter(BasePlatformAdapter):
                     continue
 
             if not http_ready:
-                print(f"[{self.name}] Bridge HTTP server did not start in 15s")
+                print(
+                    f"[{self.name}] Bridge HTTP server did not start in "
+                    f"{_format_timeout_secs(connect_budget.http_ready_attempts)}"
+                )
                 print(f"[{self.name}] Check log: {self._bridge_log}")
                 self._close_bridge_log()
                 return False
@@ -713,7 +761,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
             # Give it more time to authenticate with saved credentials.
             if data.get("status") != "connected":
                 print(f"[{self.name}] Bridge HTTP ready, waiting for WhatsApp connection...")
-                for attempt in range(15):
+                for attempt in range(connect_budget.whatsapp_ready_attempts):
                     await asyncio.sleep(1)
                     if self._bridge_process.poll() is not None:
                         print(f"[{self.name}] Bridge process died during connection")
@@ -736,7 +784,10 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 else:
                     # Still not connected — warn but proceed (bridge may
                     # auto-reconnect later, e.g. after a code 515 restart).
-                    print(f"[{self.name}] ⚠ WhatsApp not connected after 30s")
+                    print(
+                        f"[{self.name}] ⚠ WhatsApp not connected after "
+                        f"{_format_timeout_secs(connect_budget.total_secs)}"
+                    )
                     print(f"[{self.name}]   Bridge log: {self._bridge_log}")
                     print(f"[{self.name}]   If session expired, re-pair: hermes whatsapp")
             

@@ -2369,8 +2369,13 @@ class GatewayRunner:
                 return max(0.0, timeout)
         return _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT
 
-    def _platform_connect_timeout_secs(self) -> float:
+    def _platform_connect_timeout_secs(self, platform: Optional[Platform] = None) -> float:
         """Return the per-platform connect timeout used during startup/retry."""
+        if platform == Platform.WHATSAPP and os.getenv("WHATSAPP_CONNECT_TIMEOUT", "").strip():
+            from gateway.platforms.whatsapp import whatsapp_gateway_connect_timeout_secs
+
+            return whatsapp_gateway_connect_timeout_secs()
+
         raw = os.getenv("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
         if raw:
             try:
@@ -2386,7 +2391,7 @@ class GatewayRunner:
 
     async def _connect_adapter_with_timeout(self, adapter, platform) -> bool:
         """Connect an adapter without allowing one platform to block others."""
-        timeout = self._platform_connect_timeout_secs()
+        timeout = self._platform_connect_timeout_secs(platform)
         if timeout <= 0:
             return await adapter.connect()
         try:

@@ -150,6 +150,15 @@ class TestStartupPlatformIsolation:
         with pytest.raises(TimeoutError, match="telegram connect timed out"):
             await runner._connect_adapter_with_timeout(adapter, Platform.TELEGRAM)
 
+    def test_whatsapp_connect_timeout_env_overrides_global_timeout(self, monkeypatch):
+        """WhatsApp can extend cold-start connect timeout without affecting other platforms."""
+        runner = _make_runner()
+        monkeypatch.setenv("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "30")
+        monkeypatch.setenv("WHATSAPP_CONNECT_TIMEOUT", "60")
+
+        assert runner._platform_connect_timeout_secs(Platform.WHATSAPP) == 65.0
+        assert runner._platform_connect_timeout_secs(Platform.TELEGRAM) == 30.0
+
 
 class TestStartupFailureQueuing:
     """Verify that failed platforms are queued during startup."""

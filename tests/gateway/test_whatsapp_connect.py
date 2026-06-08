@@ -104,6 +104,34 @@ def _connect_patches(mock_proc, mock_fh, mock_client_cls=None):
 
 
 # ---------------------------------------------------------------------------
+# Configurable connect timeout
+# ---------------------------------------------------------------------------
+
+class TestConnectTimeoutConfig:
+    def test_connect_timeout_default_preserves_15s_per_phase(self, monkeypatch):
+        from gateway.platforms.whatsapp import _connect_wait_budget
+
+        monkeypatch.delenv("WHATSAPP_CONNECT_TIMEOUT", raising=False)
+
+        budget = _connect_wait_budget()
+
+        assert budget.total_secs == 30.0
+        assert budget.http_ready_attempts == 15
+        assert budget.whatsapp_ready_attempts == 15
+
+    def test_connect_timeout_env_extends_each_phase(self, monkeypatch):
+        from gateway.platforms.whatsapp import _connect_wait_budget
+
+        monkeypatch.setenv("WHATSAPP_CONNECT_TIMEOUT", "60")
+
+        budget = _connect_wait_budget()
+
+        assert budget.total_secs == 60.0
+        assert budget.http_ready_attempts == 30
+        assert budget.whatsapp_ready_attempts == 30
+
+
+# ---------------------------------------------------------------------------
 # _close_bridge_log() unit tests
 # ---------------------------------------------------------------------------
 
