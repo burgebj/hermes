@@ -176,6 +176,44 @@ class TestBusyInputMode:
         assert cli._pending_input.empty()
 
 
+class TestShowConfig:
+    def test_show_config_uses_loaded_terminal_timeout(self, capsys):
+        cli = _make_cli(
+            env_overrides={"TERMINAL_TIMEOUT": "60"},
+            config_overrides={
+                "terminal": {
+                    "env_type": "docker",
+                    "cwd": "/opt/hermes",
+                    "timeout": 3600,
+                }
+            },
+        )
+
+        cli.show_config()
+
+        output = capsys.readouterr().out
+        assert "Environment:  docker" in output
+        assert "Working Dir:  /opt/hermes" in output
+        assert "Timeout:      3600s" in output
+
+    def test_show_config_prefers_backend_over_env_type(self, capsys):
+        cli = _make_cli(
+            config_overrides={
+                "terminal": {
+                    "backend": "docker",
+                    "env_type": "local",
+                    "timeout": 120,
+                }
+            },
+        )
+
+        cli.show_config()
+
+        output = capsys.readouterr().out
+        assert "Environment:  docker" in output
+        assert "Timeout:      120s" in output
+
+
 class TestPromptToolkitTerminalCompatibility:
     def test_lf_enter_binds_to_submit_handler_posix(self):
         """Some thin PTYs deliver Enter as LF/c-j instead of CR/enter.
