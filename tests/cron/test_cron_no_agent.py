@@ -280,6 +280,88 @@ def test_run_job_no_agent_never_invokes_aiagent(hermes_env):
     ai_mock.assert_not_called()
 
 
+def test_run_job_no_agent_closes_session_on_success(hermes_env):
+    """no_agent jobs must end their session row, not leave zombies (issue #41935)."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job
+    from hermes_state import SessionDB
+
+    script_path = hermes_env / "scripts" / "ok.sh"
+    script_path.write_text("#!/bin/bash\necho 'hello'\n")
+
+    job = create_job(
+        prompt=None, schedule="every 5m", script="ok.sh",
+        no_agent=True, deliver="local",
+    )
+    success, doc, final_response, error = run_job(job)
+    assert success is True
+
+    # Verify the session row was created and closed.
+    sdb = SessionDB()
+    open_rows = sdb._conn.execute(
+        "SELECT id, ended_at, end_reason FROM sessions WHERE source = 'cron'"
+    ).fetchall()
+    assert len(open_rows) >= 1, "no_agent job should create at least one session row"
+    row = open_rows[-1]
+    assert row["ended_at"] is not None, "session should be ended (ended_at set)"
+    assert row["end_reason"] == "cron_complete"
+    sdb.close()
+
+
+def test_run_job_no_agent_closes_session_on_failure(hermes_env):
+    """no_agent session must be closed even when the script fails."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job
+    from hermes_state import SessionDB
+
+    script_path = hermes_env / "scripts" / "fail.sh"
+    script_path.write_text("#!/bin/bash\nexit 1\n")
+
+    job = create_job(
+        prompt=None, schedule="every 5m", script="fail.sh",
+        no_agent=True, deliver="local",
+    )
+    success, doc, final_response, error = run_job(job)
+    assert success is False
+
+    sdb = SessionDB()
+    open_rows = sdb._conn.execute(
+        "SELECT id, ended_at, end_reason FROM sessions WHERE source = 'cron'"
+    ).fetchall()
+    assert len(open_rows) >= 1, "no_agent job should create a session even on failure"
+    row = open_rows[-1]
+    assert row["ended_at"] is not None, "session should be ended even on script failure"
+    assert row["end_reason"] == "cron_complete"
+    sdb.close()
+
+
+def test_run_job_no_agent_no_zombie_sessions(hermes_env):
+    """Repeated no_agent runs should not accumulate sessions with ended_at=NULL."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job
+    from hermes_state import SessionDB
+
+    script_path = hermes_env / "scripts" / "tick.sh"
+    script_path.write_text("#!/bin/bash\necho 'tick'\n")
+
+    job = create_job(
+        prompt=None, schedule="every 5m", script="tick.sh",
+        no_agent=True, deliver="local",
+    )
+
+    # Run the same job 3 times (simulating 3 cron ticks).
+    for _ in range(3):
+        run_job(job)
+
+    sdb = SessionDB()
+    # The critical assertion: no zombie sessions left open.
+    zombie_count = sdb._conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE source = 'cron' AND ended_at IS NULL"
+    ).fetchone()[0]
+    assert zombie_count == 0, f"found {zombie_count} zombie sessions with ended_at=NULL"
+    sdb.close()
+
+
 # ---------------------------------------------------------------------------
 # _run_job_script: shell-script support
 # ---------------------------------------------------------------------------

@@ -1383,6 +1383,23 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             logger.error("Job '%s': %s", job_id, err)
             return False, "", "", err
 
+        # Create a session row so no_agent jobs are visible in
+        # session_search and properly closed (ended_at set) when the
+        # script finishes.  Without this, every no_agent tick inserts a
+        # row via the delivery / mark_job_run path but never calls
+        # end_session, accumulating zombie sessions in state.db.
+        _no_agent_sdb = None
+        _no_agent_sid = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
+        try:
+            from hermes_state import SessionDB as _NASDB
+            _no_agent_sdb = _NASDB()
+            _no_agent_sdb.create_session(_no_agent_sid, source="cron")
+        except Exception as _na_e:
+            logger.debug(
+                "Job '%s': session store unavailable for no_agent: %s",
+                job.get("id", "?"), _na_e,
+            )
+
         # Apply workdir if configured — lets scripts use predictable relative
         # paths. For no_agent jobs this is just the subprocess cwd (not an
         # agent TERMINAL_CWD bridge).
@@ -1402,6 +1419,18 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 try:
                     os.chdir(_prior_cwd)
                 except OSError:
+                    pass
+            # Close the session row so it doesn't linger as a zombie.
+            if _no_agent_sdb is not None:
+                try:
+                    _no_agent_sdb.end_session(
+                        _no_agent_sid, "cron_complete"
+                    )
+                except Exception:
+                    pass
+                try:
+                    _no_agent_sdb.close()
+                except Exception:
                     pass
 
         now_iso = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
