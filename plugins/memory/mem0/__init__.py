@@ -1,16 +1,25 @@
 """Mem0 memory plugin — MemoryProvider interface.
 
-Server-side LLM fact extraction, semantic search with reranking, and
-automatic deduplication via the Mem0 Platform API.
+Two operating modes:
 
-Original PR #2933 by kartik-mem0, adapted to MemoryProvider ABC.
+* **Cloud** (default): Mem0 Platform API (`MemoryClient`) — server-side LLM fact
+  extraction, semantic search with reranking, and automatic deduplication.
+* **Local**: self-hosted via mem0ai's `Memory` class — user supplies vector
+  store (e.g. Qdrant), LLM (any OpenAI-compatible endpoint), and embedder
+  (e.g. Ollama). No data leaves the host.
+
+Original cloud support: PR #2933 by kartik-mem0, adapted to MemoryProvider ABC.
+Local mode follows the same shape as the Hindsight plugin's `mode` selector.
 
 Config via environment variables:
-  MEM0_API_KEY       — Mem0 Platform API key (required)
-  MEM0_USER_ID       — User identifier (default: hermes-user)
-  MEM0_AGENT_ID      — Agent identifier (default: hermes)
+  MEM0_MODE         — "cloud" (default) or "local"
+  MEM0_API_KEY      — Mem0 Platform API key (required when mode=cloud)
+  MEM0_USER_ID      — User identifier (default: hermes-user)
+  MEM0_AGENT_ID     — Agent identifier (default: hermes)
 
-Or via $HERMES_HOME/mem0.json.
+Or via $HERMES_HOME/mem0.json. Local mode requires a top-level ``config``
+block holding a mem0 ``MemoryConfig`` dict (vector_store / llm / embedder).
+See the plugin README for a worked Qdrant + Ollama example.
 """
 
 from __future__ import annotations
@@ -32,6 +41,8 @@ logger = logging.getLogger(__name__)
 _BREAKER_THRESHOLD = 5
 _BREAKER_COOLDOWN_SECS = 120
 
+_VALID_MODES = ("cloud", "local")
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -47,22 +58,31 @@ def _load_config() -> dict:
     from hermes_constants import get_hermes_home
 
     config = {
+        "mode": os.environ.get("MEM0_MODE", "cloud"),
         "api_key": os.environ.get("MEM0_API_KEY", ""),
         "user_id": os.environ.get("MEM0_USER_ID", "hermes-user"),
         "agent_id": os.environ.get("MEM0_AGENT_ID", "hermes"),
         "rerank": True,
         "keyword_search": False,
+        "config": None,
     }
 
     config_path = get_hermes_home() / "mem0.json"
     if config_path.exists():
         try:
             file_cfg = json.loads(config_path.read_text(encoding="utf-8"))
-            config.update({k: v for k, v in file_cfg.items()
-                           if v is not None and v != ""})
-        except Exception:
-            pass
+            for k, v in file_cfg.items():
+                if v is None or v == "":
+                    continue
+                config[k] = v
+        except Exception as e:
+            logger.warning("Failed to load mem0.json: %s", e, exc_info=True)
 
+    mode = str(config.get("mode") or "cloud").lower()
+    if mode not in _VALID_MODES:
+        logger.warning("Unknown MEM0_MODE %r; falling back to 'cloud'.", mode)
+        mode = "cloud"
+    config["mode"] = mode
     return config
 
 
@@ -83,13 +103,13 @@ SEARCH_SCHEMA = {
     "name": "mem0_search",
     "description": (
         "Search memories by meaning. Returns relevant facts ranked by similarity. "
-        "Set rerank=true for higher accuracy on important queries."
+        "Set rerank=true for higher accuracy on important queries (cloud mode only)."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "What to search for."},
-            "rerank": {"type": "boolean", "description": "Enable reranking for precision (default: false)."},
+            "rerank": {"type": "boolean", "description": "Enable reranking for precision (default: false; cloud mode only)."},
             "top_k": {"type": "integer", "description": "Max results (default: 10, max: 50)."},
         },
         "required": ["query"],
@@ -117,13 +137,15 @@ CONCLUDE_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 class Mem0MemoryProvider(MemoryProvider):
-    """Mem0 Platform memory with server-side extraction and semantic search."""
+    """Mem0 memory with cloud (Mem0 Platform) and self-hosted local backends."""
 
     def __init__(self):
         self._config = None
         self._client = None
         self._client_lock = threading.Lock()
+        self._mode = "cloud"
         self._api_key = ""
+        self._local_config: dict | None = None
         self._user_id = "hermes-user"
         self._agent_id = "hermes"
         self._rerank = True
@@ -141,11 +163,12 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         cfg = _load_config()
+        if cfg.get("mode") == "local":
+            return bool(cfg.get("config"))
         return bool(cfg.get("api_key"))
 
     def save_config(self, values, hermes_home):
         """Write config to $HERMES_HOME/mem0.json."""
-        import json
         from pathlib import Path
         config_path = Path(hermes_home) / "mem0.json"
         existing = {}
@@ -160,23 +183,115 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def get_config_schema(self):
         return [
-            {"key": "api_key", "description": "Mem0 Platform API key", "secret": True, "required": True, "env_var": "MEM0_API_KEY", "url": "https://app.mem0.ai"},
+            {
+                "key": "mode",
+                "description": "Mem0 backend",
+                "default": "cloud",
+                "choices": ["cloud", "local"],
+            },
+            {
+                "key": "api_key",
+                "description": "Mem0 Platform API key (required when mode=cloud)",
+                "secret": True,
+                "env_var": "MEM0_API_KEY",
+                "url": "https://app.mem0.ai",
+            },
             {"key": "user_id", "description": "User identifier", "default": "hermes-user"},
             {"key": "agent_id", "description": "Agent identifier", "default": "hermes"},
-            {"key": "rerank", "description": "Enable reranking for recall", "default": "true", "choices": ["true", "false"]},
+            {
+                "key": "rerank",
+                "description": "Enable reranking for recall (cloud mode only)",
+                "default": "true",
+                "choices": ["true", "false"],
+            },
         ]
 
+    # ------------------------------------------------------------------
+    # Client construction
+    # ------------------------------------------------------------------
+
     def _get_client(self):
-        """Thread-safe client accessor with lazy initialization."""
+        """Thread-safe client accessor with lazy initialization.
+
+        Returns either ``mem0.MemoryClient`` (cloud) or ``mem0.Memory``
+        (local self-host) based on ``self._mode``.
+        """
         with self._client_lock:
             if self._client is not None:
                 return self._client
             try:
-                from mem0 import MemoryClient
-                self._client = MemoryClient(api_key=self._api_key)
+                if self._mode == "local":
+                    if not self._local_config:
+                        raise RuntimeError(
+                            "mem0 local mode requires a 'config' block in "
+                            "$HERMES_HOME/mem0.json with vector_store / llm / "
+                            "embedder sub-configs. See plugin README."
+                        )
+                    from mem0 import Memory
+                    self._client = Memory.from_config(self._local_config)
+                    logger.info(
+                        "Mem0 local client ready (vector_store=%s, llm=%s, embedder=%s).",
+                        self._local_config.get("vector_store", {}).get("provider"),
+                        self._local_config.get("llm", {}).get("provider"),
+                        self._local_config.get("embedder", {}).get("provider"),
+                    )
+                else:
+                    from mem0 import MemoryClient
+                    self._client = MemoryClient(api_key=self._api_key)
                 return self._client
             except ImportError:
                 raise RuntimeError("mem0 package not installed. Run: pip install mem0ai")
+
+    # ------------------------------------------------------------------
+    # API shape adapters — hide cloud vs local kwarg differences
+    # ------------------------------------------------------------------
+
+    def _search(self, query: str, *, top_k: int, rerank: bool) -> list:
+        """Run a search against either backend and return a flat result list.
+
+        Both backends scope by ``filters={"user_id": ...}``.  Local
+        (``Memory``) uses ``limit`` rather than ``top_k`` and has no
+        ``rerank`` equivalent; cloud (``MemoryClient``) accepts both.
+        """
+        client = self._get_client()
+        if self._mode == "local":
+            response = client.search(
+                query, filters=self._read_filters(), limit=top_k,
+            )
+        else:
+            response = client.search(
+                query=query,
+                filters=self._read_filters(),
+                rerank=rerank,
+                top_k=top_k,
+            )
+        return self._unwrap_results(response)
+
+    def _add(self, messages: list, *, infer: bool = True) -> None:
+        """Persist messages to the backend.
+
+        Both backends accept ``user_id`` / ``agent_id`` / ``infer`` as kwargs.
+        """
+        client = self._get_client()
+        client.add(
+            messages,
+            user_id=self._user_id,
+            agent_id=self._agent_id,
+            infer=infer,
+        )
+
+    def _get_all(self) -> list:
+        """List all memories for the active user.
+
+        Both backends scope reads by ``filters={"user_id": ...}``.
+        """
+        client = self._get_client()
+        response = client.get_all(filters=self._read_filters())
+        return self._unwrap_results(response)
+
+    # ------------------------------------------------------------------
+    # Circuit breaker
+    # ------------------------------------------------------------------
 
     def _is_breaker_open(self) -> bool:
         """Return True if the circuit breaker is tripped (too many failures)."""
@@ -201,9 +316,15 @@ class Mem0MemoryProvider(MemoryProvider):
                 self._consecutive_failures, _BREAKER_COOLDOWN_SECS,
             )
 
+    # ------------------------------------------------------------------
+    # MemoryProvider interface
+    # ------------------------------------------------------------------
+
     def initialize(self, session_id: str, **kwargs) -> None:
         self._config = _load_config()
+        self._mode = self._config.get("mode", "cloud")
         self._api_key = self._config.get("api_key", "")
+        self._local_config = self._config.get("config")
         # Prefer gateway-provided user_id for per-user memory scoping;
         # fall back to config/env default for CLI (single-user) sessions.
         self._user_id = kwargs.get("user_id") or self._config.get("user_id", "hermes-user")
@@ -211,16 +332,16 @@ class Mem0MemoryProvider(MemoryProvider):
         self._rerank = self._config.get("rerank", True)
 
     def _read_filters(self) -> Dict[str, Any]:
-        """Filters for search/get_all — scoped to user only for cross-session recall."""
+        """Filters for cloud search/get_all — scoped to user only for cross-session recall."""
         return {"user_id": self._user_id}
 
     def _write_filters(self) -> Dict[str, Any]:
-        """Filters for add — scoped to user + agent for attribution."""
+        """Filters for cloud add — scoped to user + agent for attribution."""
         return {"user_id": self._user_id, "agent_id": self._agent_id}
 
     @staticmethod
     def _unwrap_results(response: Any) -> list:
-        """Normalize Mem0 API response — v2 wraps results in {"results": [...]}."""
+        """Normalize Mem0 API response — both cloud v2 and local Memory wrap results in {"results": [...]}."""
         if isinstance(response, dict):
             return response.get("results", [])
         if isinstance(response, list):
@@ -230,7 +351,7 @@ class Mem0MemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         return (
             "# Mem0 Memory\n"
-            f"Active. User: {self._user_id}.\n"
+            f"Active ({self._mode} mode). User: {self._user_id}.\n"
             "Use mem0_search to find memories, mem0_conclude to store facts, "
             "mem0_profile for a full overview."
         )
@@ -251,13 +372,7 @@ class Mem0MemoryProvider(MemoryProvider):
 
         def _run():
             try:
-                client = self._get_client()
-                results = self._unwrap_results(client.search(
-                    query=query,
-                    filters=self._read_filters(),
-                    rerank=self._rerank,
-                    top_k=5,
-                ))
+                results = self._search(query, top_k=5, rerank=self._rerank)
                 if results:
                     lines = [r.get("memory", "") for r in results if r.get("memory")]
                     with self._prefetch_lock:
@@ -271,18 +386,17 @@ class Mem0MemoryProvider(MemoryProvider):
         self._prefetch_thread.start()
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Send the turn to Mem0 for server-side fact extraction (non-blocking)."""
+        """Send the turn to Mem0 for fact extraction (non-blocking)."""
         if self._is_breaker_open():
             return
 
         def _sync():
             try:
-                client = self._get_client()
                 messages = [
                     {"role": "user", "content": user_content},
                     {"role": "assistant", "content": assistant_content},
                 ]
-                client.add(messages, **self._write_filters())
+                self._add(messages, infer=True)
                 self._record_success()
             except Exception as e:
                 self._record_failure()
@@ -305,13 +419,15 @@ class Mem0MemoryProvider(MemoryProvider):
             })
 
         try:
-            client = self._get_client()
+            # Touch the client early so init errors surface as tool errors,
+            # not stack traces inside the per-tool branches.
+            self._get_client()
         except Exception as e:
             return tool_error(str(e))
 
         if tool_name == "mem0_profile":
             try:
-                memories = self._unwrap_results(client.get_all(filters=self._read_filters()))
+                memories = self._get_all()
                 self._record_success()
                 if not memories:
                     return json.dumps({"result": "No memories stored yet."})
@@ -328,12 +444,7 @@ class Mem0MemoryProvider(MemoryProvider):
             rerank = args.get("rerank", False)
             top_k = min(int(args.get("top_k", 10)), 50)
             try:
-                results = self._unwrap_results(client.search(
-                    query=query,
-                    filters=self._read_filters(),
-                    rerank=rerank,
-                    top_k=top_k,
-                ))
+                results = self._search(query, top_k=top_k, rerank=rerank)
                 self._record_success()
                 if not results:
                     return json.dumps({"result": "No relevant memories found."})
@@ -348,9 +459,8 @@ class Mem0MemoryProvider(MemoryProvider):
             if not conclusion:
                 return tool_error("Missing required parameter: conclusion")
             try:
-                client.add(
+                self._add(
                     [{"role": "user", "content": conclusion}],
-                    **self._write_filters(),
                     infer=False,
                 )
                 self._record_success()
