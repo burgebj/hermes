@@ -8082,6 +8082,15 @@ async def get_usage_analytics(days: int = 30):
             FROM sessions WHERE started_at > ?
         """, (cutoff,))
         totals = dict(cur3.fetchone())
+
+        # Compute actual span of data for honest per-day averages
+        first_session = db._conn.execute(
+            "SELECT MIN(started_at) FROM sessions WHERE started_at > ?", (cutoff,)
+        ).fetchone()[0]
+        span_days = days
+        if first_session:
+            span_days = max(1, min(days, int((time.time() - first_session) / 86400) + 1))
+
         insights_report = InsightsEngine(db).generate(days=days)
         skills = insights_report.get("skills", {
             "summary": {
@@ -8098,6 +8107,7 @@ async def get_usage_analytics(days: int = 30):
             "by_model": by_model,
             "totals": totals,
             "period_days": days,
+            "span_days": span_days,
             "skills": skills,
         }
     finally:
