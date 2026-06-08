@@ -18,11 +18,10 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-import wave
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
+from dataclasses import dataclass
 
 import httpx
 
@@ -492,6 +491,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     @staticmethod
     def _is_native_voice_wav_source(audio_path: str) -> bool:
         """Return True for WAV input that can go straight to Opus CAF."""
+        import wave
+
         if os.path.splitext(audio_path)[1].lower() != ".wav":
             return False
         try:

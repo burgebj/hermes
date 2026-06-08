@@ -1,6 +1,4 @@
 """Tests for the BlueBubbles iMessage gateway adapter."""
-import wave
-
 import pytest
 
 from gateway.config import Platform, PlatformConfig
@@ -504,6 +502,8 @@ class TestBlueBubblesVoiceSend:
         assert "opus@24000" in calls[1]
 
     def test_prepare_voice_attachment_skips_ffmpeg_for_native_wav_source(self, monkeypatch, tmp_path):
+        import wave
+
         adapter = _make_adapter(monkeypatch)
         source = tmp_path / "voice.wav"
         with wave.open(str(source), "wb") as wf:
