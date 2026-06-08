@@ -2705,3 +2705,83 @@ def test_host_derived_key_helper_basic_cases():
     for k in ("DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
               "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         _os.environ.pop(k, None)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Regression tests for GitHub #30653 — api_key_env through custom_providers
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_custom_providers_list_resolves_api_key_env(monkeypatch):
+    """custom_providers list entries with api_key_env (alias for key_env)
+    should resolve the API key from the named env var at runtime.
+
+    Regression test for GitHub #30653.
+    """
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("MY_CUSTOM_KEY", "env-resolved-key-1234")
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "EnvKey Provider",
+                    "base_url": "http://localhost:8080/v1",
+                    "api_key_env": "MY_CUSTOM_KEY",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError(
+                "resolve_provider should not be called for named custom providers"
+            )
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="custom:envkey-provider")
+
+    assert resolved["provider"] == "custom"
+    assert resolved["base_url"] == "http://localhost:8080/v1"
+    assert resolved["api_key"] == "env-resolved-key-1234"
+    assert resolved["source"] == "custom_provider:EnvKey Provider"
+
+
+def test_custom_providers_literal_api_key_takes_precedence_over_api_key_env(monkeypatch):
+    """When both api_key and api_key_env are set, the literal api_key wins."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("MY_CUSTOM_KEY", "env-resolved-key-1234")
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "Both Provider",
+                    "base_url": "http://localhost:9090/v1",
+                    "api_key": "literal-key-9876",
+                    "api_key_env": "MY_CUSTOM_KEY",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_provider",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError(
+                "resolve_provider should not be called for named custom providers"
+            )
+        ),
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="custom:both-provider")
+
+    assert resolved["api_key"] == "literal-key-9876"
+    assert resolved["base_url"] == "http://localhost:9090/v1"
