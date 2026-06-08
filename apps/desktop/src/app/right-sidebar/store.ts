@@ -2,7 +2,7 @@ import { atom } from 'nanostores'
 
 import { persistBoolean, storedBoolean } from '@/lib/storage'
 
-export type RightSidebarTabId = 'files' | 'git' | 'terminal' | 'web'
+export type RightSidebarTabId = 'files' | 'git' | 'kanban' | 'terminal' | 'web'
 
 const TAKEOVER_KEY = 'hermes.desktop.terminalTakeover'
 

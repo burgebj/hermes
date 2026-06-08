@@ -18,6 +18,7 @@ import { SidebarPanelLabel } from '../shell/sidebar-label'
 
 import { ProjectTree } from './files/tree'
 import { useProjectTree } from './files/use-project-tree'
+import { KanbanTab } from './kanban'
 import { $rightSidebarTab, $terminalTakeover, type RightSidebarTabId, setRightSidebarTab } from './store'
 import { TerminalSlot } from './terminal/persistent'
 
@@ -25,20 +26,22 @@ interface RightSidebarPaneProps {
   onActivateFile: (path: string) => void
   onActivateFolder: (path: string) => void
   onChangeCwd: (path: string) => Promise<void> | void
+  requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
 }
 
 interface RightSidebarTab {
   icon: string
   id: RightSidebarTabId
-  labelKey: 'files' | 'terminal'
+  labelKey: 'files' | 'kanban' | 'terminal'
 }
 
 const RIGHT_SIDEBAR_TABS: readonly RightSidebarTab[] = [
   { id: 'files', labelKey: 'files', icon: 'list-tree' },
+  { id: 'kanban', labelKey: 'kanban', icon: 'layers' },
   { id: 'terminal', labelKey: 'terminal', icon: 'terminal' }
 ]
 
-export function RightSidebarPane({ onActivateFile, onActivateFolder, onChangeCwd }: RightSidebarPaneProps) {
+export function RightSidebarPane({ onActivateFile, onActivateFolder, onChangeCwd, requestGateway }: RightSidebarPaneProps) {
   const { t } = useI18n()
   const r = t.rightSidebar
   const activeTab = useStore($rightSidebarTab)
@@ -113,6 +116,8 @@ export function RightSidebarPane({ onActivateFile, onActivateFolder, onChangeCwd
 
       {effectiveTab === 'terminal' ? (
         <TerminalSlot />
+      ) : effectiveTab === 'kanban' ? (
+        <KanbanTab requestGateway={requestGateway} />
       ) : (
         <FilesystemTab
           canCollapse={canCollapse}

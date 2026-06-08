@@ -14,11 +14,13 @@ describe('desktop slash command curation', () => {
   it('keeps core desktop chat commands in suggestions', () => {
     expect(isDesktopSlashSuggestion('/new')).toBe(true)
     expect(isDesktopSlashSuggestion('/branch')).toBe(true)
+    expect(isDesktopSlashSuggestion('/kanban')).toBe(true)
     expect(isDesktopSlashSuggestion('/skin')).toBe(true)
     expect(isDesktopSlashSuggestion('/usage')).toBe(true)
     expect(isDesktopSlashSuggestion('/version')).toBe(true)
     expect(isDesktopSlashSuggestion('/yolo')).toBe(true)
     expect(isDesktopSlashCommand('/yolo')).toBe(true)
+    expect(isDesktopSlashCommand('/kanban list')).toBe(true)
   })
 
   it('surfaces skill and quick commands (extensions) in suggestions and lets them run', () => {
@@ -81,6 +83,9 @@ describe('desktop slash command curation', () => {
     expect(desktopSlashDescription('/branch', 'Branch the current session')).toBe(
       'Branch the latest message into a new chat'
     )
+    expect(desktopSlashDescription('/kanban', 'Multi-profile collaboration board')).toBe(
+      'Use the Kanban board from desktop chat'
+    )
     expect(desktopSlashDescription('/skin', 'Show or change the display skin/theme')).toBe(
       'Switch desktop theme or cycle to the next one'
     )
@@ -115,6 +120,7 @@ describe('desktop slash command curation', () => {
     expect(desktopSlashUnavailableMessage('/model sonnet')).toContain('model picker')
     expect(desktopSlashUnavailableMessage('/skills')).toContain('desktop sidebar')
     expect(desktopSlashUnavailableMessage('/clear')).toContain('terminal interface')
+    expect(desktopSlashUnavailableMessage('/kanban list')).toBeNull()
   })
 
   it('flags /model as a picker-owned command so the desktop opens the overlay', () => {

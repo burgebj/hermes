@@ -79,7 +79,7 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     }
   }
 
-  const showRightSidebarTab = (tab: 'files' | 'terminal') => {
+  const showRightSidebarTab = (tab: 'files' | 'kanban' | 'terminal') => {
     setFileBrowserOpen(true)
     setRightSidebarTab(tab)
   }
