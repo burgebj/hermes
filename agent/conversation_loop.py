@@ -4100,6 +4100,33 @@ def run_conversation(
                     agent._emit_status(
                         f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}"
                     )
+                    # #30770 — without this emit, the halt message lands
+                    # in ``messages`` (and in ``result["final_response"]``)
+                    # but is never streamed through ``stream_delta_callback``.
+                    # SSE clients (Open WebUI, curl /v1/chat/completions,
+                    # the OpenAI SDK) see the role + finish chunks with
+                    # no content delta between them and the conversation
+                    # appears to die silently; the TUI streaming display
+                    # has the same problem.  Fanning the synthesized
+                    # explanation through the same channels the model's
+                    # own text would have used gives every consumer the
+                    # explanation the user actually needs.
+                    #
+                    # Wrapped in try/except because this is best-effort
+                    # additive plumbing — the halt message is already
+                    # safely captured in ``final_response`` and the
+                    # ``messages`` history below, so even a broken
+                    # downstream callback must not turn a controlled
+                    # guardrail halt back into a silent failure.
+                    try:
+                        agent._emit_synthesized_final_response(final_response)
+                    except Exception:
+                        logger.debug(
+                            "_emit_synthesized_final_response raised inside "
+                            "guardrail_halt branch — synthesized text is "
+                            "still preserved in messages/result",
+                            exc_info=True,
+                        )
                     messages.append({"role": "assistant", "content": final_response})
                     # Emit the halt message to the client so it's not
                     # indistinguishable from a crash.  The stream display
