@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -104,6 +105,63 @@ _IMAGE_TOKEN_ESTIMATE = 1600
 # for tail-cut decisions.
 _IMAGE_CHAR_EQUIVALENT = _IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
 _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
+# Hard wall-clock bound on a single summary LLM call (issue #24098).  Acts
+# independently of the per-call SDK timeout (auxiliary.compression.timeout):
+# SDK-level retries, slow streaming, or a stuck connection cannot stack past
+# this budget and keep the agent response loop blocked.  When exceeded, we
+# log a warning, enter cooldown, and return None so compress() falls through
+# to its static-marker path and the response loop continues.
+_SUMMARY_WALL_CLOCK_TIMEOUT_SECONDS = 180.0
+# Shorter cooldown after a wall-clock timeout — we don't actually know
+# whether the provider is broken or just slow.  Matches the transient cooldown
+# used for other timeout-class errors below.
+_SUMMARY_WALL_CLOCK_COOLDOWN_SECONDS = 60
+
+
+class SummaryWallClockTimeout(TimeoutError):
+    """Raised when a summary LLM call exceeds the module wall-clock budget."""
+
+
+def _call_llm_with_wall_clock(call_kwargs: Dict[str, Any]) -> Any:
+    """Run ``call_llm(**call_kwargs)`` with a hard wall-clock bound.
+
+    A naked ``call_llm`` invocation is bounded only by the underlying SDK's
+    per-request timeout. SDK-level retries and stuck httpx streams can stack
+    past that budget, blocking the calling thread indefinitely — which in
+    issue #24098 stalled an agent response loop for 88 minutes before manual
+    restart.
+
+    We run the call in a daemon thread and ``join`` with a hard timeout. On
+    timeout we raise :class:`SummaryWallClockTimeout` so the caller can fall
+    back to its existing transient-failure path; the daemon thread is
+    abandoned (rather than cancelled — Python has no safe way to interrupt
+    a blocked C-level network read) and the SDK's own timeout eventually
+    reaps it. The cooldown the caller sets prevents tight retry-loops, so
+    at most one orphan thread per cooldown window can accumulate.
+    """
+    result: Dict[str, Any] = {}
+
+    def _runner() -> None:
+        try:
+            result["response"] = call_llm(**call_kwargs)
+        except BaseException as exc:  # noqa: BLE001 — propagate to caller thread
+            result["exc"] = exc
+
+    worker = threading.Thread(
+        target=_runner,
+        name="ctx-compress-summary",
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=_SUMMARY_WALL_CLOCK_TIMEOUT_SECONDS)
+    if worker.is_alive():
+        raise SummaryWallClockTimeout(
+            f"summary call exceeded {_SUMMARY_WALL_CLOCK_TIMEOUT_SECONDS:.0f}s "
+            "wall-clock timeout"
+        )
+    if "exc" in result:
+        raise result["exc"]
+    return result["response"]
 
 # Hard ceiling for the deterministic summary-failure handoff.  The fallback is
 # only meant to preserve continuity anchors from the dropped window, not to
@@ -1439,7 +1497,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             }
             if self.summary_model:
                 call_kwargs["model"] = self.summary_model
-            response = call_llm(**call_kwargs)
+            response = _call_llm_with_wall_clock(call_kwargs)
             content = response.choices[0].message.content
             # Handle cases where content is not a string (e.g., dict from llama.cpp)
             if not isinstance(content, str):
@@ -1453,6 +1511,22 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             self._summary_model_fallen_back = False
             self._last_summary_error = None
             return self._with_summary_prefix(summary)
+        except SummaryWallClockTimeout as e:
+            # Hard wall-clock bound exceeded.  Don't try to fall back to main
+            # — the same provider chain is what we just abandoned — and don't
+            # bubble the exception up; the response loop must continue.  Set
+            # a short cooldown so the next preflight pass skips the call.
+            # Issue #24098.
+            self._summary_failure_cooldown_until = (
+                time.monotonic() + _SUMMARY_WALL_CLOCK_COOLDOWN_SECONDS
+            )
+            self._last_summary_error = str(e)
+            logging.warning(
+                "Context compression: %s; dropping middle turns without summary. "
+                "Further summary attempts paused for %d seconds.",
+                e, _SUMMARY_WALL_CLOCK_COOLDOWN_SECONDS,
+            )
+            return None
         except RuntimeError:
             # No provider configured — long cooldown, unlikely to self-resolve
             self._summary_failure_cooldown_until = time.monotonic() + _SUMMARY_FAILURE_COOLDOWN_SECONDS

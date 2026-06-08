@@ -36,6 +36,12 @@ class TestIsUnsupportedParameterError:
         ("temperature", "HTTP 400: Unsupported parameter: temperature"),
         ("temperature", "Error code: 400 - {'error': {'code': 'unsupported_parameter', 'param': 'temperature'}}"),
         ("temperature", "this model does not support temperature"),
+        # Opus 4.7-style deprecation wording surfaced by issue #24098 —
+        # ``\`temperature\` is deprecated for this model`` — must drive the
+        # same temperature-stripped retry instead of bubbling up as an
+        # unrecoverable error.
+        ("temperature", "HTTP 400: `temperature` is deprecated for this model."),
+        ("temperature", "temperature is deprecated for this model"),
         # max_tokens phrasings
         ("max_tokens", "HTTP 400: Unsupported parameter: max_tokens"),
         ("max_tokens", "Unknown parameter: max_tokens — use max_completion_tokens"),

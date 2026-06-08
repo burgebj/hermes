@@ -2544,6 +2544,11 @@ def _is_unsupported_parameter_error(exc: Exception, param: str) -> bool:
         "unrecognized request argument",
         "unrecognized parameter",
         "invalid parameter",
+        # Anthropic's Opus 4.7+ phrasing — e.g.
+        # ``HTTP 400: `temperature` is deprecated for this model``
+        # — surfaced from auxiliary auto-detect against newer Claude models.
+        # See issue #24098.
+        "is deprecated",
     ))
 
 
