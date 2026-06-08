@@ -60,19 +60,11 @@ def main() -> None:
         _run_restart_transaction(intent, profile, request_id, nonce,
                                  old_pid, origin, hermes_home, task_name)
     except Exception as exc:
-        # P0-8: Write failed status on ANY unhandled exception
-        from hermes_cli.gateway_restart_state import (
-            append_restart_log,
-            write_status,
-        )
-        write_status(profile, "failed", request_id=request_id, error=str(exc))
+        from hermes_cli.gateway_restart_state import append_restart_log
         append_restart_log(
             request_id=request_id, profile=profile, old_pid=old_pid,
             origin=origin, state="failed", error=f"unhandled: {exc}",
         )
-        # P0-4: Do NOT call release_lease/sanitize_intent here.
-        # If lease was claimed, _run_restart_transaction's finally handles cleanup.
-        # If lease was NOT claimed, we have no right to touch those files.
         sys.exit(1)
     # NOTE: No blanket finally:cleanup_intent here.
     # - Winner cleanup: _run_restart_transaction inner finally
@@ -84,22 +76,17 @@ def main() -> None:
 def _wait_for_handoff(profile: str, request_id: str,
                       expected_owner_token: str,
                       timeout: float = 15.0) -> bool:
-    """Wait for Coordinator to hand off active.lock ownership.
-
-    P0-2: Worker must confirm active.lock.owner_token == lease_owner_token
-    and phase == "running" before proceeding with destructive actions.
-    """
     from hermes_cli.gateway_restart_state import lock_path
     lp = lock_path(profile)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not lp.exists():
-            # Lock was released (handoff failed or not needed)
             return False
         try:
             data = json.loads(lp.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                if (data.get("owner_token") == expected_owner_token
+                if (data.get("request_id") == request_id
+                        and data.get("owner_token") == expected_owner_token
                         and data.get("phase") == "running"):
                     return True
         except (OSError, json.JSONDecodeError):
@@ -169,15 +156,18 @@ def _run_restart_transaction(
         sys.exit(1)
     lease_owned = True
 
-    # P0-2: Wait for Coordinator handoff acknowledgement
-    # Worker must not drain/stop/start until active.lock ownership is confirmed.
-    if not _wait_for_handoff(profile, request_id, lock.owner_token, timeout=15.0):
-        _fail_closed(profile, request_id, old_pid, origin, "handoff_timeout",
-                     "Coordinator did not hand off active.lock within timeout",
-                     nonce=nonce)
-
-    # P0-4: From here on, ALL logic is in one try/finally
     try:
+        # P0-2: Wait for Coordinator handoff acknowledgement
+        if not _wait_for_handoff(profile, request_id, lock.owner_token, timeout=15.0):
+            write_status(profile, "failed", request_id=request_id,
+                         error="handoff_timeout")
+            append_restart_log(
+                request_id=request_id, profile=profile, old_pid=old_pid,
+                origin=origin, state="failed",
+                error="handoff_timeout",
+            )
+            return  # exit cleanly, finally will cleanup
+
         # Restore HERMES_HOME if needed
         if hermes_home and not os.environ.get("HERMES_HOME"):
             os.environ["HERMES_HOME"] = hermes_home
@@ -221,11 +211,13 @@ def _run_restart_transaction(
                 release_lease as _release_lease,
                 sanitize_intent as _sanitize_intent,
             )
+            _sanitize_intent(profile, request_id,
+                            expected_nonce=nonce,
+                            owner_token=lock.owner_token,
+                            worker_pid=os.getpid())
             _release_lease(profile, request_id,
                           owner_token=lock.owner_token,
                           worker_pid=os.getpid())
-            _sanitize_intent(profile, request_id,
-                            expected_nonce=nonce)
 
 
 # ---------------------------------------------------------------------------
@@ -789,20 +781,16 @@ def _fail_closed(
     detail: str,
     nonce: str = "",
 ) -> None:
-    """Fail closed: write status, log, and exit.
+    """Fail closed: log rejection and exit.
 
-    P0-4: Does NOT delete the request directory — only writes failed status
-    and JSONL log.  cleanup_intent() is reserved for Coordinator use only.
+    P0-4: Pre-lease failures only write JSONL — no status overwrite,
+    no resource deletion.
     """
-    from hermes_cli.gateway_restart_state import (
-        append_restart_log,
-        write_status,
-    )
-    write_status(profile, "failed", request_id=request_id,
-                 error=f"{error_code}: {detail}")
+    from hermes_cli.gateway_restart_state import append_restart_log
     append_restart_log(
         request_id=request_id, profile=profile, old_pid=old_pid,
-        origin=origin, state="failed", error=f"{error_code}: {detail}",
+        origin=origin, state="rejected",
+        error=f"{error_code}: {detail}",
     )
     sys.exit(1)
 

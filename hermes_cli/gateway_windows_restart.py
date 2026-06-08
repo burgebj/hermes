@@ -222,13 +222,24 @@ def schedule_restart_handoff(
         }
 
     # P0-3: Update lock with worker_pid and claim_deadline for recovery
-    if not lock.mark_worker_spawned(worker_pid, time.time() + 30):
+    _spawned_ok = False
+    for _attempt in range(3):
+        if lock.mark_worker_spawned(worker_pid, time.time() + 30):
+            _spawned_ok = True
+            break
+        time.sleep(0.5)
+    if not _spawned_ok:
         append_restart_log(
             request_id=request_id, profile=profile, old_pid=old_pid,
-            origin=origin, state="scheduled",
-            reason="mark_worker_spawned_failed",
+            origin=origin, state="failed",
+            reason="mark_worker_spawned_failed_after_retries",
         )
-        # Continue anyway — lock recovery will use standard TTL expiry
+        lock.release()
+        return {
+            "request_id": request_id,
+            "scheduled": False,
+            "detail": "Failed to record worker spawn — cannot enable stale recovery",
+        }
 
     # Wait for worker to claim lease
     claimed = _wait_for_worker_claim(profile, request_id, timeout_s=10.0)
@@ -294,8 +305,8 @@ def _wait_for_worker_claim(
     timeout_s: float = 10.0,
 ) -> bool:
     """Poll the lease file until the worker claims it."""
-    from hermes_cli.gateway_restart_state import lease_path
-    lp = lease_path(profile, request_id)
+    from hermes_cli.gateway_restart_state import lease_json_path
+    lp = lease_json_path(profile, request_id)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if lp.exists():
@@ -306,8 +317,8 @@ def _wait_for_worker_claim(
 
 def _read_lease_data(profile: str, request_id: str) -> Optional[dict[str, Any]]:
     """Read the lease file data for handoff verification."""
-    from hermes_cli.gateway_restart_state import lease_path
-    lp = lease_path(profile, request_id)
+    from hermes_cli.gateway_restart_state import lease_json_path
+    lp = lease_json_path(profile, request_id)
     if not lp.exists():
         return None
     try:

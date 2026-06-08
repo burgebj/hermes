@@ -88,6 +88,16 @@ def lease_path(profile: str, request_id: str) -> Path:
     return _get_request_dir(profile, request_id) / "lease.lock"
 
 
+def claim_lock_path(profile: str, request_id: str) -> Path:
+    """Path to claim lock file (O_EXCL race marker)."""
+    return _get_request_dir(profile, request_id) / "claim.lock"
+
+
+def lease_json_path(profile: str, request_id: str) -> Path:
+    """Path to lease JSON (atomic publish after intent state update)."""
+    return _get_request_dir(profile, request_id) / "lease.json"
+
+
 def status_path(profile: str = "default", request_id: str = "") -> Path:
     """Path to status file.  If request_id given, uses per-request dir."""
     if request_id:
@@ -202,40 +212,53 @@ def update_intent_state(profile: str, request_id: str, state: str,
 
 
 def release_lease(profile: str, request_id: str,
-                  owner_token: str = "", worker_pid: int = 0) -> bool:
-    """Release only the request-scoped lease file, verifying ownership.
-
-    P0-3: Only the lease owner (matching owner_token and worker_pid)
-    can release the lease.  Returns True if lease was released.
-    """
+                  *, owner_token: str, worker_pid: int) -> bool:
+    """Release lease only if owner_token and worker_pid match."""
+    if not owner_token or worker_pid <= 0:
+        return False
     if not request_id:
         return False
-    lp = lease_path(profile, request_id)
+    lp = lease_json_path(profile, request_id)
     if not lp.exists():
         return False
     try:
         data = json.loads(lp.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return False
-        if owner_token and data.get("owner_token") != owner_token:
+        if data.get("owner_token") != owner_token:
             return False
-        if worker_pid and data.get("worker_pid") != worker_pid:
+        if data.get("worker_pid") != worker_pid:
             return False
         lp.unlink(missing_ok=True)
+        # Also remove claim.lock
+        clp = claim_lock_path(profile, request_id)
+        clp.unlink(missing_ok=True)
         return True
     except (OSError, json.JSONDecodeError):
         return False
 
 
 def sanitize_intent(profile: str, request_id: str,
-                    expected_nonce: str = "", owner_token: str = "") -> bool:
-    """Clear sensitive fields from intent, verifying ownership.
-
-    P0-3: Only clears nonce if expected_nonce matches (or is empty).
-    Returns True on success.
-    """
+                    *, expected_nonce: str, owner_token: str,
+                    worker_pid: int) -> bool:
+    """Clear nonce only if owner matches lease."""
+    if not owner_token or worker_pid <= 0:
+        return False
     if not request_id:
         return False
+    # Verify ownership via lease
+    lp = lease_json_path(profile, request_id)
+    if lp.exists():
+        try:
+            lease_data = json.loads(lp.read_text(encoding="utf-8"))
+            if isinstance(lease_data, dict):
+                if lease_data.get("owner_token") != owner_token:
+                    return False
+                if lease_data.get("worker_pid") != worker_pid:
+                    return False
+        except (OSError, json.JSONDecodeError):
+            return False
+    # Clear nonce
     ip = intent_path(profile, request_id)
     try:
         data = json.loads(ip.read_text(encoding="utf-8"))
@@ -271,7 +294,7 @@ def gc_expired_request_dirs(profile: str = "default",
             if d.name == active_request_id:
                 continue
             # Skip if lease still exists (worker still running)
-            if (d / "lease.lock").exists():
+            if (d / "claim.lock").exists() or (d / "lease.json").exists():
                 continue
             sp = d / "status.json"
             if not sp.exists():
@@ -509,7 +532,7 @@ class RestartLock:
             return False
 
         # Verify lease exists with matching owner_token and worker_pid
-        lp = lease_path(self._profile(), request_id)
+        lp = lease_json_path(self._profile(), request_id)
         if not lp.exists():
             return False
         try:
@@ -537,15 +560,13 @@ class RestartLock:
 
     def claim_lease(self, request_id: str, nonce: str,
                     expected_state: str = "scheduled") -> bool:
-        """Atomically claim the lease for a request using O_EXCL.
+        """Atomically claim the lease using two-phase publication.
 
-        P0-1: Uses independent lease file with O_EXCL — truly one-time-only.
-        P0-3: After successful claim, transitions intent state from
-        expected_state to "claimed" with request_id + nonce verification.
-
-        Returns True on success (caller is the lease winner).
+        Phase 1: O_EXCL create claim.lock (race exclusion)
+        Phase 2: Update intent state, then atomically publish lease.json
         """
-        lp = lease_path(self._profile(), request_id)
+        clp = claim_lock_path(self._profile(), request_id)
+        ljp = lease_json_path(self._profile(), request_id)
 
         # Verify intent exists and is in expected state
         ip = intent_path(self._profile(), request_id)
@@ -562,47 +583,46 @@ class RestartLock:
         except (OSError, json.JSONDecodeError):
             return False
 
-        # Atomic lease claim via O_EXCL
+        # Phase 1: O_EXCL claim.lock (race barrier)
+        try:
+            fd = os.open(str(clp), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+        except FileExistsError:
+            return False
+        except OSError:
+            return False
+
+        # Update intent state
+        self._owner_token = secrets.token_urlsafe(32)
+        self._owner_request_id = request_id
+        if not update_intent_state(self._profile(), request_id, "claimed",
+                                   expected_state=expected_state):
+            try:
+                clp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._owner_token = ""
+            self._owner_request_id = ""
+            return False
+
+        # Phase 2: Atomic lease.json publication
         lease_data = {
             "request_id": request_id,
-            "owner_token": secrets.token_urlsafe(32),
+            "owner_token": self._owner_token,
             "worker_pid": os.getpid(),
             "claimed_at": time.time(),
         }
         try:
-            fd = os.open(str(lp), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(lease_data, f)
-                f.flush()
-                os.fsync(f.fileno())
-        except FileExistsError:
-            return False  # Another worker already claimed
+            _atomic_write_json(ljp, lease_data)
         except OSError:
-            return False
-
-        # P0-3: Update intent state to "claimed" (only winner does this)
-        # P1-2: If intent state update fails, rollback the lease
-        self._owner_token = lease_data["owner_token"]
-        self._owner_request_id = request_id
-        if not update_intent_state(self._profile(), request_id, "claimed",
-                                   expected_state=expected_state):
-            # Rollback: delete the lease we just created
             try:
-                lp.unlink(missing_ok=True)
+                clp.unlink(missing_ok=True)
             except OSError:
                 pass
             self._owner_token = ""
             self._owner_request_id = ""
             return False
         return True
-
-    def release_lease(self, profile: str, request_id: str) -> None:
-        """Release the request-scoped lease file."""
-        try:
-            lp = lease_path(profile, request_id)
-            lp.unlink(missing_ok=True)
-        except OSError:
-            pass
 
     def _profile(self) -> str:
         """Extract profile name from lock path."""

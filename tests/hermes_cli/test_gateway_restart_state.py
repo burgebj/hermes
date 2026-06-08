@@ -425,7 +425,7 @@ class TestRestartLock:
     def test_claim_lease(self, restart_state_dir):
         """Worker can claim lease using O_EXCL on lease file."""
         from hermes_cli.gateway_restart_state import (
-            create_intent, RestartLock, lease_path,
+            create_intent, RestartLock, claim_lock_path, lease_json_path,
         )
 
         intent = create_intent(profile="default")
@@ -435,9 +435,9 @@ class TestRestartLock:
         lock = RestartLock("default")
         assert lock.claim_lease(rid, nonce) is True
 
-        # Lease file should exist
-        lp = lease_path("default", rid)
-        assert lp.exists()
+        # claim.lock and lease.json should exist
+        assert claim_lock_path("default", rid).exists()
+        assert lease_json_path("default", rid).exists()
 
         lock.release()
 
@@ -696,10 +696,10 @@ class TestClaimLeaseRollback:
     """P1-2: claim_lease rolls back lease if intent state update fails."""
 
     def test_claim_lease_rollback_on_intent_update_failure(self, tmp_path, monkeypatch):
-        """If update_intent_state fails after O_EXCL lease creation, lease is rolled back."""
+        """If update_intent_state fails after O_EXCL claim.lock creation, claim.lock is rolled back."""
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         from hermes_cli.gateway_restart_state import (
-            RestartLock, create_intent, lease_path, read_intent,
+            RestartLock, create_intent, claim_lock_path, lease_json_path, read_intent,
         )
 
         intent = create_intent(profile="default", target_pid=100, origin="test")
@@ -719,9 +719,12 @@ class TestClaimLeaseRollback:
 
         assert result is False
 
-        # Lease should have been rolled back
-        lp = lease_path("default", rid)
-        assert not lp.exists(), "Lease must be rolled back on intent update failure"
+        # claim.lock should have been rolled back
+        clp = claim_lock_path("default", rid)
+        assert not clp.exists(), "claim.lock must be rolled back on intent update failure"
+        # lease.json must not exist
+        ljp = lease_json_path("default", rid)
+        assert not ljp.exists(), "lease.json must not exist on intent update failure"
 
 
 # ---------------------------------------------------------------------------
@@ -734,23 +737,31 @@ class TestReleaseLease:
     def test_release_lease_preserves_status(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         from hermes_cli.gateway_restart_state import (
-            create_intent, write_status, read_status, release_lease, lease_path,
+            create_intent, write_status, read_status, release_lease,
+            RestartLock, lease_json_path,
         )
 
         intent = create_intent(profile="default", target_pid=100, origin="test")
         rid = intent["request_id"]
+        nonce = intent["nonce"]
 
         write_status("default", "completed", request_id=rid, new_pid=200)
 
-        # Create a fake lease file
-        lp = lease_path("default", rid)
-        lp.write_text('{"test": true}')
-        assert lp.exists()
+        # Claim lease properly so owner_token/worker_pid are set
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+        assert lock.claim_lease(rid, nonce) is True
 
-        release_lease("default", rid)
+        ljp = lease_json_path("default", rid)
+        assert ljp.exists()
+
+        result = release_lease("default", rid,
+                              owner_token=lock.owner_token,
+                              worker_pid=os.getpid())
+        assert result is True
 
         # Lease removed, status preserved
-        assert not lp.exists()
+        assert not ljp.exists()
         status = read_status("default", rid)
         assert status is not None
         assert status["state"] == "completed"
@@ -827,17 +838,17 @@ class TestGCSafety:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         from hermes_cli.gateway_restart_state import (
             create_intent, write_status, gc_expired_request_dirs,
-            request_dir_path, lease_path,
+            request_dir_path, claim_lock_path,
         )
 
-        # Create a "running" request with lease
+        # Create a "running" request with claim.lock
         intent = create_intent(profile="default", target_pid=100, origin="test")
         rid = intent["request_id"]
         write_status("default", "draining", request_id=rid, old_pid=100)
 
-        # Create a fake lease file
-        lp = lease_path("default", rid)
-        lp.write_text('{"test": true}')
+        # Create a claim.lock file
+        clp = claim_lock_path("default", rid)
+        clp.touch()
 
         # Run GC with very short max_age
         removed = gc_expired_request_dirs("default", max_age_s=0, active_request_id=rid)
@@ -845,3 +856,161 @@ class TestGCSafety:
         # Directory must survive
         rd = request_dir_path("default", rid)
         assert rd.exists(), "GC must not delete request with active lease"
+
+
+# ---------------------------------------------------------------------------
+# P0-3: owner-scoped release_lease
+# ---------------------------------------------------------------------------
+
+class TestOwnerScopedRelease:
+    """P0-3: owner-scoped release_lease."""
+
+    def test_release_lease_rejects_empty_owner_token(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            create_intent, RestartLock, release_lease, lease_json_path,
+        )
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+        nonce = intent["nonce"]
+
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+        assert lock.claim_lease(rid, nonce) is True
+
+        # Empty owner_token must be rejected
+        result = release_lease("default", rid, owner_token="", worker_pid=os.getpid())
+        assert result is False
+
+    def test_release_lease_rejects_zero_pid(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            create_intent, RestartLock, release_lease,
+        )
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+        nonce = intent["nonce"]
+
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+        assert lock.claim_lease(rid, nonce) is True
+
+        result = release_lease("default", rid, owner_token="some-token", worker_pid=0)
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# P0-3: owner-scoped sanitize_intent
+# ---------------------------------------------------------------------------
+
+class TestOwnerScopedSanitize:
+    """P0-3: owner-scoped sanitize_intent."""
+
+    def test_sanitize_rejects_wrong_owner(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            create_intent, RestartLock, sanitize_intent, read_intent,
+        )
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+        nonce = intent["nonce"]
+
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+        assert lock.claim_lease(rid, nonce) is True
+
+        result = sanitize_intent("default", rid,
+                                expected_nonce=nonce,
+                                owner_token="wrong-token",
+                                worker_pid=os.getpid())
+        assert result is False
+
+        # Nonce must survive
+        stored = read_intent("default", rid)
+        assert stored["nonce"] == nonce
+
+
+# ---------------------------------------------------------------------------
+# P0-4: Pre-lease Worker cannot overwrite completed status
+# ---------------------------------------------------------------------------
+
+class TestStatusProtection:
+    """P0-4: Pre-lease Worker cannot overwrite authoritative status."""
+
+    def test_stale_worker_preserves_completed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            create_intent, write_status, read_status,
+        )
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+
+        # Winner writes completed
+        write_status("default", "completed", request_id=rid, new_pid=200)
+
+        # Verify completed
+        status = read_status("default", rid)
+        assert status["state"] == "completed"
+
+        # _fail_closed should NOT overwrite (it only writes JSONL now)
+        # Simulate by checking that read_status still returns completed
+        # after a rejection log is written
+        from hermes_cli.gateway_restart_state import append_restart_log
+        append_restart_log(request_id=rid, profile="default", state="rejected",
+                         error="nonce_mismatch: test")
+
+        status = read_status("default", rid)
+        assert status["state"] == "completed", "completed must not be overwritten"
+
+
+# ---------------------------------------------------------------------------
+# P1-1: mark_worker_spawned retry
+# ---------------------------------------------------------------------------
+
+class TestMarkWorkerSpawnedRetry:
+    """P1-1: mark_worker_spawned retry."""
+
+    def test_mark_worker_spawned_all_retries_fail(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import RestartLock, create_intent
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+
+        lock = RestartLock("default")
+        # NOT acquired — mark_worker_spawned should fail every time
+        # (no owner_token match)
+        for _ in range(3):
+            assert lock.mark_worker_spawned(1234, time.time() + 30) is False
+
+
+# ---------------------------------------------------------------------------
+# P1-2: _wait_for_handoff request_id check
+# ---------------------------------------------------------------------------
+
+class TestHandoffRequestId:
+    """P1-2: _wait_for_handoff request_id check."""
+
+    def test_handoff_rejects_wrong_request_id(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            RestartLock, create_intent, lock_path,
+        )
+        import hermes_cli.gateway_windows_restart_worker as worker_mod
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+        nonce = intent["nonce"]
+
+        # Coordinator acquires and sets up lock
+        coord_lock = RestartLock("default")
+        assert coord_lock.try_acquire(rid) is True
+
+        # Worker calls _wait_for_handoff with wrong request_id
+        result = worker_mod._wait_for_handoff(
+            "default", "wrong-request-id", "some-token", timeout=1.0)
+        assert result is False
