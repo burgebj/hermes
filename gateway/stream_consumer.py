@@ -600,6 +600,24 @@ class GatewayStreamConsumer:
                             )
                             if self._final_response_sent:
                                 self._final_content_delivered = True
+                            elif (
+                                self._already_sent
+                                and self._visible_text_matches(self._accumulated)
+                            ):
+                                # The finalize edit failed (e.g. Telegram
+                                # flood control) but the user already has
+                                # the full content visible from a preceding
+                                # mid-stream edit.  Mark as delivered so
+                                # the base gateway suppression fires and
+                                # doesn't send a duplicate.  (#36965)
+                                #
+                                # Guard: only suppress when the visible
+                                # text actually matches the final response.
+                                # For adapters with REQUIRES_EDIT_FINALIZE
+                                # the mid-stream edit may only show partial
+                                # content with a cursor — in that case the
+                                # gateway must still send.  (#25010)
+                                self._final_content_delivered = True
                         elif not self._already_sent:
                             self._final_response_sent = await self._send_or_edit(self._accumulated)
                             if self._final_response_sent:
@@ -732,6 +750,16 @@ class GatewayStreamConsumer:
         if self.cfg.cursor and prefix.endswith(self.cfg.cursor):
             prefix = prefix[:-len(self.cfg.cursor)]
         return self._clean_for_display(prefix)
+
+    def _visible_text_matches(self, text: str) -> bool:
+        """Check whether the currently visible message matches *text*.
+
+        Strips the streaming cursor from ``_last_sent_text`` before
+        comparing so a mid-stream edit that appended ``cursor`` is still
+        considered a match for the cursor-free final content.
+        """
+        visible = self._visible_prefix()
+        return bool(visible) and self._clean_for_display(text) == visible
 
     def _continuation_text(self, final_text: str) -> str:
         """Return only the part of final_text the user has not already seen."""
