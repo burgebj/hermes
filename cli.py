@@ -8682,6 +8682,49 @@ class HermesCLI:
         print(f"(._.) Unknown cron command: {subcommand}")
         print("  Available: list, add, edit, pause, resume, run, remove")
 
+    def _handle_suggestions_command(self, cmd: str):
+        """Handle /suggestions — review/accept/dismiss suggested automations.
+
+        Delegates to the shared handler so CLI and gateway never drift. CLI
+        origin is the local platform so an accepted job's "origin" delivery
+        resolves to a configured home channel.
+        """
+        import shlex
+
+        try:
+            tokens = shlex.split(cmd)[1:] if cmd else []
+        except ValueError:
+            tokens = (cmd or "").split()[1:]
+        args = " ".join(tokens)
+        try:
+            from hermes_cli.suggestions_cmd import handle_suggestions_command
+            output = handle_suggestions_command(args)
+        except Exception as e:
+            output = f"Suggestions command failed: {e}"
+        self._console_print(output)
+
+    def _handle_cron_recipe_command(self, cmd: str):
+        """Handle /cron-recipe — set up an automation from a recipe template.
+
+        Delegates to the shared handler so CLI, TUI, and gateway never drift.
+        The user pastes a pre-filled command (from the docs/dashboard or a bare
+        ``/cron-recipe`` listing), edits the slot values, and sends; the handler
+        validates and creates the cron job, or names the slot that's missing.
+        """
+        import shlex
+
+        try:
+            tokens = shlex.split(cmd)[1:] if cmd else []
+        except ValueError:
+            tokens = (cmd or "").split()[1:]
+        args = " ".join(shlex.quote(t) for t in tokens)
+        try:
+            from hermes_cli.cron_recipe_cmd import handle_cron_recipe_command
+            output = handle_cron_recipe_command(args)
+        except Exception as e:
+            output = f"Cron recipe command failed: {e}"
+        self._console_print(output)
+
     def _handle_curator_command(self, cmd: str):
         """Handle /curator slash command.
 
@@ -9035,6 +9078,10 @@ class HermesCLI:
             self.save_conversation()
         elif canonical == "cron":
             self._handle_cron_command(cmd_original)
+        elif canonical == "suggestions":
+            self._handle_suggestions_command(cmd_original)
+        elif canonical == "cron-recipe":
+            self._handle_cron_recipe_command(cmd_original)
         elif canonical == "curator":
             self._handle_curator_command(cmd_original)
         elif canonical == "kanban":
