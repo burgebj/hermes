@@ -2224,6 +2224,38 @@ class TestOrchestratorRoleSchema(unittest.TestCase):
         self.assertEqual(child._delegate_role, "leaf")
         self.assertTrue(any("coercing" in m.lower() for m in cm.output))
 
+    @patch.dict(os.environ, {"HERMES_PROFILE": "builder"}, clear=False)
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config",
+           return_value={"max_spawn_depth": 2})
+    def test_child_agent_receives_delegated_session_metadata(
+        self, mock_cfg, mock_creds
+    ):
+        mock_creds.return_value = {
+            "provider": None, "base_url": None,
+            "api_key": None, "api_mode": None, "model": None,
+        }
+        parent = _make_mock_parent(depth=0)
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "done", "completed": True,
+                "api_calls": 1, "messages": [],
+            }
+            mock_child._delegate_saved_tool_names = []
+            mock_child._credential_pool = None
+            mock_child.session_prompt_tokens = 0
+            mock_child.session_completion_tokens = 0
+            mock_child.model = "test"
+            MockAgent.return_value = mock_child
+
+            delegate_task(goal="test", parent_agent=parent, role="orchestrator")
+
+        kwargs = MockAgent.call_args.kwargs
+        self.assertEqual(kwargs["delegated_role"], "orchestrator")
+        self.assertEqual(kwargs["delegated_profile"], "builder")
+        self.assertEqual(mock_child._delegated_profile, "builder")
+
     def test_schema_has_role_top_level_and_per_task(self):
         from tools.delegate_tool import DELEGATE_TASK_SCHEMA
         props = DELEGATE_TASK_SCHEMA["parameters"]["properties"]

@@ -21,7 +21,13 @@ from unittest.mock import patch
 class TestFlushDeduplication:
     """Verify _flush_messages_to_session_db tracks what it already wrote."""
 
-    def _make_agent(self, session_db):
+    def _make_agent(
+        self,
+        session_db,
+        *,
+        delegated_role=None,
+        delegated_profile=None,
+    ):
         """Create a minimal AIAgent with a real session DB."""
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
             from run_agent import AIAgent
@@ -34,10 +40,31 @@ class TestFlushDeduplication:
                 session_id="test-session-860",
                 skip_context_files=True,
                 skip_memory=True,
+                delegated_role=delegated_role,
+                delegated_profile=delegated_profile,
             )
         # Simulate lazy session creation (normally done by run_conversation)
         agent._ensure_db_session()
         return agent
+
+    def test_ensure_db_session_persists_delegated_metadata(self):
+        """The lazily-created session row keeps delegated session metadata."""
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.db"
+            db = SessionDB(db_path=db_path)
+
+            agent = self._make_agent(
+                db,
+                delegated_role="leaf",
+                delegated_profile="builder",
+            )
+
+            session = db.get_session(agent.session_id)
+            assert session is not None
+            assert session["delegated_role"] == "leaf"
+            assert session["delegated_profile"] == "builder"
 
     def test_flush_writes_only_new_messages(self):
         """First flush writes all new messages, second flush writes none."""

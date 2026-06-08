@@ -19,7 +19,13 @@ from unittest.mock import MagicMock, patch
 
 
 class TestCompressionBoundaryHook:
-    def _make_agent(self, session_db):
+    def _make_agent(
+        self,
+        session_db,
+        *,
+        delegated_role=None,
+        delegated_profile=None,
+    ):
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
             from run_agent import AIAgent
             return AIAgent(
@@ -31,6 +37,8 @@ class TestCompressionBoundaryHook:
                 session_id="original-session",
                 skip_context_files=True,
                 skip_memory=True,
+                delegated_role=delegated_role,
+                delegated_profile=delegated_profile,
             )
 
     def test_on_session_start_called_with_compression_boundary(self):
@@ -159,3 +167,35 @@ class TestCompressionBoundaryHook:
             )
             assert compressed
             assert agent.session_id != original_sid
+
+    def test_compression_split_persists_delegated_session_metadata(self):
+        from hermes_state import SessionDB
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(db_path=Path(tmpdir) / "test.db")
+            agent = self._make_agent(
+                db,
+                delegated_role="leaf",
+                delegated_profile="builder",
+            )
+            agent._ensure_db_session()
+
+            compressor = MagicMock()
+            compressor.compress.return_value = [{"role": "user", "content": "summary"}]
+            compressor.compression_count = 1
+            compressor.last_prompt_tokens = 0
+            compressor.last_completion_tokens = 0
+            compressor._last_summary_error = None
+            compressor._last_compress_aborted = False
+            agent.context_compressor = compressor
+
+            original_sid = agent.session_id
+            agent._compress_context(
+                [{"role": "user", "content": "m"}], "sys", approx_tokens=100
+            )
+
+            session = db.get_session(agent.session_id)
+            assert session is not None
+            assert session["parent_session_id"] == original_sid
+            assert session["delegated_role"] == "leaf"
+            assert session["delegated_profile"] == "builder"

@@ -520,6 +520,8 @@ def compress_context(
                 model=agent.model,
                 model_config=agent._session_init_model_config,
                 parent_session_id=old_session_id,
+                delegated_role=getattr(agent, "_delegated_role", None),
+                delegated_profile=getattr(agent, "_delegated_profile", None),
             )
             agent._session_db_created = True
             # Auto-number the title for the continuation session

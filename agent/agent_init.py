@@ -220,6 +220,8 @@ def init_agent(
     checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
+    delegated_role: str = None,
+    delegated_profile: str = None,
 ):
     """
     Initialize the AI Agent.
@@ -1068,6 +1070,8 @@ def init_agent(
     # SQLite session store (optional -- provided by CLI or gateway)
     agent._session_db = session_db
     agent._parent_session_id = parent_session_id
+    agent._delegated_role = delegated_role
+    agent._delegated_profile = delegated_profile
     agent._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
     agent._session_db_created = False  # DB row deferred to run_conversation()
     agent._session_init_model_config = {

@@ -409,6 +409,8 @@ class AIAgent:
         checkpoint_max_total_size_mb: int = 500,
         checkpoint_max_file_size_mb: int = 10,
         pass_session_id: bool = False,
+        delegated_role: str = None,
+        delegated_profile: str = None,
     ):
         """Forwarder — see ``agent.agent_init.init_agent``."""
         from agent.agent_init import init_agent
@@ -473,6 +475,8 @@ class AIAgent:
             skip_memory=skip_memory,
             session_db=session_db,
             parent_session_id=parent_session_id,
+            delegated_role=delegated_role,
+            delegated_profile=delegated_profile,
             iteration_budget=iteration_budget,
             fallback_model=fallback_model,
             credential_pool=credential_pool,
@@ -516,6 +520,8 @@ class AIAgent:
                 system_prompt=self._cached_system_prompt,
                 user_id=None,
                 parent_session_id=self._parent_session_id,
+                delegated_role=self._delegated_role,
+                delegated_profile=self._delegated_profile,
                 cwd=_launch_cwd_for_session(source),
             )
             self._session_db_created = True

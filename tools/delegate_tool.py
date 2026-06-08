@@ -110,6 +110,36 @@ def _get_subagent_approval_callback():
         return _subagent_auto_approve
     return _subagent_auto_deny
 
+
+def _resolve_delegated_profile(parent_agent) -> Optional[str]:
+    """Resolve the Hermes profile identity to persist on delegated sessions.
+
+    Nested subagents inherit the profile already attached to their parent.
+    Otherwise prefer the explicit runtime env and fall back to Hermes'
+    active-profile resolver.
+    """
+    inherited = None
+    parent_dict = getattr(parent_agent, "__dict__", None)
+    if isinstance(parent_dict, dict):
+        inherited = parent_dict.get("_delegated_profile")
+    elif hasattr(parent_agent, "_delegated_profile"):
+        inherited = getattr(parent_agent, "_delegated_profile", None)
+    inherited = str(inherited or "").strip()
+    if inherited:
+        return inherited
+
+    env_profile = str(os.environ.get("HERMES_PROFILE", "") or "").strip()
+    if env_profile:
+        return env_profile
+
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        profile = str(get_active_profile_name() or "").strip()
+        return profile or None
+    except Exception:
+        return None
+
 # Build a description fragment listing toolsets available for subagents.
 # Excludes toolsets where ALL tools are blocked, composite/platform toolsets
 # (hermes-* prefixed), and scenario toolsets.
@@ -1136,6 +1166,7 @@ def _build_child_agent(
         # Note: openrouter_min_coding_score is model-gated (only emitted on
         # openrouter/pareto-code), so we keep it inherited even when the
         # provider is overridden — it's a no-op on any other model.
+    delegated_profile = _resolve_delegated_profile(parent_agent)
 
     child = AIAgent(
         base_url=effective_base_url,
@@ -1161,6 +1192,8 @@ def _build_child_agent(
         thinking_callback=child_thinking_cb,
         session_db=getattr(parent_agent, "_session_db", None),
         parent_session_id=getattr(parent_agent, "session_id", None),
+        delegated_role=effective_role,
+        delegated_profile=delegated_profile,
         providers_allowed=child_providers_allowed,
         providers_ignored=child_providers_ignored,
         providers_order=child_providers_order,
@@ -1175,6 +1208,7 @@ def _build_child_agent(
     # Stash the post-degrade role for introspection (leaf if the
     # kill switch or depth bounded the caller's requested role).
     child._delegate_role = effective_role
+    child._delegated_profile = delegated_profile
     # Stash subagent identity for nested-delegation event propagation and
     # for _run_single_child / interrupt_subagent to look up by id.
     child._subagent_id = subagent_id

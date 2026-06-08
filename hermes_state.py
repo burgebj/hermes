@@ -239,6 +239,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     model_config TEXT,
     system_prompt TEXT,
     parent_session_id TEXT,
+    delegated_role TEXT,
+    delegated_profile TEXT,
     started_at REAL NOT NULL,
     ended_at REAL,
     end_reason TEXT,
@@ -947,14 +949,17 @@ class SessionDB:
         system_prompt: str = None,
         user_id: str = None,
         parent_session_id: str = None,
+        delegated_role: str = None,
+        delegated_profile: str = None,
         cwd: str = None,
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
             conn.execute(
                 """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, cwd, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   system_prompt, parent_session_id, delegated_role, delegated_profile,
+                   cwd, started_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     source,
@@ -963,6 +968,8 @@ class SessionDB:
                     json.dumps(model_config) if model_config else None,
                     system_prompt,
                     parent_session_id,
+                    delegated_role,
+                    delegated_profile,
                     cwd,
                     time.time(),
                 ),
