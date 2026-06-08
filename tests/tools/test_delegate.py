@@ -1997,6 +1997,99 @@ class TestDelegationReasoningEffort(unittest.TestCase):
         self.assertEqual(call_kwargs["reasoning_config"], {"enabled": True, "effort": "medium"})
 
 
+class TestNestedDelegationModelRouting(unittest.TestCase):
+    @patch("tools.delegate_tool._resolve_delegation_credentials")
+    @patch("tools.delegate_tool._load_config")
+    @patch("run_agent.AIAgent")
+    def test_delegate_task_nested_uses_nested_model_when_model_configured(
+        self, MockAgent, mock_cfg, mock_creds
+    ):
+        mock_cfg.return_value = {
+            "max_iterations": 50,
+            "max_spawn_depth": 2,
+            "model": "gpt-5.5",
+            "nested_model": "gpt-5.4-mini",
+            "reasoning_effort": "xhigh",
+        }
+        mock_creds.return_value = {
+            "model": "gpt-5.5",
+            "provider": None,
+            "base_url": None,
+            "api_key": None,
+            "api_mode": None,
+        }
+        mock_child = MagicMock()
+        mock_child.run_conversation.return_value = {
+            "final_response": "done",
+            "completed": True,
+            "api_calls": 1,
+        }
+        MockAgent.return_value = mock_child
+        parent = _make_mock_parent(depth=1)
+
+        delegate_task(
+            goal="Summarize these notes",
+            context="Routine cleanup summary",
+            parent_agent=parent,
+        )
+
+        self.assertEqual(MockAgent.call_args[1]["model"], "gpt-5.4-mini")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("run_agent.AIAgent")
+    def test_routine_nested_leaf_uses_nested_model(self, MockAgent, mock_cfg):
+        mock_cfg.return_value = {
+            "max_iterations": 50,
+            "model": "gpt-5.5",
+            "nested_model": "gpt-5.4-mini",
+            "reasoning_effort": "xhigh",
+        }
+        MockAgent.return_value = MagicMock()
+        parent = _make_mock_parent(depth=1)
+        parent.model = "parent-model"
+        parent.reasoning_config = {"enabled": True, "effort": "xhigh"}
+
+        _build_child_agent(
+            task_index=0,
+            goal="Summarize these notes",
+            context="Routine cleanup summary",
+            toolsets=None,
+            model=None,
+            max_iterations=50,
+            parent_agent=parent,
+            task_count=1,
+        )
+
+        self.assertEqual(MockAgent.call_args[1]["model"], "gpt-5.4-mini")
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("run_agent.AIAgent")
+    def test_hard_nested_leaf_escalates_to_stronger_model(self, MockAgent, mock_cfg):
+        mock_cfg.return_value = {
+            "max_iterations": 50,
+            "model": "gpt-5.5",
+            "nested_model": "gpt-5.4-mini",
+            "reasoning_effort": "xhigh",
+        }
+        MockAgent.return_value = MagicMock()
+        parent = _make_mock_parent(depth=1)
+        parent.model = "parent-model"
+        parent.reasoning_config = {"enabled": True, "effort": "xhigh"}
+
+        _build_child_agent(
+            task_index=0,
+            goal="Debug a trading regression and review risk",
+            context="Root-cause analysis for a hard failure",
+            toolsets=None,
+            model=None,
+            max_iterations=50,
+            parent_agent=parent,
+            task_count=1,
+        )
+
+        self.assertEqual(MockAgent.call_args[1]["model"], "gpt-5.5")
+
+
 # =========================================================================
 # Dispatch helper, progress events, concurrency
 # =========================================================================

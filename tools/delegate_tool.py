@@ -703,6 +703,75 @@ def _resolve_workspace_hint(parent_agent) -> Optional[str]:
     return None
 
 
+_NESTED_MODEL_ESCALATION_HINTS = (
+    "debug",
+    "debugging",
+    "troubleshoot",
+    "root cause",
+    "investigat",
+    "analysis",
+    "review",
+    "audit",
+    "risk",
+    "trading",
+    "architecture",
+    "design",
+    "failure",
+    "bug",
+    "regress",
+    "critical",
+    "safety",
+    "hard",
+)
+
+
+def _should_escalate_nested_child(goal: Optional[str], context: Optional[str], role: str) -> bool:
+    """Return True when a nested child should use the stronger model.
+
+    The policy is intentionally simple: nested leaf tasks stay on the fast
+    nested model by default, while higher-stakes / harder tasks (and any nested
+    orchestrator role) escalate to the stronger delegation model.
+    """
+    if role == "orchestrator":
+        return True
+    haystack = f"{goal or ''} {context or ''}".lower()
+    return any(hint in haystack for hint in _NESTED_MODEL_ESCALATION_HINTS)
+
+
+def _select_child_model(
+    delegation_cfg: Dict[str, Any],
+    parent_agent,
+    explicit_model: Optional[str],
+    goal: Optional[str],
+    context: Optional[str],
+    role: str,
+    child_depth: int,
+) -> Optional[str]:
+    """Choose the model for a child agent.
+
+    Top-level children use delegation.model (or inherit the parent model).
+    Nested children default to delegation.nested_model unless the task looks
+    hard/high-stakes, in which case they escalate to delegation.model.
+    """
+    configured_default = str(delegation_cfg.get("model") or "").strip() or None
+    # delegate_task forwards the resolved configured model into _build_child_agent
+    # for credential-routing compatibility. Treat that as the default, not as a
+    # per-call override that should block delegation.nested_model.
+    explicit_is_configured_default = (
+        explicit_model is not None and explicit_model == configured_default
+    )
+    if explicit_model and not explicit_is_configured_default:
+        return explicit_model
+
+    default_model = explicit_model or configured_default or getattr(parent_agent, "model", None)
+    nested_model = str(delegation_cfg.get("nested_model") or "").strip() or default_model
+
+    if child_depth > 1:
+        return default_model if _should_escalate_nested_child(goal, context, role) else nested_model
+
+    return default_model
+
+
 def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
     """Remove toolsets that contain only blocked tools."""
     blocked_toolset_names = {
@@ -1016,7 +1085,15 @@ def _build_child_agent(
         parent_api_key = parent_agent._client_kwargs.get("api_key")
 
     # Resolve the child's effective model early so it can ride on every event.
-    effective_model_for_cb = model or getattr(parent_agent, "model", None)
+    effective_model_for_cb = _select_child_model(
+        delegation_cfg,
+        parent_agent,
+        model,
+        goal,
+        context,
+        effective_role,
+        child_depth,
+    )
 
     # Build progress callback to relay tool calls to parent display.
     # Identity kwargs thread the subagent_id through every emitted event so the
@@ -1052,7 +1129,15 @@ def _build_child_agent(
         child_thinking_cb = _child_thinking
 
     # Resolve effective credentials: config override > parent inherit
-    effective_model = model or parent_agent.model
+    effective_model = _select_child_model(
+        delegation_cfg,
+        parent_agent,
+        model,
+        goal,
+        context,
+        effective_role,
+        child_depth,
+    )
     effective_provider = override_provider or getattr(parent_agent, "provider", None)
     effective_base_url = override_base_url or parent_agent.base_url
     effective_api_key = override_api_key or parent_api_key
