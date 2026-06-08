@@ -9486,6 +9486,17 @@ class GatewayRunner:
         if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
             platform_name = source.platform.value
             env_key = _home_target_env_var(platform_name)
+            # Platform display-name overrides for mixed-case brands where
+            # naive .title() reads awkwardly ("Dingtalk" → "DingTalk").
+            _display_overrides = {
+                "dingtalk": "DingTalk",
+                "feishu": "Feishu",
+                "wecom": "WeCom",
+                "qqbot": "QQ",
+                "bluebubbles": "BlueBubbles",
+                "homeassistant": "Home Assistant",
+            }
+            display_name = _display_overrides.get(platform_name, platform_name.title())
             if not os.getenv(env_key):
                 # Slack dispatches all Hermes commands through a single
                 # parent slash command `/hermes`; bare `/sethome` is not
@@ -9496,7 +9507,7 @@ class GatewayRunner:
                     else "/sethome"
                 )
                 notice = (
-                    f"📬 No home channel is set for {platform_name.title()}. "
+                    f"📬 No home channel is set for {display_name}. "
                     f"A home channel is where Hermes delivers cron job results "
                     f"and cross-platform messages.\n\n"
                     f"Type {sethome_cmd} to make this chat your home channel, "

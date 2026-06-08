@@ -92,6 +92,7 @@ website/static/api/skills-meta.json
 models-dev-upstream/
 
 # Local editor / agent tooling (machine-specific; keep in global config, not the repo)
+.claude/
 .codex/
 .cursor/
 .gemini/
