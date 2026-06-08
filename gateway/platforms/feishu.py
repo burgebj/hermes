@@ -157,12 +157,80 @@ _MARKDOWN_HINT_RE = re.compile(
 # Detect markdown tables: a line starting with | followed by a separator line.
 # Feishu post-type 'md' elements do not render tables, so we force text mode.
 _MARKDOWN_TABLE_RE = re.compile(r"^\|.*\|\n\|[-|: ]+\|", re.MULTILINE)
+
+
+def _convert_tables_to_code_blocks(content: str) -> str:
+    """Wrap markdown tables in ``` code fences so Feishu renders them
+    as monospaced text instead of dropping them silently.
+
+    Consecutive lines starting with | that include a separator row
+    (|---|) are treated as a single table block and wrapped.
+    """
+    lines = content.split("\n")
+    result = []
+    table_buf = []
+    in_table = False
+
+    # Pattern: any line starting with | is a candidate table row
+    _TABLE_ROW = re.compile(r"^\|")
+
+    for i, line in enumerate(lines):
+        is_table_row = bool(_TABLE_ROW.match(line))
+        if is_table_row:
+            table_buf.append(line)
+            in_table = True
+        else:
+            if in_table and table_buf:
+                # Check if this was actually a table (has separator row)
+                has_sep = any(re.match(r"^\|[-|: ]+\|$", r) for r in table_buf)
+                if has_sep and len(table_buf) >= 2:
+                    result.append("```")
+                    result.extend(table_buf)
+                    result.append("```")
+                else:
+                    result.extend(table_buf)
+                table_buf = []
+                in_table = False
+            result.append(line)
+
+    # Flush remaining
+    if in_table and table_buf:
+        has_sep = any(re.match(r"^\|[-|: ]+\|$", r) for r in table_buf)
+        if has_sep and len(table_buf) >= 2:
+            result.append("```")
+            result.extend(table_buf)
+            result.append("```")
+        else:
+            result.extend(table_buf)
+
+    return "\n".join(result)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _MARKDOWN_FENCE_OPEN_RE = re.compile(r"^```([^\n`]*)\s*$")
 _MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^```\s*$")
 _MENTION_RE = re.compile(r"@_user_\d+")
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 _POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)
+
+def _choose_outbound_msg_type(content: str) -> tuple[str, str]:
+    """Module-level outbound routing.
+
+    - Has table → wrap in code fences, send as POST.
+      ``_build_markdown_post_rows`` detects ``` and emits ``code_block``
+      tags so the table renders as a code block while surrounding prose
+      (bold / links / lists) keeps its markdown formatting.
+    - No table, has MD hints → send as POST.
+    - Otherwise → send as TEXT.
+    """
+    has_table = bool(_MARKDOWN_TABLE_RE.search(content))
+    if has_table:
+        content = _convert_tables_to_code_blocks(content)
+    # Even without a table the content may have natural ``` fences;
+    # _build_markdown_post_rows handles both cases via code_block tags.
+    if _MARKDOWN_HINT_RE.search(content):
+        return "post", _build_markdown_post_payload(content)
+    text_payload = {"text": content}
+    return "text", json.dumps(text_payload, ensure_ascii=False)
+
 # ---------------------------------------------------------------------------
 # Media type sets and upload constants
 # ---------------------------------------------------------------------------
@@ -561,12 +629,12 @@ def _build_markdown_post_payload(content: str) -> str:
 
 
 def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
-    """Build Feishu post rows while isolating fenced code blocks.
+    """Build Feishu post rows — prose as md, code fences as code_block.
 
-    Feishu's `md` renderer can swallow trailing content when a fenced code block
-    appears inside one large markdown element. Split the reply at real fence
-    lines so prose before/after the code block remains visible while code stays
-    in a dedicated row.
+    Feishu's post ``md`` tag does not render fenced code blocks.  We detect
+    ``` fences, strip them, and emit ``code_block`` tags so the content
+    renders as a proper code block.  Prose segments before/after are wrapped
+    in ``md`` tags so bold / italic / links / lists still work.
     """
     if not content:
         return [[{"tag": "md", "text": ""}]]
@@ -576,13 +644,27 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
     rows: List[List[Dict[str, str]]] = []
     current: List[str] = []
     in_code_block = False
+    code_language = ""
 
-    def _flush_current() -> None:
-        nonlocal current
+    def _flush_current(*, is_code_block: bool = False) -> None:
+        nonlocal current, code_language
         if not current:
             return
         segment = "\n".join(current)
-        if segment.strip():
+        if not segment.strip():
+            current = []
+            return
+        if is_code_block:
+            lines = list(current)
+            # Peel off the opening and closing fences
+            if lines and _MARKDOWN_FENCE_OPEN_RE.match(lines[0].strip()):
+                lines = lines[1:]
+            if lines and _MARKDOWN_FENCE_CLOSE_RE.match(lines[-1].strip()):
+                lines = lines[:-1]
+            code_text = "\n".join(lines)
+            rows.append([{"tag": "code_block", "text": code_text, "language": code_language}])
+            code_language = ""
+        else:
             rows.append([{"tag": "md", "text": segment}])
         current = []
 
@@ -596,16 +678,19 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
 
         if is_fence:
             if not in_code_block:
-                _flush_current()
+                _flush_current(is_code_block=False)    # flush prose before fence
+                match = _MARKDOWN_FENCE_OPEN_RE.match(stripped_line)
+                if match:
+                    code_language = match.group(1).strip()
             current.append(raw_line)
             in_code_block = not in_code_block
             if not in_code_block:
-                _flush_current()
+                _flush_current(is_code_block=True)      # flush code block
             continue
 
         current.append(raw_line)
 
-    _flush_current()
+    _flush_current(is_code_block=False)
     return rows or [[{"tag": "md", "text": content}]]
 
 
@@ -4374,16 +4459,7 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements do not render markdown tables; sending
-        # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
-        if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
-        if _MARKDOWN_HINT_RE.search(content):
-            return "post", _build_markdown_post_payload(content)
-        text_payload = {"text": content}
-        return "text", json.dumps(text_payload, ensure_ascii=False)
+        return _choose_outbound_msg_type(content)
 
     async def _send_uploaded_file_message(
         self,

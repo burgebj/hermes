@@ -2637,7 +2637,7 @@ class TestAdapterBehavior(unittest.TestCase):
                         "text": "确认已入库 ✓\n文件路径：`/root/.hermes/profiles/agent_cto/cron/jobs.json`\n**解码后的内容：**",
                     }
                 ],
-                [{"tag": "md", "text": "```json\n{\"cron\": \"list\"}\n```"}],
+                [{"tag": "code_block", "text": '{"cron": "list"}', "language": "json"}],
                 [{"tag": "md", "text": "后续说明仍应保留。"}],
             ],
         )
@@ -2658,7 +2658,7 @@ class TestAdapterBehavior(unittest.TestCase):
             payload["zh_cn"]["content"],
             [
                 [{"tag": "md", "text": "before"}],
-                [{"tag": "md", "text": "```python\n```oops\n```"}],
+                [{"tag": "code_block", "text": "```oops", "language": "python"}],
                 [{"tag": "md", "text": "after"}],
             ],
         )
@@ -2679,7 +2679,7 @@ class TestAdapterBehavior(unittest.TestCase):
             payload["zh_cn"]["content"],
             [
                 [{"tag": "md", "text": "before"}],
-                [{"tag": "md", "text": "```python\nline with two spaces  \n```"}],
+                [{"tag": "code_block", "text": "line with two spaces  ", "language": "python"}],
                 [{"tag": "md", "text": "after"}],
             ],
         )
@@ -2700,9 +2700,9 @@ class TestAdapterBehavior(unittest.TestCase):
             payload["zh_cn"]["content"],
             [
                 [{"tag": "md", "text": "before"}],
-                [{"tag": "md", "text": "```python\nprint(1)\n```"}],
+                [{"tag": "code_block", "text": "print(1)", "language": "python"}],
                 [{"tag": "md", "text": "middle"}],
-                [{"tag": "md", "text": "```json\n{}\n```"}],
+                [{"tag": "code_block", "text": "{}", "language": "json"}],
                 [{"tag": "md", "text": "after"}],
             ],
         )
