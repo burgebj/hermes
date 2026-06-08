@@ -148,6 +148,10 @@ SEND_MESSAGE_SCHEMA = {
             "message": {
                 "type": "string",
                 "description": "The message text to send. To send an image or file, include MEDIA:<local_path> (e.g. 'MEDIA:/tmp/report.pdf') in the message — the platform will deliver it as a native media attachment."
+            },
+            "trigger_agent": {
+                "type": "boolean",
+                "description": "When true, a successful platform send also schedules an internal inbound event for the live destination gateway agent. Defaults false for passive notifications and loop prevention."
             }
         },
         "required": []
@@ -178,6 +182,7 @@ def _handle_send(args):
     """Send a message to a platform target."""
     target = args.get("target", "")
     message = args.get("message", "")
+    trigger_agent = args.get("trigger_agent") is True
     if not target or not message:
         return tool_error("Both 'target' and 'message' are required when action='send'")
 
@@ -325,30 +330,50 @@ def _handle_send(args):
         if used_home_channel and isinstance(result, dict) and result.get("success"):
             result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
 
-        # Mirror the sent message into the target's gateway session
         if isinstance(result, dict) and result.get("success") and mirror_text:
-            try:
-                from gateway.mirror import mirror_to_session
-                from gateway.session_context import get_session_env
-                source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
-                user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
-                if mirror_to_session(
-                    platform_name,
-                    chat_id,
-                    mirror_text,
-                    source_label=source_label,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                ):
-                    result["mirrored"] = True
-            except Exception:
-                pass
+            if trigger_agent:
+                result.update(_trigger_gateway_agent(platform, chat_id, thread_id, mirror_text))
+            else:
+                # Mirror the sent message into the target's gateway session.
+                try:
+                    from gateway.mirror import mirror_to_session
+                    from gateway.session_context import get_session_env
+                    source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
+                    user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
+                    if mirror_to_session(
+                        platform_name,
+                        chat_id,
+                        mirror_text,
+                        source_label=source_label,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    ):
+                        result["mirrored"] = True
+                except Exception:
+                    pass
 
         if isinstance(result, dict) and "error" in result:
             result["error"] = _sanitize_error_text(result["error"])
         return json.dumps(result)
     except Exception as e:
         return json.dumps(_error(f"Send failed: {e}"))
+
+
+def _trigger_gateway_agent(platform, chat_id: str, thread_id: str | None, text: str) -> dict:
+    """Schedule an active destination-agent wake-up through the live gateway."""
+    try:
+        from gateway.run import trigger_agent_message
+        trigger_result = trigger_agent_message(platform, chat_id, text, thread_id=thread_id)
+    except Exception as exc:
+        return {"trigger_error": _sanitize_error_text(str(exc))}
+
+    if not isinstance(trigger_result, dict):
+        return {"trigger_error": "invalid trigger result"}
+    if trigger_result.get("error") and "trigger_error" not in trigger_result:
+        trigger_result = {"trigger_error": trigger_result.get("error")}
+    if "trigger_error" in trigger_result:
+        trigger_result["trigger_error"] = _sanitize_error_text(str(trigger_result["trigger_error"]))
+    return trigger_result
 
 
 def _parse_target_ref(platform_name: str, target_ref: str):

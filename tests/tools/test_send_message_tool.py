@@ -455,6 +455,155 @@ class TestSendMessageTool:
             force_document=False,
         )
 
+    def test_passive_default_does_not_trigger_agent(self):
+        config, _telegram_cfg = _make_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
+             patch("tools.send_message_tool._trigger_gateway_agent") as trigger_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:12345",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        assert result["mirrored"] is True
+        trigger_mock.assert_not_called()
+        mirror_mock.assert_called_once()
+
+    def test_trigger_agent_sends_suppresses_mirror_and_calls_helper(self):
+        config, telegram_cfg = _make_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("tools.send_message_tool._trigger_gateway_agent", return_value={"triggered": True}) as trigger_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:12345:678",
+                        "message": "hello",
+                        "trigger_agent": True,
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        assert result["triggered"] is True
+        assert "mirrored" not in result
+        send_mock.assert_awaited_once_with(
+            Platform.TELEGRAM,
+            telegram_cfg,
+            "12345",
+            "hello",
+            thread_id="678",
+            media_files=[],
+            force_document=False,
+        )
+        trigger_mock.assert_called_once_with(Platform.TELEGRAM, "12345", "678", "hello")
+        mirror_mock.assert_not_called()
+
+    def test_trigger_agent_string_false_is_passive(self):
+        config, _telegram_cfg = _make_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
+             patch("tools.send_message_tool._trigger_gateway_agent") as trigger_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:12345",
+                        "message": "hello",
+                        "trigger_agent": "false",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        assert result["mirrored"] is True
+        trigger_mock.assert_not_called()
+        mirror_mock.assert_called_once()
+
+    def test_trigger_agent_no_live_runner_returns_sanitized_error(self):
+        config, _telegram_cfg = _make_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
+             patch("gateway.run._gateway_runner_ref", lambda: None), \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:12345",
+                        "message": "hello",
+                        "trigger_agent": True,
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        assert result["trigger_error"] == "no live gateway runner"
+        mirror_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_trigger_agent_message_schedules_internal_event(self):
+        from gateway.run import trigger_agent_message
+
+        source = SimpleNamespace(chat_id="12345", thread_id="678", is_bot=True)
+        adapter = SimpleNamespace(
+            build_source=MagicMock(return_value=source),
+            handle_message=AsyncMock(),
+        )
+        runner = SimpleNamespace(
+            adapters={Platform.TELEGRAM: adapter},
+            _background_tasks=set(),
+            _gateway_loop=None,
+        )
+
+        with patch("gateway.run._gateway_runner_ref", lambda: runner):
+            result = trigger_agent_message(Platform.TELEGRAM, "12345", "hello", thread_id="678")
+            await asyncio.sleep(0)
+
+        assert result == {"triggered": True}
+        adapter.build_source.assert_called_once_with(
+            chat_id="12345",
+            chat_type="thread",
+            thread_id="678",
+            is_bot=True,
+        )
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.text == "hello"
+        assert event.source is source
+        assert event.internal is True
+
+    def test_trigger_agent_missing_adapter_returns_sanitized_error(self):
+        from gateway.run import trigger_agent_message
+
+        runner = SimpleNamespace(adapters={})
+        with patch("gateway.run._gateway_runner_ref", lambda: runner):
+            result = trigger_agent_message(Platform.TELEGRAM, "12345", "hello")
+
+        assert result == {"trigger_error": "no live adapter"}
+
     def test_top_level_send_failure_redacts_query_token(self):
         config, _telegram_cfg = _make_config()
         leaked = "very-secret-query-token-123456"

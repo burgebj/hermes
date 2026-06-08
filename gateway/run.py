@@ -1862,6 +1862,58 @@ async def _dispose_unused_adapter(adapter: "BasePlatformAdapter | None") -> None
         )
 
 
+def trigger_agent_message(platform: Platform, chat_id: str, text: str, thread_id: str | None = None) -> dict:
+    """Wake a destination gateway session from send_message(trigger_agent=True).
+
+    This is intentionally runner-bound: active handoffs only work in the live
+    gateway process where the destination adapter and event loop exist. Other
+    processes (CLI/cron/tests without a runner) get a stable sanitized error
+    instead of silently claiming an agent was triggered.
+    """
+    runner = _gateway_runner_ref()
+    if runner is None:
+        return {"trigger_error": "no live gateway runner"}
+
+    adapter = runner.adapters.get(platform)
+    if adapter is None:
+        return {"trigger_error": "no live adapter"}
+
+    source = adapter.build_source(
+        chat_id=str(chat_id),
+        chat_type="thread" if thread_id else "channel",
+        thread_id=str(thread_id) if thread_id else None,
+        is_bot=True,
+    )
+    event = MessageEvent(
+        text=text,
+        message_type=MessageType.TEXT,
+        source=source,
+        internal=True,
+    )
+
+    async def _run_trigger() -> None:
+        await adapter.handle_message(event)
+
+    def _schedule_on_loop() -> None:
+        task = asyncio.create_task(_run_trigger())
+        runner._background_tasks.add(task)
+        task.add_done_callback(runner._background_tasks.discard)
+
+    loop = getattr(runner, "_gateway_loop", None)
+    if loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(_schedule_on_loop)
+    else:
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return {"trigger_error": "no live gateway runner"}
+        task = running_loop.create_task(_run_trigger())
+        runner._background_tasks.add(task)
+        task.add_done_callback(runner._background_tasks.discard)
+
+    return {"triggered": True}
+
+
 class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
     """
     Main gateway controller.
