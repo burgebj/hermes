@@ -1,4 +1,4 @@
-"""SearXNG search — plugin form.
+"""SearXNG search + extraction — plugin form.
 
 Subclasses :class:`agent.web_search_provider.WebSearchProvider`. Same JSON
 API call (``/search?format=json``), same result normalization. The legacy
@@ -6,8 +6,8 @@ in-tree module ``tools.web_providers.searxng`` was removed in the same
 commit that moved this code under ``plugins/``; this file is now the
 canonical implementation.
 
-Search-only — SearXNG aggregates results from upstream engines but does not
-fetch/extract arbitrary URLs. ``supports_extract()`` returns False.
+Search + Extract — SearXNG aggregates results from upstream engines and can
+fetch/extract page content via the ``fetch_url`` query parameter.
 
 Config keys this provider responds to::
 
@@ -17,7 +17,7 @@ Config keys this provider responds to::
 
 Env var::
 
-    SEARXNG_URL=http://localhost:8080
+    SEARXNG_URL=https://search.worldofwoof.com
 """
 
 from __future__ import annotations
@@ -63,7 +63,53 @@ class SearXNGWebSearchProvider(WebSearchProvider):
         return True
 
     def supports_extract(self) -> bool:
-        return False
+        return True
+
+    def extract(self, urls: list, **kwargs: Any) -> str:
+        """Extract page content from a URL via SearXNG's fetch_url parameter."""
+        import httpx
+
+        if not urls:
+            raise RuntimeError("No URLs provided for extraction")
+
+        base_url = os.getenv("SEARXNG_URL", "").strip().rstrip("/")
+        if not base_url:
+            raise RuntimeError("SEARXNG_URL is not set")
+
+        target_url = urls[0]
+        params = {
+            "q": "fetch",
+            "format": "json",
+            "pageno": 1,
+            "fetch_url": target_url,
+        }
+
+        try:
+            resp = httpx.get(
+                f"{base_url}/search",
+                params=params,
+                timeout=30,
+                headers={"Accept": "application/json"},
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"SearXNG fetch returned HTTP {exc.response.status_code}"
+            )
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"Could not fetch {target_url} via SearXNG: {exc}")
+
+        try:
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to parse SearXNG extract response: {exc}")
+
+        raw_results = data.get("results", [])
+        if not raw_results:
+            raise RuntimeError(f"SearXNG returned no content for {target_url}")
+
+        # Use the first result's content (from fetch_url extraction)
+        return raw_results[0].get("content", "")
 
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
         """Execute a search against the configured SearXNG instance."""

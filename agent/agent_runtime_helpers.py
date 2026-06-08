@@ -892,6 +892,62 @@ def drop_thinking_only_and_merge_users(
 
 
 
+def _primary_health_check_loop(agent, base_url: str, api_key: str, *, provider: str = ""):
+    """Background daemon thread: periodically probe the primary endpoint.
+
+    When the primary responds with a non-5xx status, set
+    agent._primary_healthy = True so the next turn can restore it.
+
+    Probes every 30 seconds with a 5-second timeout. Stops after the
+    primary is confirmed healthy.
+    """
+    import httpx
+
+    health_url = base_url.rstrip("/") + "/models"
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    interval = 30  # seconds between probes
+    timeout = 5    # hard timeout per probe
+    max_attempts = 120  # ~1 hour max
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                resp = client.get(health_url, headers=headers)
+                if resp.status_code in (200,):
+                    agent._primary_healthy = True
+                    logger.info(
+                        "Primary health check passed after %d attempts (%ds): %s",
+                        attempt, attempt * interval, base_url,
+                    )
+                    return
+                if resp.status_code == 503:
+                    # Server is up but loading model — healthy enough to restore
+                    agent._primary_healthy = True
+                    logger.info(
+                        "Primary responding (HTTP 503 - loading model) after %d attempts: %s",
+                        attempt, base_url,
+                    )
+                    return
+                logger.debug(
+                    "Primary health check attempt %d: HTTP %d from %s",
+                    attempt, resp.status_code, base_url,
+                )
+        except Exception as e:
+            logger.info(
+                "Primary health check attempt %d failed: %s (%s)",
+                attempt, base_url, e,
+            )
+        time.sleep(interval)
+
+    logger.warning(
+        "Primary health check gave up after %d attempts (%ds): %s",
+        max_attempts, max_attempts * interval, base_url,
+    )
+
+
 def restore_primary_runtime(agent) -> bool:
     """Restore the primary runtime at the start of a new turn.
 
@@ -916,6 +972,31 @@ def restore_primary_runtime(agent) -> bool:
 
     if getattr(agent, "_rate_limited_until", 0) > time.monotonic():
         return False  # primary still in rate-limit cooldown, stay on fallback
+
+    # Background health check: probe the primary while the user works on
+    # fallback.  If a probe thread is running, wait for it to confirm the
+    # primary is healthy before restoring.  If no health check thread exists
+    # yet, spawn one and stay on fallback until it responds.
+    if not getattr(agent, "_primary_healthy", False):
+        hc = getattr(agent, "_primary_health_check_thread", None)
+        if hc is None or not hc.is_alive():
+            _rt = agent._primary_runtime
+            base_url = _rt.get("base_url", "")
+            api_key = _rt.get("api_key", "")
+            provider = _rt.get("provider", "")
+            t = threading.Thread(
+                target=_primary_health_check_loop,
+                args=(agent, base_url, api_key),
+                kwargs={"provider": provider},
+                daemon=True,
+            )
+            agent._primary_health_check_thread = t
+            t.start()
+            logger.info(
+                "Background primary health check started: %s",
+                base_url,
+            )
+        return False  # stay on fallback until health check confirms primary is up
 
     rt = agent._primary_runtime
     try:
@@ -968,6 +1049,9 @@ def restore_primary_runtime(agent) -> bool:
         # ── Reset fallback chain for the new turn ──
         agent._fallback_activated = False
         agent._fallback_index = 0
+        # Clean up health check state so a subsequent failover cycle starts fresh
+        agent._primary_healthy = False
+        agent._primary_health_check_thread = None
 
         logger.info(
             "Primary runtime restored for new turn: %s (%s)",
@@ -983,7 +1067,9 @@ def restore_primary_runtime(agent) -> bool:
 _TRANSIENT_TRANSPORT_ERRORS = frozenset({
     "ReadTimeout", "ConnectTimeout", "PoolTimeout",
     "ConnectError", "RemoteProtocolError",
-    "APIConnectionError", "APITimeoutError",
+    "APIConnectionError",
+    # APITimeoutError excluded — server not responding is a real outage,
+    # not a stale connection. Don't waste time rebuilding the client.
 })
 
 
@@ -1592,6 +1678,8 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
     # ── Reset fallback state ──
     agent._fallback_activated = False
     agent._fallback_index = 0
+    agent._primary_healthy = False
+    agent._primary_health_check_thread = None
 
     # When the user deliberately swaps primary providers (e.g. openrouter
     # → anthropic), drop any fallback entries that target the OLD primary

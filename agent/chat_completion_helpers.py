@@ -1160,7 +1160,8 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # Clear the per-config context_length override so the fallback
         # model's actual context window is resolved instead of inheriting
         # the stale value from the previous model.  See #22387.
-        agent._config_context_length = None
+        fb_context_len = fb.get("context_length")
+        agent._config_context_length = fb_context_len
         agent.model = fb_model
         agent.provider = fb_provider
         agent.base_url = fb_base_url
@@ -1168,6 +1169,10 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent._fallback_activated = True
+        # Invalidate any stale health-check success from a prior cycle.
+        # Without this, a second failover would see _primary_healthy == True
+        # and try to restore to the dead primary without re-probing.
+        agent._primary_healthy = False
 
         # Clear the credential pool when the fallback provider doesn't match
         # the pool's provider.  The pool was seeded for the primary provider;
