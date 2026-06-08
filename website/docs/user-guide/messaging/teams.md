@@ -29,7 +29,7 @@ Teams delivers @mentions as regular messages with `<at>BotName</at>` tags, which
 The `@microsoft/teams.cli` automates bot registration — no Azure portal needed.
 
 ```bash
-npm install -g @microsoft/teams.cli@preview
+npm install -g @microsoft/teams.cli
 teams login
 ```
 
