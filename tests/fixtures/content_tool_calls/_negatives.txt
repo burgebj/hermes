@@ -1,0 +1,6 @@
+Use the <function> keyword in JS.
+Here's the JSON you'd send: {"name": "web_search", "arguments": {}} — note the shape.
+The tool is called web_search.
+To search you would emit <tool_call>{"name": "web_search", "arguments": {"q": "x"}}</tool_call> inline.
+You can call it like <invoke name="web_search"><parameter name="q">x</parameter></invoke> mid-sentence.
+Declare with <function=web_search>{"q": "x"}</function> somewhere in the line.

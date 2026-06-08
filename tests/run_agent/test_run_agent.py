@@ -4206,6 +4206,49 @@ class TestRunConversation:
         assert third_call_messages[-1]["role"] == "user"
         assert "truncated by the output length limit" in third_call_messages[-1]["content"]
 
+    def test_ollama_glm_content_embedded_tool_call_is_promoted_not_truncated(self, agent):
+        """A GLM 'stop' whose content holds a tool call must execute it, not
+        divert into length-continuation. Guards the promotion-vs-truncation
+        ordering at the early finish_reason gate."""
+        self._setup_agent(agent)
+        agent.base_url = "http://localhost:11434/v1"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "glm-5.1:cloud"
+
+        tool_turn = _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call(name="web_search", arguments="{}", call_id="c1")],
+        )
+        # Non-natural-ending prose (gate fires) + a tool call embedded in content.
+        embedded = _mock_response(
+            content=(
+                "Let me search for more recent information\n"
+                '<tool_call>{"name": "web_search", "arguments": {"query": "hermes"}}</tool_call>'
+            ),
+            finish_reason="stop",
+        )
+        final = _mock_response(content="Done.", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [tool_turn, embedded, final]
+
+        with (
+            patch("run_agent.handle_function_call", return_value="search result") as mock_call,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is True
+        assert result["final_response"] == "Done."
+        assert mock_call.call_count == 2  # structured call + promoted content call
+        sent = [
+            m
+            for call in agent.client.chat.completions.create.call_args_list
+            for m in call.kwargs["messages"]
+        ]
+        assert not any("truncated by the output length limit" in (m.get("content") or "") for m in sent)
+
     def test_ollama_glm_stop_with_terminal_boundary_does_not_continue(self, agent):
         """Complete Ollama/GLM responses should not be reclassified as truncated."""
         self._setup_agent(agent)

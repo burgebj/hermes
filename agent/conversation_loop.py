@@ -56,6 +56,7 @@ from agent.model_metadata import (
 from agent.process_bootstrap import _install_safe_stdio
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.retry_utils import jittered_backoff
+from agent.transports.content_tool_calls import extract_content_tool_calls
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from hermes_constants import PARTIAL_STREAM_STUB_ID
@@ -366,6 +367,21 @@ def _get_continuation_prompt(is_partial_stub: bool, dropped_tools: Optional[List
             "length limit. Continue exactly where you left off. Do not "
             "restart or repeat prior text. Finish the answer directly.]"
         )
+
+
+def _promote_content_tool_calls(assistant_message, valid_tool_names) -> None:
+    """Fallback: promote a tool call the model emitted in ``content`` (no
+    structured tool_calls) into real executed calls. No-op when structured
+    calls already exist, so native tool-calling paths are unaffected."""
+    if assistant_message.tool_calls or not isinstance(assistant_message.content, str):
+        return
+    promoted, residual = extract_content_tool_calls(
+        assistant_message.content, valid_tool_names
+    )
+    if promoted:
+        assistant_message.tool_calls = promoted
+        assistant_message.content = residual
+        assistant_message.finish_reason = "tool_calls"
 
 
 def run_conversation(
@@ -1306,11 +1322,20 @@ def run_conversation(
                         assistant_message,
                         messages,
                     ):
-                        agent._vprint(
-                            f"{agent.log_prefix}⚠️  Treating suspicious Ollama/GLM stop response as truncated",
-                            force=True,
-                        )
-                        finish_reason = "length"
+                        # A GLM "stop" with no structured tool_calls may really be
+                        # a tool call embedded in content. Promote it here, BEFORE
+                        # declaring truncation, so the call executes instead of
+                        # diverting into length-continuation. No-op (→ still
+                        # treated as truncated) when nothing promotable is found.
+                        _promote_content_tool_calls(assistant_message, agent.valid_tool_names)
+                        if assistant_message.tool_calls:
+                            finish_reason = assistant_message.finish_reason
+                        else:
+                            agent._vprint(
+                                f"{agent.log_prefix}⚠️  Treating suspicious Ollama/GLM stop response as truncated",
+                                force=True,
+                            )
+                            finish_reason = "length"
 
                 if finish_reason == "length":
                     if getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID:
@@ -3307,6 +3332,12 @@ def run_conversation(
                     assistant_message.content = "\n".join(parts)
                 else:
                     assistant_message.content = str(raw)
+
+            # Fallback: recover tool calls models emitted in `content`
+            # (Ollama/Kimi/MiniMax/Gemma) — see agent/transports/content_tool_calls.py.
+            # Runs before the post_api_request hook so plugins observe promoted state.
+            _promote_content_tool_calls(assistant_message, agent.valid_tool_names)
+            finish_reason = assistant_message.finish_reason  # resync local (load-bearing)
 
             try:
                 from hermes_cli.plugins import (
