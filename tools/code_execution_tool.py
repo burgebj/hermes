@@ -1025,7 +1025,7 @@ def _execute_remote(
 
     # Redact secrets
     from agent.redact import redact_sensitive_text
-    stdout_text = redact_sensitive_text(stdout_text)
+    stdout_text = redact_sensitive_text(stdout_text, code_file=True)
 
     # Build response
     result: Dict[str, Any] = {
@@ -1426,8 +1426,8 @@ def execute_code(
         # but scripts can still read secrets from disk (e.g. open('~/.hermes/.env')).
         # This ensures leaked secrets never enter the model context.
         from agent.redact import redact_sensitive_text
-        stdout_text = redact_sensitive_text(stdout_text)
-        stderr_text = redact_sensitive_text(stderr_text)
+        stdout_text = redact_sensitive_text(stdout_text, code_file=True)
+        stderr_text = redact_sensitive_text(stderr_text, code_file=True)
 
         # Build response
         result: Dict[str, Any] = {
