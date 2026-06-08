@@ -5,7 +5,7 @@ import pytest
 from rich.console import Console
 
 from cli import ChatConsole
-from hermes_cli.skills_hub import do_check, do_install, do_list, do_update, handle_skills_slash
+from hermes_cli.skills_hub import do_check, do_install, do_list, do_search, do_update, handle_skills_slash
 
 
 class _DummyLockFile:
@@ -262,6 +262,28 @@ def test_handle_skills_slash_search_accepts_chatconsole_without_status_errors():
          patch("tools.skills_hub.create_source_router", return_value={}), \
          patch("tools.skills_hub.GitHubAuth"):
         handle_skills_slash("/skills search kubernetes", console=ChatConsole())
+
+
+def test_do_search_prints_copyable_full_identifiers_when_table_truncates():
+    long_identifier = "browse-sh/weather.gov/get-forecast-1uezib"
+    results = [type("R", (), {
+        "name": "get-forecast",
+        "description": "Weather forecast skill",
+        "source": "browse-sh",
+        "trust_level": "community",
+        "identifier": long_identifier,
+    })()]
+    sink = StringIO()
+    console = Console(file=sink, force_terminal=True, color_system=None, width=50)
+
+    with patch("tools.skills_hub.unified_search", return_value=results), \
+         patch("tools.skills_hub.create_source_router", return_value={}), \
+         patch("tools.skills_hub.GitHubAuth"):
+        do_search("weather.gov", console=console)
+
+    output = sink.getvalue()
+    assert long_identifier in output
+    assert "Copyable identifiers" in output
 
 
 def test_do_install_scans_with_resolved_identifier(monkeypatch, tmp_path, hub_env):

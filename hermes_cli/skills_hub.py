@@ -312,6 +312,10 @@ def do_search(query: str, source: str = "all", limit: int = 10,
     c.print("[dim]Use: hermes skills inspect <identifier> to preview, "
             "hermes skills install <identifier> to install "
             "(--json for scripting)[/]\n")
+    c.print("[bold]Copyable identifiers:[/]")
+    for r in results:
+        c.print(f"  {r.identifier}", soft_wrap=True)
+    c.print()
 
 
 def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
