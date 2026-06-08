@@ -5514,7 +5514,7 @@ def _setup_signal():
             "    Linux:  download from https://github.com/AsamK/signal-cli/releases"
         )
         print_info("    macOS:  brew install signal-cli")
-        print_info("    Docker: bbernhard/signal-cli-rest-api")
+        print_info("    Docker: run signal-cli in a container and expose port 8080")
         print()
         print_info("  After installing, link your account and start the daemon:")
         print_info('    signal-cli link -n "HermesAgent"')
@@ -5539,6 +5539,13 @@ def _setup_signal():
         resp = httpx.get(f"{url.rstrip('/')}/api/v1/check", timeout=10.0)
         if resp.status_code == 200:
             print_success("  signal-cli daemon is reachable!")
+        elif resp.status_code == 404:
+            print_warning(f"  Health check returned 404 at {url.rstrip('/')}/api/v1/check.")
+            print_warning("  bbernhard/signal-cli-rest-api is API-incompatible with Hermes.")
+            print_info("  Use the native signal-cli daemon instead:")
+            print_info("    signal-cli --account +YOURNUMBER daemon --http 127.0.0.1:8080")
+            if not prompt_yes_no("  Save this URL anyway?", False):
+                return
         else:
             print_warning(f"  signal-cli responded with status {resp.status_code}.")
             if not prompt_yes_no("  Continue anyway?", False):

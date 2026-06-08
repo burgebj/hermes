@@ -8,6 +8,10 @@ description: "Set up Hermes Agent as a Signal messenger bot via signal-cli daemo
 
 Hermes connects to Signal through the [signal-cli](https://github.com/AsamK/signal-cli) daemon running in HTTP mode. The adapter streams messages in real-time via SSE (Server-Sent Events) and sends responses via JSON-RPC.
 
+:::danger bbernhard/signal-cli-rest-api is incompatible
+The popular [bbernhard/signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api) Docker image exposes a **different** REST API (`/v1/health`, `/v2/send`, etc.) and is **not compatible** with the Hermes Signal adapter. Hermes requires the native `signal-cli daemon --http` API (`/api/v1/check`, `/api/v1/events`, `/api/v1/rpc`). Using the bbernhard wrapper will result in health-check 404 errors and the adapter will never connect.
+:::
+
 Signal is the most privacy-focused mainstream messenger — end-to-end encrypted by default, open-source protocol, minimal metadata collection. This makes it ideal for security-sensitive agent workflows.
 
 :::info No New Python Dependencies
@@ -225,7 +229,8 @@ The adapter monitors the SSE connection and automatically reconnects if:
 | **"Cannot reach signal-cli"** during setup | Ensure signal-cli daemon is running: `signal-cli --account +YOUR_NUMBER daemon --http 127.0.0.1:8080` |
 | **Messages not received** | Check that `SIGNAL_ALLOWED_USERS` includes the sender's number in E.164 format (with `+` prefix) |
 | **"signal-cli not found on PATH"** | Install signal-cli and ensure it's in your PATH, or use Docker |
-| **Connection keeps dropping** | Check signal-cli logs for errors. Ensure Java 17+ is installed. |
+| **Health check returns 404** | You may be using bbernhard/signal-cli-rest-api, which is API-incompatible. Use the native signal-cli daemon instead. |
+| **Connection keeps dropping** | Check signal-cli logs for errors. Ensure Java 25+ is installed (0.14.x requires Java 25). |
 | **Group messages ignored** | Configure `SIGNAL_GROUP_ALLOWED_USERS` with specific group IDs, or `*` to allow all groups. |
 | **Bot responds to no one** | Configure `SIGNAL_ALLOWED_USERS`, use DM pairing, or explicitly allow all users through gateway policy if you want broader access. |
 | **Duplicate messages** | Ensure only one signal-cli instance is listening on your phone number |

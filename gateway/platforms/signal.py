@@ -272,6 +272,15 @@ class SignalAdapter(BasePlatformAdapter):
             # Health check — verify signal-cli daemon is reachable
             try:
                 resp = await self.client.get(f"{self.http_url}/api/v1/check", timeout=10.0)
+                if resp.status_code == 404:
+                    logger.error(
+                        "Signal: health check returned 404 at %s/api/v1/check. "
+                        "If you are using the bbernhard/signal-cli-rest-api Docker image "
+                        "it is API-incompatible with Hermes — use the native signal-cli "
+                        "daemon instead: signal-cli --account +YOURNUMBER daemon --http 127.0.0.1:8080. "
+                        "See https://hermes-agent.nousresearch.com/docs/user-guide/messaging/signal",
+                    )
+                    return False
                 if resp.status_code != 200:
                     logger.error("Signal: health check failed (status %d)", resp.status_code)
                     return False
@@ -417,6 +426,13 @@ class SignalAdapter(BasePlatformAdapter):
                         # avoid repeated warnings (connection may just be quiet)
                         self._last_sse_activity = time.time()
                         logger.debug("Signal: daemon healthy, SSE idle")
+                    elif resp.status_code == 404:
+                        logger.warning(
+                            "Signal: health check returned 404 — "
+                            "bbernhard/signal-cli-rest-api is API-incompatible with Hermes. "
+                            "Use the native signal-cli daemon instead.",
+                        )
+                        self._force_reconnect()
                     else:
                         logger.warning("Signal: health check failed (%d), forcing reconnect", resp.status_code)
                         self._force_reconnect()
