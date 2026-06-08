@@ -443,7 +443,6 @@ def judge_goal(
                 {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0,
             max_tokens=_goal_judge_max_tokens(),
             timeout=timeout,
             extra_body=get_auxiliary_extra_body() or None,
