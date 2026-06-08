@@ -1358,3 +1358,171 @@ class TestDoctorStaleMaxIterationsDrift:
             monkeypatch, tmp_path, fix=False, ghost=None, cfg_turns=400,
         )
         assert "shadows" not in out
+
+
+class TestDoctorHomebrewEntrypoint:
+    """Command Installation: managed installs (Homebrew/uv-tool/pipx) must not
+    warn about a missing venv — they ship their own entry point on PATH."""
+
+    def _run_command_installation(self, monkeypatch, tmp_path, executable,
+                                   which_hermes=None, install_method=None,
+                                   is_uv=False):
+        """Run doctor and return captured stdout."""
+        project_root = tmp_path / "project"
+        hermes_home = tmp_path / ".hermes"
+        project_root.mkdir()
+        hermes_home.mkdir()
+
+        monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", project_root)
+        monkeypatch.setattr(doctor_mod, "HERMES_HOME", hermes_home)
+        monkeypatch.setattr(sys, "executable", str(executable))
+        monkeypatch.setattr("sys.platform", "linux")
+
+        fake_model_tools = types.SimpleNamespace(
+            check_tool_availability=lambda *a, **kw: None,
+            TOOLSET_REQUIREMENTS={},
+        )
+        monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
+
+        # Optionally override install-method detection
+        if install_method is not None:
+            import hermes_cli.config as _cfg
+            monkeypatch.setattr(_cfg, "detect_install_method",
+                                lambda *a, **kw: install_method)
+            monkeypatch.setattr(_cfg, "is_uv_tool_install", lambda: is_uv)
+
+        # Optionally stub shutil.which so PATH lookup succeeds/fails
+        if which_hermes is not None:
+            import shutil as _shutil
+            monkeypatch.setattr(_shutil, "which",
+                                lambda cmd: which_hermes if cmd == "hermes" else None)
+
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                doctor_mod.run_doctor(Namespace(fix=False))
+        except SystemExit:
+            pass
+        return buf.getvalue()
+
+    # ------------------------------------------------------------------
+    # Homebrew
+    # ------------------------------------------------------------------
+
+    def test_homebrew_cellar_path_shows_ok(self, monkeypatch, tmp_path):
+        """Cellar-path fallback: no stamp file needed — path heuristic fires."""
+        libexec_bin = tmp_path / "Cellar" / "hermes-agent" / "1.0" / "libexec" / "bin"
+        libexec_bin.mkdir(parents=True)
+        python_exe = libexec_bin / "python"
+        hermes_bin = libexec_bin / "hermes"
+        python_exe.touch()
+        hermes_bin.touch()
+
+        out = self._run_command_installation(
+            monkeypatch, tmp_path, python_exe,
+            which_hermes="/opt/homebrew/bin/hermes",
+            install_method="homebrew",
+        )
+
+        assert "Hermes on PATH" in out
+        assert "homebrew" in out
+        assert "Venv entry point not found" not in out
+
+    def test_homebrew_stamp_shows_ok(self, monkeypatch, tmp_path):
+        """detect_install_method() returns 'homebrew' (stamp file present)."""
+        regular_bin = tmp_path / "bin"
+        regular_bin.mkdir()
+        python_exe = regular_bin / "python"
+        python_exe.touch()
+
+        out = self._run_command_installation(
+            monkeypatch, tmp_path, python_exe,
+            which_hermes="/opt/homebrew/bin/hermes",
+            install_method="homebrew",
+        )
+
+        assert "Hermes on PATH" in out
+        assert "homebrew" in out
+        assert "Venv entry point not found" not in out
+
+    # ------------------------------------------------------------------
+    # uv-tool
+    # ------------------------------------------------------------------
+
+    def test_uv_tool_install_shows_ok(self, monkeypatch, tmp_path):
+        """uv tool install hermes-agent: is_uv_tool_install() == True."""
+        uv_bin = tmp_path / ".local" / "share" / "uv" / "tools" / "hermes-agent" / "bin"
+        uv_bin.mkdir(parents=True)
+        python_exe = uv_bin / "python"
+        python_exe.touch()
+
+        out = self._run_command_installation(
+            monkeypatch, tmp_path, python_exe,
+            which_hermes=str(uv_bin / "hermes"),
+            install_method="pip",   # stamp absent → pip fallback
+            is_uv=True,             # but is_uv_tool_install() fires
+        )
+
+        assert "Hermes on PATH" in out
+        assert "uv-tool" in out
+        assert "Venv entry point not found" not in out
+
+    # ------------------------------------------------------------------
+    # pipx
+    # ------------------------------------------------------------------
+
+    def test_pipx_install_shows_ok(self, monkeypatch, tmp_path):
+        """pipx install hermes-agent: path heuristic detects /pipx/venvs/."""
+        pipx_bin = tmp_path / ".local" / "share" / "pipx" / "venvs" / "hermes-agent" / "bin"
+        pipx_bin.mkdir(parents=True)
+        python_exe = pipx_bin / "python"
+        python_exe.touch()
+
+        out = self._run_command_installation(
+            monkeypatch, tmp_path, python_exe,
+            which_hermes=str(tmp_path / ".local" / "bin" / "hermes"),
+            # no install_method override — let path heuristic fire
+        )
+
+        assert "Hermes on PATH" in out
+        assert "pipx" in out
+        assert "Venv entry point not found" not in out
+
+    # ------------------------------------------------------------------
+    # Managed install but hermes not on PATH
+    # ------------------------------------------------------------------
+
+    def test_managed_install_not_on_path_shows_warn(self, monkeypatch, tmp_path):
+        """Homebrew detected but 'hermes' absent from PATH → actionable warning."""
+        libexec_bin = tmp_path / "Cellar" / "hermes-agent" / "1.0" / "libexec" / "bin"
+        libexec_bin.mkdir(parents=True)
+        python_exe = libexec_bin / "python"
+        hermes_bin = libexec_bin / "hermes"
+        python_exe.touch()
+        hermes_bin.touch()
+
+        out = self._run_command_installation(
+            monkeypatch, tmp_path, python_exe,
+            which_hermes=None,       # hermes NOT on PATH
+            install_method="homebrew",
+        )
+
+        assert "Hermes not found on PATH" in out
+        assert "homebrew" in out
+        assert "Venv entry point not found" not in out
+
+    # ------------------------------------------------------------------
+    # Plain pip/git install without venv → original warning preserved
+    # ------------------------------------------------------------------
+
+    def test_non_managed_without_venv_shows_warning(self, monkeypatch, tmp_path):
+        """pip/git install with no venv entry point: original warning must still fire."""
+        regular_bin = tmp_path / "usr" / "bin"
+        regular_bin.mkdir(parents=True)
+        python_exe = regular_bin / "python"
+        python_exe.touch()
+
+        out = self._run_command_installation(monkeypatch, tmp_path, python_exe)
+
+        assert "Venv entry point not found" in out
+        assert "Hermes on PATH" not in out

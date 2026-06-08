@@ -1177,6 +1177,45 @@ def run_doctor(args):
 
     if sys.platform != "win32":
         _section("Command Installation")
+        # ------------------------------------------------------------------
+        # Detect managed (non-venv) installs that ship their own entry point.
+        # Priority order:
+        #   1. detect_install_method() stamp / managed-system probe  →  covers
+        #      homebrew, docker, nixos stamped at install time
+        #   2. is_uv_tool_install()  →  uv tool install hermes-agent
+        #   3. pipx path heuristic   →  pipx install hermes-agent
+        #   4. Cellar path fallback  →  Homebrew without a stamp file
+        #
+        # For all of these we skip the venv-presence check and instead verify
+        # that `hermes` is reachable on PATH via shutil.which().
+        # ------------------------------------------------------------------
+        _install_method = "pip"
+        _is_managed_install = False
+        try:
+            from hermes_cli.config import detect_install_method, is_uv_tool_install
+            _install_method = detect_install_method(PROJECT_ROOT)
+            _is_uv = is_uv_tool_install()
+            if _install_method in ("homebrew", "docker", "nixos") or _is_uv:
+                _is_managed_install = True
+                if _is_uv and _install_method == "pip":
+                    _install_method = "uv-tool"
+        except Exception:
+            pass
+
+        # pipx: ~/.local/share/pipx/venvs/hermes-agent/…
+        if not _is_managed_install:
+            _exe_norm = str(Path(sys.executable).resolve()).replace(os.sep, "/").lower()
+            if "/pipx/venvs/" in _exe_norm:
+                _install_method = "pipx"
+                _is_managed_install = True
+
+        # Homebrew fallback: sys.executable inside a Cellar tree but no stamp
+        if not _is_managed_install:
+            _homebrew_bin = Path(sys.executable).with_name("hermes")
+            if "/Cellar/" in str(Path(sys.executable).resolve()) and _homebrew_bin.exists():
+                _install_method = "homebrew"
+                _is_managed_install = True
+
         # Determine the venv entry point location
         _venv_bin = None
         for _venv_name in ("venv", ".venv"):
@@ -1196,7 +1235,21 @@ def run_doctor(args):
             _cmd_link_display = "~/.local/bin"
         _cmd_link = _cmd_link_dir / "hermes"
 
-        if _venv_bin is None:
+        if _venv_bin is None and _is_managed_install:
+            # Non-venv install — verify hermes is reachable on PATH
+            _hermes_on_path = shutil.which("hermes")
+            if _hermes_on_path:
+                check_ok(
+                    f"Hermes on PATH ({_hermes_on_path})",
+                    f"— {_install_method} install, no venv required",
+                )
+            else:
+                check_warn(
+                    "Hermes not found on PATH",
+                    f"(detected {_install_method} install but 'hermes' is not on PATH"
+                    " — check your shell config)",
+                )
+        elif _venv_bin is None:
             check_warn(
                 "Venv entry point not found",
                 "(hermes not in venv/bin/ or .venv/bin/ — reinstall with pip install -e '.[all]')"
