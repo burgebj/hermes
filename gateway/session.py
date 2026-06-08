@@ -12,6 +12,7 @@ import hashlib
 import logging
 import os
 import json
+import re
 import threading
 import uuid
 from pathlib import Path
@@ -65,6 +66,11 @@ from .whatsapp_identity import (
     normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
 )
 from utils import atomic_replace
+
+# Matches any value that could escape the sessions directory as a file path.
+# Covers: directory traversal (..),  Unix/Windows absolute paths (/  \),
+# and Windows drive-letter paths (C:/ D:\\ etc.).
+_TRAVERSAL_RE = re.compile(r'\.\.|^[/\\]|^[A-Za-z]:')
 
 
 @dataclass
@@ -547,9 +553,19 @@ class SessionEntry:
             except (TypeError, ValueError):
                 last_resume_marked_at = None
 
+        session_key = data["session_key"]
+        session_id = data["session_id"]
+
+        # Validate path-sensitive fields to prevent directory traversal (CWE-22)
+        for _field, _val in (("session_key", session_key), ("session_id", session_id)):
+            if _val and _TRAVERSAL_RE.search(str(_val)):
+                raise ValueError(
+                    f"Invalid {_field}: potential directory traversal detected"
+                )
+
         return cls(
-            session_key=data["session_key"],
-            session_id=data["session_id"],
+            session_key=session_key,
+            session_id=session_id,
             created_at=datetime.fromisoformat(data["created_at"]),
             updated_at=datetime.fromisoformat(data["updated_at"]),
             origin=origin,
@@ -707,12 +723,11 @@ class SessionStore:
             try:
                 with open(sessions_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    for key, entry_data in data.items():
-                        try:
-                            self._entries[key] = SessionEntry.from_dict(entry_data)
-                        except (ValueError, KeyError):
-                            # Skip entries with unknown/removed platform values
-                            continue
+                for key, entry_data in data.items():
+                    try:
+                        self._entries[key] = SessionEntry.from_dict(entry_data)
+                    except (ValueError, KeyError) as e:
+                        print(f"[gateway] Warning: Skipping invalid session entry {key!r}: {e}")
             except Exception as e:
                 print(f"[gateway] Warning: Failed to load sessions: {e}")
 
