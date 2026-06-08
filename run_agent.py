@@ -4844,6 +4844,32 @@ class AIAgent:
             or base_url_host_matches(self.base_url, "xiaomimimo.com")
         )
 
+    def _rejects_reasoning_content_echo(self) -> bool:
+        """Return True for providers whose Chat Completions API rejects a
+        ``reasoning_content`` field on replayed assistant messages.
+
+        Mistral enforces strict extra-field validation and returns HTTP 422
+        (``extra_forbidden`` on ``messages[].reasoning_content``) when a
+        fallback replays history that carries another provider's reasoning
+        trace. Without stripping, a fallback to Mistral after a reasoning
+        turn (e.g. Gemini/Codex) 422s on every turn and cascades down to the
+        weakest last-resort model — visibly degrading answer quality.
+
+        Mutually exclusive with the thinking-mode providers
+        (DeepSeek/Kimi/MiMo) that *require* the echo: those are never matched
+        here, so this guard cannot strip a field they depend on.
+
+        Known strict providers: Mistral (HTTP 422 ``extra_forbidden``) and
+        Groq (HTTP 400 ``property 'reasoning_content' is unsupported``).
+        """
+        provider = (self.provider or "").strip().lower()
+        base = getattr(self, "_base_url_lower", "") or (self.base_url or "").lower()
+        return (
+            provider == "mistral"
+            or "api.mistral.ai" in base
+            or "api.groq.com" in base
+        )
+
     def _copy_reasoning_content_for_api(self, source_msg: dict, api_msg: dict) -> None:
         """Forwarder — see ``agent.agent_runtime_helpers.copy_reasoning_content_for_api``."""
         from agent.agent_runtime_helpers import copy_reasoning_content_for_api

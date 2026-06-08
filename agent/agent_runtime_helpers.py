@@ -2044,6 +2044,17 @@ def copy_reasoning_content_for_api(agent, source_msg: dict, api_msg: dict) -> No
     if source_msg.get("role") != "assistant":
         return
 
+    # 0. Strict providers (e.g. Mistral) reject a ``reasoning_content`` field
+    # on replayed assistant messages with HTTP 422 (``extra_forbidden``).
+    # ``api_msg`` starts as a copy of the source message, so an inherited
+    # reasoning trace from a prior provider would otherwise leak through and
+    # 422 the request — knocking the fallback out and cascading to a weaker
+    # model. Strip it. Thinking-mode providers (DeepSeek/Kimi/MiMo) require
+    # the echo and are never matched by the detector, so this is safe.
+    if agent._rejects_reasoning_content_echo():
+        api_msg.pop("reasoning_content", None)
+        return
+
     # 1. Explicit reasoning_content already set — preserve it verbatim
     # (includes DeepSeek/Kimi's own space-placeholder written at creation
     # time, and any valid reasoning content from the same provider).

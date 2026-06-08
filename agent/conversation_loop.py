@@ -1196,6 +1196,21 @@ def run_conversation(
         agent._current_api_request_id = api_request_id
 
         while retry_count < max_retries:
+            # ── Cross-provider reasoning_content guard (fallback) ──
+            # api_messages is built once, above, for the turn's initial
+            # provider. An intra-turn fallback (_try_activate_fallback) swaps
+            # the provider but reuses these messages — so a reasoning trace
+            # copied in for a reasoning-capable provider would now be replayed
+            # to a strict fallback (Mistral 422 / Groq 400 on
+            # reasoning_content), knocking the fallback out and cascading to
+            # the weakest model. Re-strip for the *current* provider each
+            # attempt. Subtractive and idempotent; the fallback chain has no
+            # downstream thinking-mode provider that would need the echo back.
+            if agent._rejects_reasoning_content_echo():
+                for _api_msg in api_messages:
+                    if isinstance(_api_msg, dict) and _api_msg.get("role") == "assistant":
+                        _api_msg.pop("reasoning_content", None)
+
             # ── Nous Portal rate limit guard ──────────────────────
             # If another session already recorded that Nous is rate-
             # limited, skip the API call entirely.  Each attempt
