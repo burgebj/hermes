@@ -2589,6 +2589,8 @@ class GatewayRunner:
             or not self._telegram_topic_mode_enabled(source)
         ):
             return None
+        if not self._telegram_pin_root_dm_replies_enabled(source):
+            return None
         inbound = str(source.thread_id or "")
         is_lobby = not inbound or inbound in self._TELEGRAM_GENERAL_TOPIC_IDS
         if not is_lobby:
@@ -13615,6 +13617,57 @@ class GatewayRunner:
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
+    def _telegram_pin_root_dm_replies_enabled(self, source: SessionSource) -> bool:
+        """Return True when lobby-shaped root DM replies should recover the last topic."""
+        platform_cfg = (
+            self.config.platforms.get(source.platform)
+            if getattr(self, "config", None) and getattr(self.config, "platforms", None)
+            else None
+        )
+        if platform_cfg is None:
+            return False
+        extra = getattr(platform_cfg, "extra", None) or {}
+        value = extra.get("pin_root_dm_replies")
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _maybe_enable_telegram_topic_mode_for_lane(self, source: SessionSource) -> None:
+        """Seed topic mode when we already have a concrete Telegram DM topic thread."""
+        if (
+            source.platform != Platform.TELEGRAM
+            or source.chat_type != "dm"
+            or not source.chat_id
+            or not source.user_id
+        ):
+            return
+        thread_id = str(source.thread_id or "")
+        if not thread_id or thread_id in self._TELEGRAM_GENERAL_TOPIC_IDS:
+            return
+        session_db = getattr(self, "_session_db", None)
+        if session_db is None:
+            return
+        try:
+            if session_db.is_telegram_topic_mode_enabled(
+                chat_id=str(source.chat_id),
+                user_id=str(source.user_id),
+            ) is True:
+                return
+        except Exception:
+            logger.debug("Failed to read Telegram topic mode state", exc_info=True)
+            return
+        try:
+            session_db.enable_telegram_topic_mode(
+                chat_id=str(source.chat_id),
+                user_id=str(source.user_id),
+            )
+        except Exception:
+            logger.debug("Failed to auto-enable Telegram topic mode", exc_info=True)
+
     def _schedule_telegram_topic_title_rename(
         self,
         source: SessionSource,
@@ -13622,6 +13675,7 @@ class GatewayRunner:
         title: str,
     ) -> None:
         """Schedule a topic rename from the auto-title background thread."""
+        self._maybe_enable_telegram_topic_mode_for_lane(source)
         if not title or not self._is_telegram_topic_lane(source):
             return
         if self._telegram_topic_auto_rename_disabled(source):

@@ -980,6 +980,40 @@ async def test_schedule_topic_rename_respects_disable_flag(tmp_path):
     assert called is False
 
 
+@pytest.mark.asyncio
+async def test_schedule_topic_rename_auto_enables_topic_mode_for_new_dm_topic(tmp_path, monkeypatch):
+    import gateway.run as gateway_run
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.apply_telegram_topic_migration()
+    runner = _make_runner(session_db=db)
+
+    called = False
+
+    async def _spy(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    runner._rename_telegram_topic_for_session_title = _spy
+    monkeypatch.setattr(
+        gateway_run,
+        "safe_schedule_threadsafe",
+        lambda coro, loop, logger=None, log_message=None: loop.create_task(coro),
+    )
+
+    runner._schedule_telegram_topic_title_rename(
+        _make_source(thread_id="42"),
+        "sess-topic",
+        "Auto-generated title",
+    )
+
+    import asyncio
+    await asyncio.sleep(0)
+
+    assert called is True
+    assert db.is_telegram_topic_mode_enabled(chat_id="208214988", user_id="208214988") is True
+
+
 def test_telegram_topic_auto_rename_disabled_string_truthy(tmp_path):
     """Common truthy string forms ('1', 'true', 'on', 'yes') must disable rename."""
     db = SessionDB(db_path=tmp_path / "state.db")
@@ -1272,6 +1306,7 @@ def test_recover_rewrites_lobby_thread_id_to_most_recent(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     _seed_two_topic_bindings(db)
     runner = _make_runner(session_db=db)
+    runner.config.platforms[Platform.TELEGRAM].extra["pin_root_dm_replies"] = True
 
     assert runner._recover_telegram_topic_thread_id(_make_source(thread_id=None)) == "222"
 
@@ -1287,6 +1322,14 @@ def test_recover_returns_none_when_topic_mode_disabled(tmp_path):
 def test_recover_returns_none_when_no_bindings_yet(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    runner = _make_runner(session_db=db)
+
+    assert runner._recover_telegram_topic_thread_id(_make_source(thread_id=None)) is None
+
+
+def test_recover_returns_none_without_opt_in_pinning(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    _seed_two_topic_bindings(db)
     runner = _make_runner(session_db=db)
 
     assert runner._recover_telegram_topic_thread_id(_make_source(thread_id=None)) is None
