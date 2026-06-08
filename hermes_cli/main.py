@@ -7676,6 +7676,25 @@ def cmd_gui(args: argparse.Namespace):
     sys.exit(launch_result.returncode)
 
 
+def _is_port_listening(host: str, port: int, timeout: float = 0.5) -> bool:
+    """Check if a given host:port is listening without requiring process info.
+    
+    Returns True if the port is open, False if closed or on error.
+    
+    On Windows, this complements _find_stale_dashboard_pids when a Session 0
+    process holds the port but isn't visible in wmic output (#41598).
+    """
+    import socket
+    
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect((host, port))
+            return True
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return False
+
+
 def _find_stale_dashboard_pids(
     *,
     exclude_pids: set[int] | None = None,
@@ -7704,6 +7723,11 @@ def _find_stale_dashboard_pids(
     passes it here.  (#37532)
 
     Returns an empty list on any scan error (missing ps/wmic, timeout, etc.).
+    
+    NOTE: On Windows, a Session 0 process can hold a port but not appear in
+    wmic process listing (issue #41598). When this function returns empty but
+    the dashboard port is actually listening, check_dashboard_port_listening()
+    will detect the stale listener. Call both for complete detection.
     """
     patterns = [
         "hermes dashboard",
@@ -12342,11 +12366,35 @@ def _report_dashboard_status() -> int:
     current process is excluded, but since ``hermes dashboard --status``
     runs in a short-lived CLI process that never matches the pattern,
     the exclusion is irrelevant here).
+    
+    On Windows, also checks if the dashboard port is listening when no
+    processes are found via process scanning. This detects Session 0 stale
+    processes that don't appear in wmic output (issue #41598).
     """
     pids = _find_stale_dashboard_pids()
-    if not pids:
+    
+    # On Windows, also check if port 9119 is listening. A Session 0 process
+    # can hold the port but not appear in wmic process listing (#41598).
+    has_port_listener = False
+    if sys.platform == "win32" and not pids:
+        has_port_listener = _is_port_listening("127.0.0.1", 9119)
+    
+    if not pids and not has_port_listener:
         print("No hermes dashboard processes running.")
         return 0
+
+    if has_port_listener and not pids:
+        print(
+            "⚠ Dashboard port 9119 is in use, but the running process could not be found.\n"
+            "This can happen on Windows when an old dashboard process runs with elevated\n"
+            "privileges (Session 0) and isn't visible in the process list.\n"
+        )
+        print("To stop the stale listener, try one of:")
+        print("    1. Reboot your system (cleanest)")
+        print("    2. Run 'taskkill /F /IM pythonw.exe' from an admin console")
+        print("    3. Run 'netstat -ano | findstr :9119' to identify the PID, then")
+        print("       'taskkill /PID <pid> /T /F' from an admin console")
+        return 1
 
     print(f"{len(pids)} hermes dashboard process(es) running:")
     for pid in pids:
@@ -12382,9 +12430,34 @@ def cmd_dashboard(args):
     # --stop: kill any running dashboards and exit, no deps needed.
     if getattr(args, "stop", False):
         pids = _find_stale_dashboard_pids()
-        if not pids:
+        
+        # On Windows, also check port 9119 for Session 0 stale processes.
+        # A process can hold the port but not appear in wmic output (#41598).
+        port_listening = False
+        if sys.platform == "win32" and not pids:
+            port_listening = _is_port_listening("127.0.0.1", 9119)
+        
+        if not pids and not port_listening:
             print("No hermes dashboard processes running.")
             sys.exit(0)
+        
+        if port_listening and not pids:
+            # Port is in use but we can't find the process. On Windows, this
+            # usually means a Session 0 process holds it. We can't kill it
+            # without elevated privileges, but we can provide actionable guidance.
+            print(
+                "⚠ Dashboard port 9119 is in use by an unseen process (likely Session 0).\n"
+                "This typically happens after a Windows update with a stale dashboard.\n"
+            )
+            print("To stop it, try one of:")
+            print("    1. Reboot your system (cleanest)")
+            print("    2. Run from Admin PowerShell/CMD:")
+            print("       taskkill /F /IM pythonw.exe")
+            print("    3. Or identify the specific PID:")
+            print("       netstat -ano | findstr :9119")
+            print("       taskkill /PID <pid> /T /F")
+            sys.exit(1)
+        
         # Reuse the same SIGTERM-grace-SIGKILL path used after `hermes update`.
         _kill_stale_dashboard_processes(reason="requested via --stop")
         # _kill_stale_dashboard_processes prints outcomes itself.  Exit 0 if
@@ -12399,6 +12472,19 @@ def cmd_dashboard(args):
         _setup_logging_gui(mode="gui")
     except Exception:
         pass
+
+    # On Windows, warn about stale listener (Session 0 process) before starting.
+    # A stale process can prevent binding to port 9119 (#41598).
+    if sys.platform == "win32":
+        stale_pids = _find_stale_dashboard_pids()
+        stale_port = _is_port_listening("127.0.0.1", 9119)
+        if stale_port and not stale_pids:
+            print(
+                "⚠ Warning: Port 9119 is in use by an unseen process (likely a stale Session 0).\n"
+                "  The new dashboard may fail to start. To clear it:\n"
+                "    - Reboot your system (cleanest), or\n"
+                "    - Run from Admin PowerShell/CMD: taskkill /F /IM pythonw.exe\n"
+            )
 
     try:
         import fastapi  # noqa: F401
