@@ -2078,6 +2078,7 @@ class TestWinnerWritesTerminalFailed:
         monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
         monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._drain_and_stop", lambda *a, **kw: None)
         monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._detect_gateway_port", lambda: 0)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._probe_task_registration", lambda name: True)
         monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_task_ready", lambda *a, **kw: True)
         monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._start_new_gateway",
                           MagicMock(side_effect=RuntimeError("spawn failed")))
@@ -2377,3 +2378,322 @@ class TestTaskStateConvergence:
                 except (json.JSONDecodeError, ValueError):
                     pass
         assert found, "task_state_ready log entry not found"
+
+
+# ---------------------------------------------------------------------------
+# Tri-state probe & integrated control flow tests
+# ---------------------------------------------------------------------------
+
+class TestTriStateProbe:
+    """Tests for _probe_task_registration — tri-state task existence probe."""
+
+    def test_probe_registered_returns_true(self, worker_env, monkeypatch):
+        """Task registered + COM queryable → True."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows.is_task_registered", lambda: True,
+        )
+        monkeypatch.setattr(mod, "_query_task_state_com", lambda name: 3)
+
+        assert mod._probe_task_registration("Hermes_Gateway") is True
+
+    def test_probe_not_registered_returns_false(self, worker_env, monkeypatch):
+        """schtasks /Query fails → False."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows.is_task_registered", lambda: False,
+        )
+
+        assert mod._probe_task_registration("Hermes_Gateway") is False
+
+    def test_probe_schtasks_says_yes_com_fails_returns_none(self, worker_env, monkeypatch):
+        """schtasks says yes but COM returns -1 → None (ambiguous)."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows.is_task_registered", lambda: True,
+        )
+        monkeypatch.setattr(mod, "_query_task_state_com", lambda name: -1)
+
+        assert mod._probe_task_registration("Hermes_Gateway") is None
+
+    def test_probe_schtasks_exception_returns_none(self, worker_env, monkeypatch):
+        """is_task_registered raises → None (ambiguous)."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+
+        def boom():
+            raise OSError("schtasks not found")
+
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows.is_task_registered", boom,
+        )
+
+        assert mod._probe_task_registration("Hermes_Gateway") is None
+
+    def test_probe_com_any_valid_state_returns_true(self, worker_env, monkeypatch):
+        """Any COM state 0-4 (including UNKNOWN=0) → True (task exists)."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows.is_task_registered", lambda: True,
+        )
+        for state in (0, 1, 2, 3, 4):
+            monkeypatch.setattr(mod, "_query_task_state_com", lambda name, s=state: s)
+            assert mod._probe_task_registration("Hermes_Gateway") is True, (
+                f"state={state} should return True"
+            )
+
+
+class TestIntegratedControlFlow:
+    """Tests for tri-state probe integration in _run_restart_transaction."""
+
+    def test_registered_waits_ready_then_run(self, worker_env, monkeypatch):
+        """registered=True → waits READY → /Run."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        from hermes_cli.gateway_restart_state import create_intent, RestartLock
+
+        disk_intent = create_intent(profile="default", target_pid=100, origin="test",
+                                     task_name="Hermes_Gateway")
+        rid = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_handoff", lambda *a, **kw: True)
+        monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._drain_and_stop", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._detect_gateway_port", lambda: 0)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_port_release", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._probe_task_registration", lambda name: True)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_task_ready", lambda *a, **kw: True)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._start_new_gateway",
+                          lambda *a, **kw: (9999, "scheduled_task"))
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._verify_new_gateway", lambda *a, **kw: None)
+
+        # Should NOT raise
+        mod._run_restart_transaction(disk_intent, "default", rid, nonce, 100, "test",
+                                     str(worker_env), "Hermes_Gateway")
+
+    def test_not_registered_direct_spawn(self, worker_env, monkeypatch):
+        """registered=False → skip readiness → direct spawn reachable."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        from hermes_cli.gateway_restart_state import create_intent, RestartLock
+
+        disk_intent = create_intent(profile="default", target_pid=100, origin="test",
+                                     task_name="Hermes_Gateway")
+        rid = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+
+        probe_called = {"v": False}
+        wait_called = {"v": False}
+        start_args = {}
+
+        def mock_probe(name):
+            probe_called["v"] = True
+            return False
+
+        def mock_wait(*a, **kw):
+            wait_called["v"] = True
+            return True
+
+        def mock_start(profile, request_id, old_pid, origin, task_name, task_registered=None):
+            start_args["task_registered"] = task_registered
+            return (9999, "direct_spawn")
+
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_handoff", lambda *a, **kw: True)
+        monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._drain_and_stop", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._detect_gateway_port", lambda: 0)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_port_release", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._probe_task_registration", mock_probe)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_task_ready", mock_wait)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._start_new_gateway", mock_start)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._verify_new_gateway", lambda *a, **kw: None)
+
+        mod._run_restart_transaction(disk_intent, "default", rid, nonce, 100, "test",
+                                     str(worker_env), "Hermes_Gateway")
+
+        assert probe_called["v"], "_probe_task_registration should be called"
+        assert not wait_called["v"], "_wait_for_task_ready should NOT be called"
+        assert start_args["task_registered"] is False
+
+    def test_ambiguous_probe_fail_closed(self, worker_env, monkeypatch):
+        """registered=None → fail closed → raises, no /Run, no direct spawn."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        from hermes_cli.gateway_restart_state import create_intent, RestartLock
+
+        disk_intent = create_intent(profile="default", target_pid=100, origin="test",
+                                     task_name="Hermes_Gateway")
+        rid = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+
+        start_called = {"v": False}
+
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_handoff", lambda *a, **kw: True)
+        monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._drain_and_stop", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._detect_gateway_port", lambda: 0)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_port_release", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._probe_task_registration", lambda name: None)
+
+        def mock_start(*a, **kw):
+            start_called["v"] = True
+            return (9999, "direct_spawn")
+
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._start_new_gateway", mock_start)
+
+        with pytest.raises(RuntimeError, match="registration probe failed"):
+            mod._run_restart_transaction(disk_intent, "default", rid, nonce, 100, "test",
+                                         str(worker_env), "Hermes_Gateway")
+
+        assert not start_called["v"], "_start_new_gateway should NOT be called"
+
+    def test_task_name_nonempty_but_not_registered_direct_spawn_reachable(
+        self, worker_env, monkeypatch
+    ):
+        """task_name non-empty but task not installed → direct spawn fallback reachable."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        from hermes_cli.gateway_restart_state import create_intent, RestartLock
+
+        disk_intent = create_intent(profile="default", target_pid=100, origin="test",
+                                     task_name="Hermes_Gateway")
+        rid = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+
+        launcher = {}
+
+        def mock_start(profile, request_id, old_pid, origin, task_name, task_registered=None):
+            launcher["registered"] = task_registered
+            return (9999, "direct_spawn")
+
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_handoff", lambda *a, **kw: True)
+        monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._drain_and_stop", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._detect_gateway_port", lambda: 0)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_port_release", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._probe_task_registration", lambda name: False)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._start_new_gateway", mock_start)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._verify_new_gateway", lambda *a, **kw: None)
+
+        mod._run_restart_transaction(disk_intent, "default", rid, nonce, 100, "test",
+                                     str(worker_env), "Hermes_Gateway")
+
+        assert launcher["registered"] is False
+
+    def test_startup_folder_no_block_from_com(self, worker_env, monkeypatch):
+        """Startup-folder fallback: not registered → no COM timeout block."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        from hermes_cli.gateway_restart_state import create_intent, RestartLock
+
+        disk_intent = create_intent(profile="default", target_pid=100, origin="test",
+                                     task_name="Hermes_Gateway")
+        rid = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+
+        com_called = {"v": False}
+
+        def mock_com(name):
+            com_called["v"] = True
+            return -1
+
+        monkeypatch.setattr(mod, "_query_task_state_com", mock_com)
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows.is_task_registered", lambda: False,
+        )
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_handoff", lambda *a, **kw: True)
+        monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._drain_and_stop", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._detect_gateway_port", lambda: 0)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_port_release", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._start_new_gateway",
+                          lambda *a, **kw: (9999, "direct_spawn"))
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._verify_new_gateway", lambda *a, **kw: None)
+
+        mod._run_restart_transaction(disk_intent, "default", rid, nonce, 100, "test",
+                                     str(worker_env), "Hermes_Gateway")
+
+        # COM should NOT be called because is_task_registered returned False
+        assert not com_called["v"], "_query_task_state_com should not be called for unregistered task"
+
+    def test_early_pid_exit_still_waits_ready(self, worker_env, monkeypatch):
+        """Old PID exits during drain → still waits for Task READY before /Run."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        from hermes_cli.gateway_restart_state import create_intent, RestartLock
+
+        disk_intent = create_intent(profile="default", target_pid=100, origin="test",
+                                     task_name="Hermes_Gateway")
+        rid = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+
+        wait_called = {"v": False}
+
+        def mock_wait(*a, **kw):
+            wait_called["v"] = True
+            return True
+
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_handoff", lambda *a, **kw: True)
+        monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._drain_and_stop", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._detect_gateway_port", lambda: 0)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_port_release", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._probe_task_registration", lambda name: True)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_task_ready", mock_wait)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._start_new_gateway",
+                          lambda *a, **kw: (9999, "scheduled_task"))
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._verify_new_gateway", lambda *a, **kw: None)
+
+        mod._run_restart_transaction(disk_intent, "default", rid, nonce, 100, "test",
+                                     str(worker_env), "Hermes_Gateway")
+
+        assert wait_called["v"], "_wait_for_task_ready must be called even after early PID exit"
+
+    def test_no_task_name_skips_probe(self, worker_env, monkeypatch):
+        """task_name empty → no probe, no readiness gate, direct start."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        from hermes_cli.gateway_restart_state import create_intent, RestartLock
+
+        disk_intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        lock = RestartLock("default")
+        assert lock.try_acquire(rid) is True
+
+        probe_called = {"v": False}
+
+        def mock_probe(name):
+            probe_called["v"] = True
+            return True
+
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_handoff", lambda *a, **kw: True)
+        monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._drain_and_stop", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._detect_gateway_port", lambda: 0)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_port_release", lambda *a, **kw: None)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._probe_task_registration", mock_probe)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._start_new_gateway",
+                          lambda *a, **kw: (9999, "direct_spawn"))
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._verify_new_gateway", lambda *a, **kw: None)
+
+        mod._run_restart_transaction(disk_intent, "default", rid, nonce, 100, "test",
+                                     str(worker_env), "")
+
+        assert not probe_called["v"], "probe should not be called when task_name is empty"

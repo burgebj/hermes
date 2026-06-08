@@ -194,24 +194,45 @@ def _run_restart_transaction(
             write_status(profile, "waiting_port_release", request_id=request_id, port=port)
             _wait_for_port_release(profile, request_id, old_pid, origin, port)
 
-        # --- Phase 2.5: Wait for Task Scheduler state convergence ---
-        # MUST check whenever task_name is set, regardless of how old PID exited.
+        # --- Phase 2.5: Task Scheduler registration & readiness ---
+        # Tri-state probe: True=registered, False=not installed, None=ambiguous
+        task_registered: bool | None = None
         if task_name:
-            write_status(profile, "waiting_task_ready", request_id=request_id)
-            task_ready = _wait_for_task_ready(
-                task_name,
-                profile, request_id, old_pid, origin,
-                timeout=30.0,
+            write_status(profile, "waiting_task_ready", request_id=request_id,
+                         detail="probing registration")
+            task_registered = _probe_task_registration(task_name)
+            append_restart_log(
+                request_id=request_id, profile=profile, old_pid=old_pid,
+                origin=origin, state="probing",
+                reason=f"registered={task_registered}",
             )
-            if not task_ready:
+
+            if task_registered is None:
+                # Ambiguous — fail closed, do not /Run, do not direct spawn
                 raise RuntimeError(
-                    f"Scheduled Task '{task_name}' did not reach READY state "
-                    "within 30s.  Will NOT execute /Run to avoid "
-                    "MultipleInstancesPolicy=IgnoreNew suppression."
+                    f"Scheduled Task '{task_name}' registration probe failed "
+                    "(ambiguous).  Will NOT execute /Run or direct spawn."
                 )
 
+            if task_registered:
+                # Must wait for READY(3) before /Run
+                task_ready = _wait_for_task_ready(
+                    task_name,
+                    profile, request_id, old_pid, origin,
+                    timeout=30.0,
+                )
+                if not task_ready:
+                    raise RuntimeError(
+                        f"Scheduled Task '{task_name}' did not reach READY state "
+                        "within 30s.  Will NOT execute /Run to avoid "
+                        "MultipleInstancesPolicy=IgnoreNew suppression."
+                    )
+            # else: task_registered == False → skip readiness, allow direct spawn
+
         # --- Phase 3: Start new gateway ---
-        new_pid, launcher = _start_new_gateway(profile, request_id, old_pid, origin, task_name)
+        new_pid, launcher = _start_new_gateway(
+            profile, request_id, old_pid, origin, task_name, task_registered
+        )
 
         # --- Phase 4: Verify ---
         _verify_new_gateway(profile, request_id, old_pid, new_pid, origin, launcher)
@@ -549,6 +570,30 @@ _TASK_STATE_NAMES = {
 }
 
 
+def _probe_task_registration(task_name: str) -> bool | None:
+    """Tri-state probe: is the Scheduled Task registered?
+
+    Returns:
+        True  = Scheduled Task confirmed registered (COM state queryable)
+        False = Scheduled Task confirmed NOT registered
+        None  = query failed / ambiguous — caller must fail closed
+    """
+    # Step 1: schtasks /Query (binary: exists or not)
+    try:
+        from hermes_cli.gateway_windows import is_task_registered
+        if not is_task_registered():
+            return False    # Definitely not installed
+    except Exception:
+        return None         # Cannot determine
+
+    # Step 2: COM query to confirm (and distinguish from schtasks false positive)
+    state = _query_task_state_com(task_name)
+    if state >= 0:
+        return True         # COM can query → task exists
+    # schtasks says yes but COM fails — ambiguous
+    return None
+
+
 def _query_task_state_com(task_name: str) -> int:
     """Query Scheduled Task state via COM API (locale-independent).
 
@@ -648,18 +693,28 @@ def _start_new_gateway(
     old_pid: int,
     origin: str,
     task_name: str,
+    task_registered: bool | None = None,
 ) -> tuple[int, str]:
-    """Start a new gateway.  Returns (new_pid, launcher)."""
+    """Start a new gateway.  Returns (new_pid, launcher).
+
+    Args:
+        task_registered: Pre-probed tri-state from caller.
+            True  → use schtasks /Run
+            False → direct spawn (task not installed)
+            None  → caller already failed-closed; this path should not be reached
+    """
     from hermes_cli.gateway_restart_state import append_restart_log, write_status
 
-    task_installed = False
-    try:
-        from hermes_cli.gateway_windows import is_task_registered
-        task_installed = is_task_registered()
-    except Exception:
-        pass
+    # Determine from shared probe result (no second query)
+    if task_registered is None:
+        # Fallback: re-probe only if caller didn't provide one (legacy code path)
+        task_registered = False
+        try:
+            task_registered = _probe_task_registration(task_name or "") is True
+        except Exception:
+            task_registered = False
 
-    if task_installed:
+    if task_registered:
         write_status(profile, "starting_task", request_id=request_id)
         append_restart_log(
             request_id=request_id, profile=profile, old_pid=old_pid,
