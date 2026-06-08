@@ -1621,29 +1621,59 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     return ""
 
 
+def _can_import_hermes_cli() -> bool:
+    """Return ``True`` when ``hermes_cli`` resolves under the current interpreter.
+
+    ``importlib.util.find_spec`` is the supported probe but it can raise
+    ``ImportError`` / ``ValueError`` when a malformed parent package shadows
+    ``hermes_cli`` on ``sys.path`` (rare but observed during partial editable
+    installs). A failed probe means we cannot safely spawn ``-m
+    hermes_cli.main`` from this interpreter, so the caller should fall back
+    to the PATH-based shim.
+    """
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec("hermes_cli") is not None
+    except (ImportError, ValueError) as exc:
+        logger.debug("hermes_cli find_spec probe failed: %r", exc)
+        return False
+
+
 def _resolve_hermes_bin() -> Optional[list[str]]:
     """Resolve the Hermes update command as argv parts.
 
     Tries in order:
-    1. ``shutil.which("hermes")`` — standard PATH lookup
-    2. ``sys.executable -m hermes_cli.main`` — fallback when Hermes is running
+    1. Windows venv guard — when running from a venv on Windows, prefer the
+       interpreter-bound module form. A bare ``hermes`` lookup on a
+       restricted ``PATH`` (Scheduled Task, detached process) can resolve
+       to a *different* interpreter's ``hermes.exe`` (pip console-script
+       launcher) that cannot bootstrap the venv's editable install and
+       dies with ``ModuleNotFoundError: No module named 'hermes_cli'``.
+    2. ``shutil.which("hermes")`` — standard PATH lookup
+    3. ``sys.executable -m hermes_cli.main`` — fallback when Hermes is running
        from a venv/module invocation and the ``hermes`` shim is not on PATH
 
     Returns argv parts ready for quoting/joining, or ``None`` if neither works.
     """
     import shutil
 
+    if (
+        sys.platform == "win32"
+        and (
+            os.environ.get("VIRTUAL_ENV")
+            or sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+        )
+        and _can_import_hermes_cli()
+    ):
+        return [sys.executable, "-m", "hermes_cli.main"]
+
     hermes_bin = shutil.which("hermes")
     if hermes_bin:
         return [hermes_bin]
 
-    try:
-        import importlib.util
-
-        if importlib.util.find_spec("hermes_cli") is not None:
-            return [sys.executable, "-m", "hermes_cli.main"]
-    except Exception:
-        pass
+    if _can_import_hermes_cli():
+        return [sys.executable, "-m", "hermes_cli.main"]
 
     return None
 
