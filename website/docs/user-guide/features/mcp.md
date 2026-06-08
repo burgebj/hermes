@@ -536,6 +536,85 @@ The new filtering support is also a security control:
 - expose only a minimal whitelist for a sensitive server
 - disable resource/prompt wrappers when you do not want that surface exposed
 
+## PID tracking and server lifecycle
+
+Hermes tracks the subprocesses spawned by stdio MCP servers so it can clean them up when connections are terminated, reloaded, or orphaned. This section covers how PID discovery works across platforms and how MCP server authors can help Hermes clean up reliably.
+
+### Wrapper-avoidance recommendations (for MCP server authors)
+
+The most reliable way to configure a stdio MCP server is to point `command` directly at the executable:
+
+```yaml
+mcp_servers:
+  my-server:
+    command: "node"
+    args: ["path/to/server.js"]
+```
+
+**Preferred** — Hermes spawns `node path/to/server.js` as a direct child, PID tracking can observe the full process tree, and cleanup works even when the server process outlives its connection context.
+
+Avoid shell wrapper patterns when possible:
+
+```yaml
+# Less reliable — Hermes sees only /bin/bash, not the real server process
+mcp_servers:
+  my-server:
+    command: "/bin/bash"
+    args: ["./run-mcp-server.sh"]
+```
+
+A shell wrapper (`command: /bin/bash`, `args: ["./run.sh"]`) creates an extra process layer: bash spawns the real server (e.g. `node server.js`) as a grandchild. If the wrapper exits (common with scripts that `exec` or finish), the real server becomes reparented to init, and Hermes must use recursive PID discovery to find it.
+
+**If a shell wrapper is necessary**, include a self-cleanup stanza at the top that kills stale instances of the real server before spawning a new one:
+
+```bash
+#!/bin/bash
+# Self-cleanup: kill any previous server instance still holding the port
+kill $(lsof -t -i:3000) 2>/dev/null || true
+sleep 1
+
+# Then start the real server
+exec node server.js "$@"
+```
+
+**Avoid daemonizer / background patterns** in MCP server launchers:
+
+```bash
+# Problematic: the server runs in the background and Hermes
+# cannot observe its lifecycle
+#!/bin/bash
+nohup node server.js > server.log 2>&1 &
+```
+
+A process that backgrounds itself (`&`, `nohup`, `daemonize`, `setsid`) may escape the process group Hermes captured at spawn time, making it unreachable via `killpg`. The recursive descendant walk (`_discover_descendants`) can still find it in most cases, but daemonizers that call `setsid()` immediately are a known limitation.
+
+### Cross-platform PID discovery
+
+Hermes discovers orphan processes using a two-layer strategy:
+
+| Layer | Mechanism | Coverage |
+|-------|-----------|----------|
+| **Process group signals** | `os.killpg(pgid, sig)` sends the signal to every process sharing the recorded process group ID | Catches grandchildren that stayed in the same pgroup |
+| **Recursive descendant walk** | `_discover_descendants(pid)` performs a BFS over `/proc` or psutil to find all descendants | Catches processes in different pgroups (daemonizer wrappers) |
+
+The descendant discovery adapts to the platform:
+
+| Platform | Method | Notes |
+|----------|--------|-------|
+| **Linux** | `/proc/{pid}/task/{pid}/children` (recursive BFS) | Kernel exposes process children directly; full tree traversal |
+| **macOS** | `psutil.Process(pid).children(recursive=True)` | `/proc` is unavailable on macOS; psutil provides the same semantics |
+| **Windows** | `psutil.Process(pid).children(recursive=True)` | No `/proc`, no `killpg`; psutil enumerates child processes |
+
+### Residual risk: true daemonizers
+
+For MCP servers deployed via `launchctl`, `systemd`, or Docker, the server process is **not a descendant of Hermes at all**. No amount of PID tracking can reach it because it was never spawned by Hermes — it runs as a separate service.
+
+Mitigations:
+- Use `command: <direct-executable>` with `args: [...]` instead of shell wrappers when possible
+- If a shell wrapper is necessary, include a self-cleanup stanza at the top (kill stale instances before spawning)
+- Avoid daemonizer / background patterns in MCP server launchers
+- For long-running MCP servers that outlive Hermes sessions, consider HTTP servers (which have no subprocess lifecycle at all)
+
 ## Example use cases
 
 ### GitHub server with a minimal issue-management surface

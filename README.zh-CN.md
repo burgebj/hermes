@@ -160,6 +160,22 @@ hermes claw migrate --overwrite  # 覆盖已有冲突
 
 ---
 
+## ✨ 新增：MCP 子进程 PID 追踪
+
+Hermes 现在可以追踪并清理 MCP Shell 包装服务器的**递归子进程**。当 MCP 服务器通过包装脚本启动（bash → 实际服务器）时，孙进程会自动通过 `/proc`（Linux）或 `psutil`（macOS/Windows）的 BFS 遍历发现，并在关闭时清理。
+
+**主要功能：**
+- **BFS 遍历发现** — 查找任何追踪 PID 的子进程、孙进程和任意深度的后代进程
+- **双层孤儿进程回收** — 优雅 SIGTERM → 2 秒等待 → 强制 SIGKILL 击杀幸存者
+- **跨平台** — Linux 上使用 `/proc`，macOS 上使用 psutil 回退，Windows 上使用 `killpg` 防护
+- **循环安全** — `visited` 集合防止病态 PID 树导致死循环
+- **线程安全** — 所有共享状态受锁保护
+- **无新增依赖** — 使用已有的 psutil 和标准库
+
+详见 [MCP 集成文档](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp) 和 [贡献指南](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing#5-pid-tracking-mcp-subprocess-management)。
+
+---
+
 ## 贡献
 
 欢迎贡献！请参阅 [贡献指南](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) 了解开发设置、代码风格和 PR 流程。

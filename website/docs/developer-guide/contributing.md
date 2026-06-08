@@ -147,6 +147,39 @@ if platform.system() != "Windows":
 
 Use `pathlib.Path` instead of string concatenation with `/`.
 
+### 5. PID tracking (MCP subprocess management)
+
+When working with MCP stdio server process tracking, be aware of these
+platform differences:
+
+| Platform | Descendant discovery | Kill signal | Notes |
+|----------|---------------------|-------------|-------|
+| **Linux** | `/proc/{pid}/task/{pid}/children` (recursive BFS) | `os.killpg(pgid, sig)` | Kernel exposes process children directly. `_discover_descendants()` walks the full tree. |
+| **macOS** | `psutil.Process(pid).children(recursive=True)` | `os.killpg(pgid, sig)` | No `/proc/.../children` — psutil fallback used. Same pgroup semantics as Linux. |
+| **Windows** | `psutil.Process(pid).children(recursive=True)` | `os.kill(pid, sig)` | No `killpg`, no `/proc`. Signals are sent per-PID, not per-pgroup. |
+
+Key code paths to know:
+
+- **`_discover_descendants(pid)`** in `tools/mcp_tool.py` — BFS over /proc or
+  psutil. Always attempts /proc first (safe no-op on macOS/Windows where it
+  raises `FileNotFoundError`), then falls back to psutil. Returns an empty set
+  if both fail.
+- **`_kill_orphaned_mcp_children()`** in `tools/mcp_tool.py` — two-layer reap
+  strategy: process group signals (`killpg`) + recursive descendant walk
+  (`_discover_descendants`).
+- **`_snapshot_child_pids()`** in `tools/mcp_tool.py` — snapshot-time recursive
+  child discovery, used at MCP connection setup to identify spawned
+  subprocesses.
+
+When adding new PID-sensitive code:
+
+- Never assume `/proc` is available — it is Linux-specific.
+- Never call `os.killpg` on Windows — gate with `getattr(os, "killpg", None)`.
+- Prefer `_discover_descendants()` when you need all descendants of a PID
+  rather than reimplementing your own process tree walk.
+- If you import `psutil`, it is already a hard dependency of Hermes — no
+  conditional install needed.
+
 ## Security Considerations
 
 Hermes has terminal access. Security matters.

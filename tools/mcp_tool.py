@@ -2404,25 +2404,107 @@ _stdio_pgids: Dict[int, int] = {}  # pid -> pgid
 
 
 def _snapshot_child_pids() -> set:
-    """Return a set of current child process PIDs.
+    """Return a set of current child AND grandchild process PIDs.
 
     Uses /proc on Linux, falls back to psutil, then empty set.
+    Recursively discovers descendants so that MCP servers spawned via
+    shell wrappers (e.g. ``/bin/bash run-mcp.sh -> node server.js``)
+    are tracked even when the wrapper exits and the real server becomes
+    a grandchild of the Hermes process.
+
     Used by _run_stdio to identify the subprocess spawned by stdio_client.
     """
     my_pid = os.getpid()
 
-    # Linux: read from /proc
+    # Linux: read from /proc recursively
     try:
-        children_path = f"/proc/{my_pid}/task/{my_pid}/children"
-        with open(children_path, encoding="utf-8") as f:
-            return {int(p) for p in f.read().split() if p.strip()}
-    except (FileNotFoundError, OSError, ValueError):
+        all_pids: set = set()
+        frontier = [my_pid]
+        visited: set = set()
+        while frontier:
+            pid = frontier.pop()
+            if pid in visited:
+                continue
+            visited.add(pid)
+            try:
+                children_path = f"/proc/{pid}/task/{pid}/children"
+                with open(children_path, encoding="utf-8") as f:
+                    child_pids = {int(p) for p in f.read().split() if p.strip()}
+                all_pids |= child_pids
+                frontier.extend(child_pids)
+            except (FileNotFoundError, OSError, ValueError):
+                pass
+        # Exclude the Hermes process itself
+        all_pids.discard(my_pid)
+        return all_pids
+    except Exception:
         pass
 
-    # Fallback: psutil
+    # Fallback: psutil (recursive children)
     try:
         import psutil
-        return {c.pid for c in psutil.Process(my_pid).children()}
+        return {c.pid for c in psutil.Process(my_pid).children(recursive=True)}
+    except Exception:
+        pass
+
+    return set()
+
+
+def _discover_descendants(pid: int) -> set[int]:
+    """Return ALL descendants of *pid* (BFS), excluding *pid* itself.
+
+    Cross-platform discovery strategy:
+
+    ============ ==============================================================
+    Platform     Strategy
+    ============ ==============================================================
+    Linux        BFS over ``/proc/{pid}/task/{pid}/children`` — the kernel
+                 exposes every process's child list as a space-separated file.
+                 Recursive BFS covers arbitrary-depth process trees (shell
+                 wrapper → daemon → worker).
+    macOS        ``/proc`` is a limited Linux-specific filesystem; macOS
+                 provides no ``/proc/{pid}/task/{pid}/children`` equivalent.
+                 Falls back to ``psutil`` — uses
+                 ``psutil.Process(pid).children(recursive=True)``.
+    Windows      No ``/proc``, no ``killpg``, no POSIX process groups.
+                 Falls back to ``psutil`` with
+                 ``children(recursive=True)``.  The caller
+                 (``_kill_orphaned_mcp_children``) also falls back to
+                 ``os.kill(pid, sig)`` because ``killpg`` is unavailable.
+    ============ ==============================================================
+
+    Follows the same error-handling pattern as ``_snapshot_child_pids()``:
+    /proc is attempted first on every platform (safe no-op on macOS/Windows
+    where ``FileNotFoundError`` is silently caught), then psutil is tried
+    as a universal fallback.  Returns an empty set if both paths fail.
+    """
+    # Linux: BFS over /proc recursively
+    try:
+        all_descendants: set[int] = set()
+        frontier = [pid]
+        visited: set[int] = set()
+        while frontier:
+            child = frontier.pop()
+            if child in visited:
+                continue
+            visited.add(child)
+            try:
+                children_path = f"/proc/{child}/task/{child}/children"
+                with open(children_path, encoding="utf-8") as f:
+                    child_pids = {int(p) for p in f.read().split() if p.strip()}
+                all_descendants |= child_pids
+                frontier.extend(child_pids)
+            except (FileNotFoundError, OSError, ValueError):
+                pass
+        all_descendants.discard(pid)
+        return all_descendants
+    except Exception:
+        pass
+
+    # Fallback: psutil (recursive children)
+    try:
+        import psutil
+        return {c.pid for c in psutil.Process(pid).children(recursive=True)}
     except Exception:
         pass
 
@@ -3830,6 +3912,24 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
     first) are reaped alongside the direct child.  Falls back to ``os.kill``
     on Windows and when no pgid is recorded.
 
+    Additionally, for each tracked PID, ``_discover_descendants()`` performs
+    a recursive BFS over ``/proc/{pid}/task/{pid}/children`` on Linux or
+    falls back to ``psutil.Process(pid).children(recursive=True)`` on
+    macOS/Windows to discover and terminate descendants that may be in a
+    different process group (e.g. daemonizer wrappers). This two-layer
+    approach (pgid + recursive descendant walk) covers shell-wrapper and
+    daemonizer MCP server configurations.
+
+    Platform behaviour summary (see ``_discover_descendants`` for details):
+
+    ============ ===================== ============== ===========================
+    Platform     Descendant discovery  Kill primitive  Fallback
+    ============ ===================== ============== ===========================
+    Linux        /proc BFS (recursive)  ``os.killpg``  ``os.kill(pid)``
+    macOS        psutil (recursive)     ``os.killpg``  ``os.kill(pid)``
+    Windows      psutil (recursive)     ``os.kill``    — (no killpg available)
+    ============ ===================== ============== ===========================
+
     With ``include_active=True`` also kills every PID in ``_stdio_pids`` —
     used only at final shutdown, after the MCP event loop has stopped and no
     sessions can still be in flight.
@@ -3876,9 +3976,27 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
             pass
 
     # Phase 1: SIGTERM (graceful)
+    # For each PID, also attempt to SIGTERM its direct children — handles
+    # cases where the tracked PID is a wrapper that spawned the real server
+    # and they are in different process groups (e.g. daemonizer pattern).
+    _children_of_tracked: set = set()
     for pid, server_name in pids.items():
         _send_signal(pid, _signal.SIGTERM, server_name)
         logger.debug("Sent SIGTERM to orphaned MCP process %d (%s)", pid, server_name)
+        # Discover and terminate ALL descendants of this PID
+        # Uses _discover_descendants() which recurses through /proc on
+        # Linux or falls back to psutil, covering shell-wrapper and
+        # daemonizer MCP server configurations where grandchildren exist
+        # in different process groups.
+        descendants = _discover_descendants(pid)
+        for child_pid in descendants:
+            _children_of_tracked.add(child_pid)
+            _send_signal(child_pid, _signal.SIGTERM, server_name)
+            logger.debug(
+                "Sent SIGTERM to descendant %d of orphaned MCP process %d (%s)",
+                child_pid, pid, server_name,
+            )
+    pids.update({cp: "orphan-child" for cp in _children_of_tracked})
 
     # Phase 2: Wait for graceful exit
     time.sleep(2)

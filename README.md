@@ -175,6 +175,22 @@ See `hermes claw migrate --help` for all options, or use the `openclaw-migration
 
 ---
 
+## ✨ New: MCP Grandchild PID Tracking
+
+Hermes now tracks and reaps **recursive descendant processes** of MCP shell-wrapper servers. When an MCP server is launched via a wrapper script (bash → real server), the grandchild process is automatically discovered via BFS traversal over `/proc` (Linux) or `psutil` (macOS/Windows) and cleaned up on shutdown.
+
+**Key capabilities:**
+- **BFS-based discovery** — finds children, grandchildren, and arbitrary-depth descendants of any tracked PID
+- **Two-layer orphan reaper** — graceful SIGTERM → 2s grace → forced SIGKILL for survivors
+- **Cross-platform** — `/proc` on Linux, psutil fallback on macOS, `killpg` guard on Windows
+- **Cycle-safe** — `visited` set prevents infinite loops from pathological PID trees
+- **Thread-safe** — all shared state protected by a lock
+- **No new dependencies** — uses existing psutil and stdlib
+
+See the [MCP Integration docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp) for configuration and the [Contributing Guide](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing#5-pid-tracking-mcp-subprocess-management) for the developer deep-dive.
+
+---
+
 ## Contributing
 
 We welcome contributions! See the [Contributing Guide](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) for development setup, code style, and PR process.
