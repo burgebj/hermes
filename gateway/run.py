@@ -9836,6 +9836,10 @@ class GatewayRunner:
             # Use the filtered history length (history_offset) that was actually
             # passed to the agent, not len(history) which includes session_meta
             # entries that were stripped before the agent saw them.
+            history_len = agent_result.get("history_offset", len(history))
+            current_turn_agent_messages = (
+                agent_messages[history_len:] if len(agent_messages) > history_len else []
+            )
             if is_context_overflow_failure:
                 pass  # handled above — skip all transcript writes
             elif agent_failed_early:
@@ -9851,8 +9855,7 @@ class GatewayRunner:
                     _user_entry,
                 )
             else:
-                history_len = agent_result.get("history_offset", len(history))
-                new_messages = agent_messages[history_len:] if len(agent_messages) > history_len else []
+                new_messages = current_turn_agent_messages
 
                 # If no new messages found (edge case), fall back to simple user/assistant
                 if not new_messages:
@@ -9908,7 +9911,16 @@ class GatewayRunner:
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
-            if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
+            voice_turn_agent_messages = agent_result.get(
+                "voice_turn_messages",
+                current_turn_agent_messages,
+            )
+            if self._should_send_voice_reply(
+                event,
+                response,
+                voice_turn_agent_messages,
+                already_sent=_already_sent,
+            ):
                 await self._send_voice_reply(event, response)
 
             # If streaming already delivered the response, extract and
@@ -12356,6 +12368,27 @@ class GatewayRunner:
 
         await adapter.handle_message(event)
 
+    def _messages_from_current_user_turn(
+        self,
+        messages: list,
+        current_user_content: Any = None,
+        fallback_offset: int = 0,
+    ) -> list:
+        """Return messages from the current inbound user turn onward.
+
+        Prefer locating the actual user message sent to the agent.  This stays
+        correct when mid-run compression rewrites the message list and the
+        transcript-persistence offset is reset to 0 so compressed context can be
+        saved.  Fallback to the caller-provided offset for older/edge paths.
+        """
+        if current_user_content is not None:
+            for idx in range(len(messages) - 1, -1, -1):
+                msg = messages[idx]
+                if msg.get("role") == "user" and msg.get("content") == current_user_content:
+                    return messages[idx:]
+
+        return messages[fallback_offset:] if len(messages) > fallback_offset else []
+
     def _should_send_voice_reply(
         self,
         event: MessageEvent,
@@ -12388,7 +12421,10 @@ class GatewayRunner:
         if not should:
             return False
 
-        # Dedup: agent already called TTS tool
+        # Dedup: agent already called TTS tool in this turn.  The gateway passes
+        # only the current-turn agent messages here so historical
+        # text_to_speech calls from resumed/compressed sessions do not
+        # permanently suppress auto-TTS for future replies.
         has_agent_tts = any(
             msg.get("role") == "assistant"
             and any(
@@ -18719,10 +18755,17 @@ class GatewayRunner:
                 except Exception:
                     pass
 
+            _result_messages = result_holder[0].get("messages", []) if result_holder[0] else []
+            _voice_turn_messages = self._messages_from_current_user_turn(
+                _result_messages,
+                current_user_content=_run_message,
+                fallback_offset=_effective_history_offset,
+            )
+
             return {
                 "final_response": final_response,
                 "last_reasoning": result.get("last_reasoning"),
-                "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
+                "messages": _result_messages,
                 "api_calls": result_holder[0].get("api_calls", 0) if result_holder[0] else 0,
                 "completed": result_holder[0].get("completed") if result_holder[0] else None,
                 "interrupted": result_holder[0].get("interrupted", False) if result_holder[0] else False,
@@ -18731,6 +18774,7 @@ class GatewayRunner:
                 "interrupt_message": result_holder[0].get("interrupt_message") if result_holder[0] else None,
                 "tools": tools_holder[0] or [],
                 "history_offset": _effective_history_offset,
+                "voice_turn_messages": _voice_turn_messages,
                 "last_prompt_tokens": _last_prompt_toks,
                 "input_tokens": _input_toks,
                 "output_tokens": _output_toks,
