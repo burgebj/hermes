@@ -1016,7 +1016,7 @@ def _build_snapshot_entry(
         "category": category,
         "frontmatter_name": str(frontmatter.get("name", skill_name)),
         "description": description,
-        "platforms": [str(p).strip() for p in platforms if str(p).strip()],
+        "platforms": [str(p).strip() for p in platforms if p is not None and str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
     }
 

@@ -15,6 +15,7 @@ from agent.prompt_builder import (
     _find_hermes_md,
     _find_git_root,
     _strip_yaml_frontmatter,
+    _build_snapshot_entry,
     build_skills_system_prompt,
     build_nous_subscription_prompt,
     build_context_files_prompt,
@@ -1079,6 +1080,33 @@ class TestSkillShouldShow:
         conditions = {"fallback_for_toolsets": [], "requires_toolsets": [],
                       "fallback_for_tools": [], "requires_tools": ["terminal"]}
         assert _skill_should_show(conditions, {"terminal"}, set()) is True
+
+
+class TestBuildSnapshotEntryNoneFilter:
+    """_build_snapshot_entry must drop None entries from the platforms list."""
+
+    def _make_entry(self, platforms):
+        from pathlib import Path
+        skills_dir = Path("/skills")
+        skill_file = skills_dir / "myplugin" / "myskill" / "SKILL.md"
+        frontmatter = {"platforms": platforms}
+        return _build_snapshot_entry(skill_file, skills_dir, frontmatter, "desc")
+
+    def test_none_entries_not_converted_to_string(self):
+        result = self._make_entry(["macos", None, "linux"])
+        assert "None" not in result["platforms"]
+
+    def test_none_entries_dropped(self):
+        result = self._make_entry(["macos", None, "linux"])
+        assert result["platforms"] == ["macos", "linux"]
+
+    def test_all_none_produces_empty_list(self):
+        result = self._make_entry([None, None])
+        assert result["platforms"] == []
+
+    def test_no_none_unchanged(self):
+        result = self._make_entry(["macos", "linux"])
+        assert result["platforms"] == ["macos", "linux"]
 
 
 class TestBuildSkillsSystemPromptConditional:
