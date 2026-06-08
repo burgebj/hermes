@@ -1144,8 +1144,12 @@ CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_
 
 _INITIALIZED_PATHS: set[str] = set()
 _INIT_LOCK = threading.RLock()
+_WRITE_LOCKS_GUARD = threading.RLock()
+_WRITE_LOCKS: dict[str, threading.RLock] = {}
+_WRITE_LOCK_DEPTH = threading.local()
 _SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_BUSY_TIMEOUT_MS = 120_000
+DEFAULT_WRITE_LOCK_POLL_SECONDS = 0.025
 
 
 def _resolve_busy_timeout_ms() -> int:
@@ -1164,6 +1168,113 @@ def _resolve_busy_timeout_ms() -> int:
         if parsed > 0:
             return parsed
     return DEFAULT_BUSY_TIMEOUT_MS
+
+
+def _resolve_write_lock_timeout_ms() -> int:
+    """Return the bounded timeout for the Kanban sidecar DB write lock."""
+    raw = os.environ.get("HERMES_KANBAN_WRITE_LOCK_TIMEOUT_MS", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            parsed = 0
+        if parsed > 0:
+            return parsed
+    return DEFAULT_BUSY_TIMEOUT_MS
+
+
+def _kanban_db_write_lock_path(path: Path) -> Path:
+    """Return the process-wide write lock sidecar for a Kanban DB path."""
+    return path.with_name(path.name + ".lock")
+
+
+def _connection_db_path(conn: sqlite3.Connection) -> Optional[Path]:
+    """Resolve the main database path for an open SQLite connection, if any."""
+    for row in conn.execute("PRAGMA database_list").fetchall():
+        try:
+            name = row["name"]
+            filename = row["file"]
+        except (TypeError, IndexError):
+            name = row[1]
+            filename = row[2]
+        if name == "main":
+            if filename:
+                return Path(str(filename))
+            return None
+    raise sqlite3.OperationalError("cannot resolve main kanban DB path for write lock")
+
+
+@contextlib.contextmanager
+def _cross_process_write_lock(path: Path):
+    """Serialize Kanban DB writes across processes with a bounded sidecar lock."""
+    resolved_path = path.resolve()
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    key = str(resolved_path)
+    depths = getattr(_WRITE_LOCK_DEPTH, "counts", None)
+    if depths is None:
+        depths = {}
+        _WRITE_LOCK_DEPTH.counts = depths
+    if depths.get(key, 0) > 0:
+        depths[key] += 1
+        try:
+            yield
+        finally:
+            depths[key] -= 1
+            if depths[key] <= 0:
+                depths.pop(key, None)
+        return
+
+    with _WRITE_LOCKS_GUARD:
+        local_lock = _WRITE_LOCKS.setdefault(key, threading.RLock())
+
+    with local_lock:
+        lock_path = _kanban_db_write_lock_path(resolved_path)
+        if _IS_WINDOWS and (not lock_path.exists() or lock_path.stat().st_size == 0):
+            lock_path.write_bytes(b" ")
+        handle = lock_path.open("r+b" if _IS_WINDOWS else "a+b")
+        acquired = False
+        deadline = time.monotonic() + (_resolve_write_lock_timeout_ms() / 1000.0)
+        try:
+            while True:
+                try:
+                    if _IS_WINDOWS:
+                        import msvcrt
+
+                        handle.seek(0)
+                        locking = getattr(msvcrt, "locking")
+                        lock_mode = getattr(msvcrt, "LK_NBLCK")
+                        locking(handle.fileno(), lock_mode, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    depths[key] = 1
+                    break
+                except OSError as exc:
+                    if time.monotonic() >= deadline:
+                        raise sqlite3.OperationalError(
+                            f"timed out acquiring kanban DB write lock for {path}"
+                        ) from exc
+                    time.sleep(DEFAULT_WRITE_LOCK_POLL_SECONDS)
+            yield
+        finally:
+            try:
+                depths.pop(key, None)
+                if acquired:
+                    if _IS_WINDOWS:
+                        import msvcrt
+
+                        handle.seek(0)
+                        locking = getattr(msvcrt, "locking")
+                        unlock_mode = getattr(msvcrt, "LK_UNLCK")
+                        locking(handle.fileno(), unlock_mode, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
 
 
 def _sqlite_connect(path: Path) -> sqlite3.Connection:
@@ -1192,9 +1303,12 @@ def _cross_process_init_lock(path: Path):
     additive migrations single-file/single-writer across the whole host while
     leaving normal post-init DB usage concurrent under SQLite WAL.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_name(path.name + ".init.lock")
-    handle = lock_path.open("a+b")
+    resolved_path = path.resolve()
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = resolved_path.with_name(resolved_path.name + ".init.lock")
+    if _IS_WINDOWS and (not lock_path.exists() or lock_path.stat().st_size == 0):
+        lock_path.write_bytes(b" ")
+    handle = lock_path.open("r+b" if _IS_WINDOWS else "a+b")
     try:
         if _IS_WINDOWS:
             import msvcrt
@@ -1444,48 +1558,50 @@ def connect(
         # Cheap byte-level check first — catches the #29507 TLS-overwrite shape
         # and other invalid-header cases without opening a sqlite connection.
         _validate_sqlite_header(path)
-        # Full integrity probe — catches corruption past the header (malformed
-        # pages, broken internal metadata). Cached per-path after first success
-        # via _INITIALIZED_PATHS so it only runs once per process per path.
-        _guard_existing_db_is_healthy(path)
-        resolved = str(path.resolve())
-        conn = _sqlite_connect(path)
-        try:
-            conn.row_factory = sqlite3.Row
-            with _INIT_LOCK:
-                # WAL activation can take an exclusive lock while SQLite creates the
-                # sidecar files for a fresh database. Keep it in the same process-local
-                # critical section as schema initialization so concurrent gateway
-                # startup threads do not race before _INITIALIZED_PATHS is populated.
-                # WAL doesn't work on network filesystems (NFS/SMB/FUSE). Shared helper
-                # falls back to DELETE with one WARNING so kanban stays usable there.
-                # See hermes_state._WAL_INCOMPAT_MARKERS for detection logic.
-                from hermes_state import apply_wal_with_fallback
-                apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
-                # FULL (was NORMAL): fsync before each checkpoint to narrow the
-                # crash window that can leave a b-tree page header torn.
-                conn.execute("PRAGMA synchronous=FULL")
-                conn.execute("PRAGMA wal_autocheckpoint=100")
-                conn.execute("PRAGMA foreign_keys=ON")
-                # Zero freed pages so a later torn write cannot expose stale
-                # cell content; persisted in the DB header for new DBs.
-                conn.execute("PRAGMA secure_delete=ON")
-                # Surface corrupt cells as read errors instead of silent
-                # wrong-data returns.
-                conn.execute("PRAGMA cell_size_check=ON")
-                needs_init = resolved not in _INITIALIZED_PATHS
-                if needs_init:
-                    # Idempotent: runs CREATE TABLE IF NOT EXISTS + the additive
-                    # migrations. Cached so subsequent connect() calls in the same
-                    # process are cheap. The lock prevents same-process dispatcher
-                    # threads from racing through the additive ALTER TABLE pass with
-                    # stale PRAGMA snapshots during gateway startup.
-                    conn.executescript(SCHEMA_SQL)
-                    _migrate_add_optional_columns(conn)
-                    _INITIALIZED_PATHS.add(resolved)
-        except Exception:
-            conn.close()
-            raise
+        with _cross_process_write_lock(path):
+            # Full integrity probe — catches corruption past the header (malformed
+            # pages, broken internal metadata). Cached per-path after first success
+            # via _INITIALIZED_PATHS so it only runs once per process per path.
+            _guard_existing_db_is_healthy(path)
+            resolved = str(path.resolve())
+            conn = _sqlite_connect(path)
+            try:
+                conn.row_factory = sqlite3.Row
+                with _INIT_LOCK:
+                    # WAL activation can take an exclusive lock while SQLite creates the
+                    # sidecar files for a fresh database. Keep it in the same process-local
+                    # critical section as schema initialization so concurrent gateway
+                    # startup threads do not race before _INITIALIZED_PATHS is populated.
+                    # WAL doesn't work on network filesystems (NFS/SMB/FUSE). Shared helper
+                    # falls back to DELETE with one WARNING so kanban stays usable there.
+                    # See hermes_state._WAL_INCOMPAT_MARKERS for detection logic.
+                    from hermes_state import apply_wal_with_fallback
+                    apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
+                    # FULL (was NORMAL): fsync before each checkpoint to narrow the
+                    # crash window that can leave a b-tree page header torn.
+                    conn.execute("PRAGMA synchronous=FULL")
+                    conn.execute("PRAGMA wal_autocheckpoint=100")
+                    conn.execute("PRAGMA foreign_keys=ON")
+                    # Zero freed pages so a later torn write cannot expose stale
+                    # cell content; persisted in the DB header for new DBs.
+                    conn.execute("PRAGMA secure_delete=ON")
+                    # Surface corrupt cells as read errors instead of silent
+                    # wrong-data returns.
+                    conn.execute("PRAGMA cell_size_check=ON")
+                    needs_init = resolved not in _INITIALIZED_PATHS
+                    if needs_init:
+                        # Idempotent: runs CREATE TABLE IF NOT EXISTS + the additive
+                        # migrations. Cached so subsequent connect() calls in the same
+                        # process are cheap. The locks prevent cross-process DDL/DML races
+                        # and same-process dispatcher threads from racing through the
+                        # additive ALTER TABLE pass with stale PRAGMA snapshots during
+                        # gateway startup.
+                        conn.executescript(SCHEMA_SQL)
+                        _migrate_add_optional_columns(conn)
+                        _INITIALIZED_PATHS.add(resolved)
+            except Exception:
+                conn.close()
+                raise
     return conn
 
 
@@ -1954,28 +2070,50 @@ def _check_file_length_invariant(conn: sqlite3.Connection) -> None:
             return  # in-memory or unnamed DB; skip
         path = path_str
         page_size = conn.execute("PRAGMA page_size").fetchone()[0]
-        file_size = os.path.getsize(path)
-        with open(path, "rb") as f:
-            f.seek(28)
-            header_bytes = f.read(4)
-        if len(header_bytes) < 4:
-            return  # can't read header; skip
-        header_page_count = int.from_bytes(header_bytes, "big")
-        if header_page_count == 0:
-            return  # new/empty DB; skip
-        actual_pages = file_size // page_size
-        if actual_pages < header_page_count:
-            raise sqlite3.DatabaseError(
-                f"torn-extend detected: page count mismatch on {path}: "
-                f"header claims {header_page_count} pages, "
-                f"file has {actual_pages} pages "
-                f"(missing {header_page_count - actual_pages} pages, "
-                f"file_size={file_size}, page_size={page_size})"
-            )
+        last_mismatch = None
+        for attempt in range(6):
+            file_size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                f.seek(28)
+                header_bytes = f.read(4)
+            if len(header_bytes) < 4:
+                return  # can't read header; skip
+            header_page_count = int.from_bytes(header_bytes, "big")
+            if header_page_count == 0:
+                return  # new/empty DB; skip
+            actual_pages = file_size // page_size
+            if actual_pages >= header_page_count:
+                return
+            last_mismatch = (header_page_count, actual_pages, file_size, page_size)
+            if attempt < 5:
+                time.sleep(0.01)
+        if last_mismatch is None:
+            return
+        header_page_count, actual_pages, file_size, page_size = last_mismatch
+        raise sqlite3.DatabaseError(
+            f"torn-extend detected: page count mismatch on {path}: "
+            f"header claims {header_page_count} pages, "
+            f"file has {actual_pages} pages "
+            f"(missing {header_page_count - actual_pages} pages, "
+            f"file_size={file_size}, page_size={page_size})"
+        )
     except sqlite3.DatabaseError:
         raise
     except Exception:
         pass  # I/O errors during check are non-fatal; let normal ops continue
+
+
+def _write_txn_should_check_file_length(conn: sqlite3.Connection) -> bool:
+    """Return true when the post-commit main-file length invariant is meaningful."""
+    try:
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+        journal_mode = str(row[0]).lower() if row and row[0] is not None else ""
+    except sqlite3.DatabaseError:
+        return True
+    # In WAL mode the main database file can lag while valid frames live in the
+    # WAL; comparing the main-file header to the main-file length at that point
+    # can report false torn-extend failures during concurrent writer bursts.
+    return journal_mode != "wal"
 
 
 @contextlib.contextmanager
@@ -1990,23 +2128,31 @@ def write_txn(conn: sqlite3.Connection):
     a SQLite auto-rollback (which leaves no active transaction) does not
     shadow the original exception with a spurious rollback error.
     """
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        yield conn
-    except Exception:
+    db_path = _connection_db_path(conn)
+    lock_context = (
+        _cross_process_write_lock(db_path)
+        if db_path is not None
+        else contextlib.nullcontext()
+    )
+    with lock_context:
+        conn.execute("BEGIN IMMEDIATE")
         try:
-            conn.execute("ROLLBACK")
-        except sqlite3.OperationalError:
-            # SQLite has already auto-rolled-back the transaction (typical
-            # under EIO, lock contention, or corruption). Nothing to undo;
-            # do not let this secondary failure shadow the real one.
-            pass
-        raise
-    else:
-        conn.execute("COMMIT")
-        # Post-commit file-length check: header page_count must match actual file pages.
-        # A discrepancy means a torn-extend — raise now rather than silently corrupt.
-        _check_file_length_invariant(conn)
+            yield conn
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                # SQLite has already auto-rolled-back the transaction (typical
+                # under EIO, lock contention, or corruption). Nothing to undo;
+                # do not let this secondary failure shadow the real one.
+                pass
+            raise
+        else:
+            conn.execute("COMMIT")
+            # Post-commit file-length check: header page_count must match actual file pages.
+            # A discrepancy means a torn-extend — raise now rather than silently corrupt.
+            if _write_txn_should_check_file_length(conn):
+                _check_file_length_invariant(conn)
 
 
 # ---------------------------------------------------------------------------

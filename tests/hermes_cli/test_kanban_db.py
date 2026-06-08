@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import os
 import sqlite3
 import sys
@@ -70,10 +71,14 @@ def test_connect_honors_kanban_busy_timeout_env(kanban_home, monkeypatch):
 def test_cross_process_init_lock_uses_windows_byte_range_lock(tmp_path, monkeypatch):
     """Windows must use a real process lock, not a no-op sidecar open."""
     calls: list[tuple[int, int, int]] = []
+    def fake_locking(fd, mode, nbytes):
+        assert os.fstat(fd).st_size >= 1
+        calls.append((fd, mode, nbytes))
+
     fake_msvcrt = types.SimpleNamespace(
         LK_LOCK=1,
         LK_UNLCK=2,
-        locking=lambda fd, mode, nbytes: calls.append((fd, mode, nbytes)),
+        locking=fake_locking,
     )
     monkeypatch.setattr(kb, "_IS_WINDOWS", True)
     monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
@@ -86,6 +91,125 @@ def test_cross_process_init_lock_uses_windows_byte_range_lock(tmp_path, monkeypa
         (fake_msvcrt.LK_LOCK, 1),
         (fake_msvcrt.LK_UNLCK, 1),
     ]
+
+
+def test_cross_process_write_lock_uses_windows_nonblocking_byte_range_lock(tmp_path, monkeypatch):
+    """Windows write lock should use nonblocking byte-range lock and unlock."""
+    calls: list[tuple[int, int, int]] = []
+    def fake_locking(fd, mode, nbytes):
+        assert os.fstat(fd).st_size >= 1
+        calls.append((fd, mode, nbytes))
+
+    fake_msvcrt = types.SimpleNamespace(
+        LK_NBLCK=3,
+        LK_UNLCK=2,
+        locking=fake_locking,
+    )
+    monkeypatch.setattr(kb, "_IS_WINDOWS", True)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
+
+    db_path = tmp_path / "kanban.db"
+    with kb._cross_process_write_lock(db_path):
+        assert calls == [(calls[0][0], fake_msvcrt.LK_NBLCK, 1)]
+
+    assert [call[1:] for call in calls] == [
+        (fake_msvcrt.LK_NBLCK, 1),
+        (fake_msvcrt.LK_UNLCK, 1),
+    ]
+
+
+def test_cross_process_write_lock_timeout_when_sidecar_is_held(tmp_path, monkeypatch):
+    """The DB write lock should time out instead of blocking indefinitely."""
+    if kb._IS_WINDOWS:
+        pytest.skip("Unix flock timeout regression test")
+    import fcntl
+
+    monkeypatch.setenv("HERMES_KANBAN_WRITE_LOCK_TIMEOUT_MS", "25")
+    db_path = tmp_path / "kanban.db"
+    lock_path = db_path.with_name(db_path.name + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    holder = lock_path.open("a+b")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        start = time.monotonic()
+        with pytest.raises(
+            sqlite3.OperationalError,
+            match="timed out acquiring kanban DB write lock",
+        ):
+            with kb._cross_process_write_lock(db_path):
+                pass
+        assert time.monotonic() - start < 1.0
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+
+def test_cross_process_write_lock_canonicalizes_sidecar_for_symlinked_db(tmp_path, monkeypatch):
+    """A DB opened through a symlink should contend on the target DB's lock file."""
+    if kb._IS_WINDOWS:
+        pytest.skip("Unix symlink/flock regression test")
+    import fcntl
+
+    monkeypatch.setenv("HERMES_KANBAN_WRITE_LOCK_TIMEOUT_MS", "25")
+    real_db = tmp_path / "real" / "kanban.db"
+    real_db.parent.mkdir()
+    alias_db = tmp_path / "alias.db"
+    alias_db.symlink_to(real_db)
+    canonical_lock = real_db.with_name(real_db.name + ".lock")
+    holder = canonical_lock.open("a+b")
+    try:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        with pytest.raises(sqlite3.OperationalError, match="timed out acquiring kanban DB write lock"):
+            with kb._cross_process_write_lock(alias_db):
+                pass
+        assert not (tmp_path / "alias.db.lock").exists()
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+
+def test_connect_schema_init_uses_db_write_lock(tmp_path, monkeypatch):
+    """Schema DDL must share the same DB lock as normal write_txn calls."""
+    events: list[str] = []
+    write_lock_active = False
+
+    @contextlib.contextmanager
+    def fake_init_lock(path):
+        events.append(f"init:{Path(path).name}:enter")
+        try:
+            yield
+        finally:
+            events.append(f"init:{Path(path).name}:exit")
+
+    @contextlib.contextmanager
+    def fake_write_lock(path):
+        nonlocal write_lock_active
+        events.append(f"write:{Path(path).name}:enter")
+        write_lock_active = True
+        try:
+            yield
+        finally:
+            write_lock_active = False
+            events.append(f"write:{Path(path).name}:exit")
+
+    def asserting_migrate(conn):
+        assert write_lock_active, "schema migration ran outside the DB write lock"
+
+    monkeypatch.setattr(kb, "_cross_process_init_lock", fake_init_lock)
+    monkeypatch.setattr(kb, "_cross_process_write_lock", fake_write_lock, raising=False)
+    monkeypatch.setattr(kb, "_migrate_add_optional_columns", asserting_migrate)
+
+    db_path = tmp_path / "kanban.db"
+    conn = kb.connect(db_path=db_path)
+    try:
+        assert events == [
+            "init:kanban.db:enter",
+            "write:kanban.db:enter",
+            "write:kanban.db:exit",
+            "init:kanban.db:exit",
+        ]
+    finally:
+        conn.close()
 
 
 def test_connect_rejects_tls_record_in_sqlite_header(tmp_path, monkeypatch):
@@ -4001,6 +4125,56 @@ def test_pragmas_not_accidentally_disabled_by_migrate_path(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_write_txn_uses_write_lock_until_after_commit_check(kanban_home, monkeypatch):
+    """write_txn should hold the DB write lock across BEGIN, COMMIT, and checks."""
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def fake_write_lock(path):
+        events.append(f"lock:{Path(path).name}:enter")
+        try:
+            yield
+        finally:
+            events.append(f"lock:{Path(path).name}:exit")
+
+    def fake_check(conn):
+        events.append("check")
+
+    class LoggingConnWrapper:
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, sql, *args, **kwargs):
+            events.append(sql.strip().split()[0].upper())
+            return self._real.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    monkeypatch.setattr(kb, "_cross_process_write_lock", fake_write_lock, raising=False)
+    monkeypatch.setattr(kb, "_write_txn_should_check_file_length", lambda conn: True)
+    monkeypatch.setattr(kb, "_check_file_length_invariant", fake_check)
+
+    with kb.connect() as conn:
+        events.clear()
+        wrapper = LoggingConnWrapper(conn)
+        with kb.write_txn(wrapper) as c:
+            c.execute(
+                "INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
+                "VALUES ('t_lock01', 'locked task', 'tester', 'todo', 0, 1234567890)"
+            )
+
+    assert events == [
+        "PRAGMA",
+        "lock:kanban.db:enter",
+        "BEGIN",
+        "INSERT",
+        "COMMIT",
+        "check",
+        "lock:kanban.db:exit",
+    ]
+
+
 def test_write_txn_preserves_original_exception_when_rollback_fails(kanban_home):
     """When a write inside write_txn raises an OperationalError that SQLite
     has already auto-rolled-back (e.g. ``disk I/O error``,
@@ -4070,11 +4244,12 @@ def test_write_txn_healthy_commit_no_exception(tmp_path):
     conn.close()
 
 
-def test_write_txn_raises_on_truncated_file(tmp_path):
+def test_write_txn_raises_on_truncated_file(tmp_path, monkeypatch):
     """A mocked smaller file size triggers the torn-extend check."""
     from hermes_cli.kanban_db import connect, write_txn
     db = tmp_path / "test.db"
     conn = connect(db_path=db)
+    monkeypatch.setattr(kb, "_write_txn_should_check_file_length", lambda conn: True)
     # Get actual page size so we can fake a smaller file
     page_size = conn.execute("PRAGMA page_size").fetchone()[0]
     original_getsize = os.path.getsize
@@ -4094,12 +4269,13 @@ def test_write_txn_raises_on_truncated_file(tmp_path):
     conn.close()
 
 
-def test_write_txn_post_commit_check_fires_every_call(tmp_path):
+def test_write_txn_post_commit_check_fires_every_call(tmp_path, monkeypatch):
     """The invariant check runs on every write_txn call."""
     from hermes_cli.kanban_db import connect, write_txn
     import hermes_cli.kanban_db as kanban_db_module
     db = tmp_path / "test.db"
     conn = connect(db_path=db)
+    monkeypatch.setattr(kanban_db_module, "_write_txn_should_check_file_length", lambda conn: True)
     call_count = 0
     real_check = kanban_db_module._check_file_length_invariant
 
@@ -4116,6 +4292,27 @@ def test_write_txn_post_commit_check_fires_every_call(tmp_path):
                     f"VALUES ('t_fire{i:02d}', 'task {i}', 'tester', 'todo', 0, 1234567890)"
                 )
     assert call_count == 3
+    conn.close()
+
+
+def test_write_txn_skips_main_file_length_check_in_wal_mode(tmp_path, monkeypatch):
+    """WAL-mode commits should not compare main-file length while WAL frames may lag."""
+    from hermes_cli.kanban_db import connect, write_txn
+    import hermes_cli.kanban_db as kanban_db_module
+
+    db = tmp_path / "test.db"
+    conn = connect(db_path=db)
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+
+    def fail_check(c):
+        raise AssertionError("WAL write_txn should not run main-file length invariant")
+
+    monkeypatch.setattr(kanban_db_module, "_check_file_length_invariant", fail_check)
+    with write_txn(conn) as c:
+        c.execute(
+            "INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
+            "VALUES ('t_walskip', 'wal task', 'tester', 'todo', 0, 1234567890)"
+        )
     conn.close()
 
 
