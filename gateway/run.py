@@ -19913,6 +19913,21 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 logger.debug("spawn_async_diagnostic failed: %s", _e)
         asyncio.create_task(runner.stop())
 
+    # Ignore SIGPIPE so that broken TCP connections (e.g. when a local
+    # HTTP server the gateway is connected to is killed) do not crash
+    # the gateway process.  Python's default SIGPIPE handler terminates
+    # the process, which takes down the entire Telegram session.  By
+    # ignoring the signal, writes to closed sockets raise
+    # BrokenPipeError / ConnectionResetError instead, which the
+    # existing exception handlers can catch and recover from.
+    if hasattr(signal, "SIGPIPE"):
+        try:
+            signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+            logger.info("SIGPIPE handler set to SIG_IGN (broken-pipe protection)")
+        except (OSError, ValueError):
+            # Can fail if not in main thread or signal is blocked
+            pass
+
     def restart_signal_handler():
         runner.request_restart(detached=False, via_service=True)
     
