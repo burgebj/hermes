@@ -20,6 +20,13 @@ POSIX-only: Windows has its own grandchild lifecycle (no shared session,
 
 from __future__ import annotations
 
+import sys
+
+if sys.platform == "win32":
+    import pytest
+
+    pytest.skip("POSIX-only process-group test", allow_module_level=True)
+
 import json
 import os
 import subprocess
