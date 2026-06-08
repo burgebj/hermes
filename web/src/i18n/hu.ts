@@ -82,6 +82,7 @@ export const hu: Translations = {
     },
     modelToolsSheetSubtitle: "és eszközök",
     modelToolsSheetTitle: "Modell",
+    newChat: "Új beszélgetés",
     navigation: "Navigáció",
     openDocumentation: "Dokumentáció megnyitása új lapon",
     openNavigation: "Navigáció megnyitása",

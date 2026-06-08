@@ -82,6 +82,7 @@ export const af: Translations = {
     },
     modelToolsSheetSubtitle: "& gereedskap",
     modelToolsSheetTitle: "Model",
+    newChat: "Nuwe klets",
     navigation: "Navigasie",
     openDocumentation: "Maak dokumentasie in 'n nuwe oortjie oop",
     openNavigation: "Maak navigasie oop",

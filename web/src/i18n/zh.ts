@@ -81,6 +81,7 @@ export const zh: Translations = {
     },
     modelToolsSheetSubtitle: "与工具",
     modelToolsSheetTitle: "模型",
+    newChat: "新对话",
     navigation: "导航",
     openDocumentation: "在新标签页中打开文档",
     openNavigation: "打开导航",

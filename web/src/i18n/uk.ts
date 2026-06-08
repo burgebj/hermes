@@ -82,6 +82,7 @@ export const uk: Translations = {
     },
     modelToolsSheetSubtitle: "та інструменти",
     modelToolsSheetTitle: "Модель",
+    newChat: "Новий чат",
     navigation: "Навігація",
     openDocumentation: "Відкрити документацію в новій вкладці",
     openNavigation: "Відкрити навігацію",

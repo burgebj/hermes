@@ -26,7 +26,7 @@ import { Button } from "@nous-research/ui/ui/components/button";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { HERMES_BASE_PATH, buildWsAuthParam } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { Copy, PanelRight, X } from "lucide-react";
+import { Copy, PanelRight, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
@@ -143,7 +143,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // tabs because the dep wouldn't change on tab switch.
   const [mobilePanelOpenRaw, setMobilePanelOpenRaw] = useState(false);
   const mobilePanelOpen = isActive && mobilePanelOpenRaw;
-  const { setEnd } = usePageHeader();
+  const { setAfterTitle, setEnd } = usePageHeader();
   const { t } = useI18n();
   const closeMobilePanel = useCallback(() => setMobilePanelOpenRaw(false), []);
   const modelToolsLabel = useMemo(
@@ -262,6 +262,31 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     );
     return () => setEnd(null);
   }, [isActive, narrow, mobilePanelOpen, modelToolsLabel, setEnd]);
+
+  // Show a "new chat" button next to the title when resuming a session,
+  // so the user can easily jump to a fresh /chat without the resume param.
+  useEffect(() => {
+    if (!isActive || !resumeParam) {
+      setAfterTitle(null);
+      return;
+    }
+    setAfterTitle(
+      <Button
+        ghost
+        size="icon"
+        className="shrink-0 text-muted-foreground hover:text-foreground"
+        aria-label={t.app.newChat}
+        title={t.app.newChat}
+        onClick={() => {
+          try { localStorage.removeItem("hermes-chat-resume"); } catch {}
+          window.location.href = "/chat";
+        }}
+      >
+        <Plus />
+      </Button>,
+    );
+    return () => setAfterTitle(null);
+  }, [isActive, resumeParam, setAfterTitle, t.app.newChat]);
 
   const handleCopyLast = () => {
     const ws = wsRef.current;

@@ -102,6 +102,7 @@ export interface Translations {
     };
     modelToolsSheetSubtitle: string;
     modelToolsSheetTitle: string;
+    newChat: string;
     navigation: string;
     openDocumentation: string;
     openNavigation: string;

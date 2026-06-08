@@ -82,6 +82,7 @@ export const tr: Translations = {
     },
     modelToolsSheetSubtitle: "& araçlar",
     modelToolsSheetTitle: "Model",
+    newChat: "Yeni sohbet",
     navigation: "Gezinti",
     openDocumentation: "Dokümantasyonu yeni sekmede aç",
     openNavigation: "Gezintiyi aç",

@@ -85,6 +85,7 @@ export const en: Translations = {
     },
     modelToolsSheetSubtitle: "& tools",
     modelToolsSheetTitle: "Model",
+    newChat: "New chat",
     navigation: "Navigation",
     openDocumentation: "Open documentation in a new tab",
     openNavigation: "Open navigation",

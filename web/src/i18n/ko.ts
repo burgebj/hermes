@@ -82,6 +82,7 @@ export const ko: Translations = {
     },
     modelToolsSheetSubtitle: "및 도구",
     modelToolsSheetTitle: "모델",
+    newChat: "새 채팅",
     navigation: "내비게이션",
     openDocumentation: "새 탭에서 문서 열기",
     openNavigation: "내비게이션 열기",

@@ -82,6 +82,7 @@ export const ga: Translations = {
     },
     modelToolsSheetSubtitle: "agus uirlisí",
     modelToolsSheetTitle: "Samhail",
+    newChat: "Comhrá nua",
     navigation: "Nascleanúint",
     openDocumentation: "Oscail an doiciméadú i gcluaisín nua",
     openNavigation: "Oscail an nascleanúint",
