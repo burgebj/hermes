@@ -237,6 +237,17 @@ def _is_backend_available(backend: str) -> bool:
             return has_xai_credentials()
         except Exception:
             return False
+    # Fallback: ask the provider registry. This lets user-installed plugin
+    # backends (e.g. crawl4ai) self-report availability without requiring
+    # a hardcoded branch here. Catch broadly because is_available() runs
+    # on every dispatch and must never raise.
+    try:
+        from agent.web_search_registry import get_provider as _wsp_get_provider
+        p = _wsp_get_provider(backend)
+        if p is not None:
+            return bool(p.is_available())
+    except Exception:
+        pass
     return False
 
 
