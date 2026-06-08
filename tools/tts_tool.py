@@ -2323,22 +2323,25 @@ def stream_tts_to_speaker(
             except ImportError:
                 logger.warning("elevenlabs package not installed; streaming TTS disabled")
 
-            # Open a single sounddevice output stream for the lifetime of
-            # this function.  ElevenLabs pcm_24000 produces signed 16-bit
-            # little-endian mono PCM at 24 kHz.
+            # Open an ffplay subprocess for real-time PCM streaming.
+            # ElevenLabs pcm_24000 is signed 16-bit little-endian mono at
+            # 24 kHz.  Using sd.OutputStream concurrently with the STT
+            # InputStream triggers a CoreAudio CFFI race (EXC_BAD_ACCESS
+            # at 0x4 in AdaptingOutputOnlyProcess / AudioIOProc).
             if client is not None:
-                try:
-                    sd = _import_sounddevice()
-                    output_stream = sd.OutputStream(
-                        samplerate=24000, channels=1, dtype="int16",
-                    )
-                    output_stream.start()
-                except (ImportError, OSError) as exc:
-                    logger.debug("sounddevice not available: %s", exc)
-                    output_stream = None
-                except Exception as exc:
-                    logger.warning("sounddevice OutputStream failed: %s", exc)
-                    output_stream = None
+                _ffplay = shutil.which("ffplay")
+                if _ffplay:
+                    try:
+                        output_stream = subprocess.Popen(
+                            [_ffplay, "-f", "s16le", "-ar", "24000", "-ac", "1",
+                             "-nodisp", "-autoexit", "-loglevel", "quiet", "-"],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    except Exception as exc:
+                        logger.debug("ffplay streaming failed to start: %s", exc)
+                        output_stream = None
 
         sentence_buf = ""
         min_sentence_len = 20
@@ -2378,12 +2381,14 @@ def stream_tts_to_speaker(
                     output_format="pcm_24000",
                 )
                 if output_stream is not None:
-                    for chunk in audio_iter:
-                        if stop_event.is_set():
-                            break
-                        import numpy as _np
-                        audio_array = _np.frombuffer(chunk, dtype=_np.int16)
-                        output_stream.write(audio_array.reshape(-1, 1))
+                    try:
+                        for chunk in audio_iter:
+                            if stop_event.is_set():
+                                break
+                            output_stream.stdin.write(chunk)
+                            output_stream.stdin.flush()
+                    except (BrokenPipeError, OSError):
+                        pass
                 else:
                     # Fallback: write chunks to temp file and play via system player
                     _play_via_tempfile(audio_iter, stop_event)
@@ -2472,13 +2477,17 @@ def stream_tts_to_speaker(
     except Exception as exc:
         logger.warning("Streaming TTS pipeline error: %s", exc)
     finally:
-        # Always close the audio output stream to avoid locking the device
+        # Terminate the ffplay subprocess cleanly
         if output_stream is not None:
             try:
-                output_stream.stop()
-                output_stream.close()
+                output_stream.stdin.close()
             except Exception:
                 pass
+            try:
+                output_stream.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                output_stream.kill()
+                output_stream.wait()
         tts_done_event.set()
 
 
