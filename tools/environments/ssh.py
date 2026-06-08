@@ -88,6 +88,13 @@ class SSHEnvironment(BaseEnvironment):
         cmd.extend(["-o", "BatchMode=yes"])
         cmd.extend(["-o", "StrictHostKeyChecking=accept-new"])
         cmd.extend(["-o", "ConnectTimeout=10"])
+        # Forward skill-declared / user-allowlisted env vars to the remote
+        # session via ``-o SendEnv=NAME``. The remote sshd must permit them
+        # via ``AcceptEnv`` (commonly ``AcceptEnv *`` for Hermes hosts).
+        # See issue #14091 — without this, ``required_environment_variables``
+        # never reach the remote shell even when set on the Hermes host.
+        for name in self._passthrough_env_vars():
+            cmd.extend(["-o", f"SendEnv={name}"])
         if self.port != 22:
             cmd.extend(["-p", str(self.port)])
         if self.key_path:
@@ -96,6 +103,24 @@ class SSHEnvironment(BaseEnvironment):
             cmd.extend(extra_args)
         cmd.append(f"{self.user}@{self.host}")
         return cmd
+
+    def _passthrough_env_vars(self) -> list[str]:
+        """Return the env-var names that should be forwarded over SSH.
+
+        Sourced from ``tools.env_passthrough.get_all_passthrough()`` which
+        unions skill-declared ``required_environment_variables`` with the
+        user's ``terminal.env_passthrough`` config. Only vars actually
+        present in ``os.environ`` are forwarded — sending an unset name
+        is harmless but noisy. Names are sorted for deterministic command
+        construction (helps with ControlMaster reuse and tests).
+        """
+        try:
+            from tools.env_passthrough import get_all_passthrough
+
+            allowlist = get_all_passthrough()
+        except Exception:
+            return []
+        return sorted(name for name in allowlist if name in os.environ)
 
     def _establish_connection(self):
         cmd = self._build_ssh_command()
@@ -350,7 +375,28 @@ class SSHEnvironment(BaseEnvironment):
         else:
             cmd.extend(["bash", "-c", shlex.quote(cmd_string)])
 
-        return _popen_bash(cmd, stdin_data)
+        # ``-o SendEnv`` only ships var names; the OpenSSH client reads the
+        # values from its own environment. Pass them explicitly via env=.
+        env = self._build_subprocess_env()
+        return _popen_bash(cmd, stdin_data, env=env)
+
+    def _build_subprocess_env(self) -> dict[str, str] | None:
+        """Compose the environment for the spawned ``ssh`` process.
+
+        Starts from the current process environment (so SSH agent, locale,
+        etc. work) and ensures every passthrough var is present. Returns
+        ``None`` when no passthrough vars exist so we don't override the
+        default child-env semantics unnecessarily.
+        """
+        names = self._passthrough_env_vars()
+        if not names:
+            return None
+        env = os.environ.copy()
+        for name in names:
+            # Already filtered to ``name in os.environ`` but be defensive.
+            if name in os.environ:
+                env[name] = os.environ[name]
+        return env
 
     def cleanup(self):
         if self._sync_manager:

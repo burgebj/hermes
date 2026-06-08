@@ -66,6 +66,89 @@ class TestBuildSSHCommand:
         env = SSHEnvironment(host="h", user="u")
         assert env._build_ssh_command()[-1] == "u@h"
 
+    def test_no_send_env_when_no_passthrough_registered(self, monkeypatch):
+        """Without registered passthrough vars, no -o SendEnv flags appear."""
+        monkeypatch.setattr(
+            "tools.env_passthrough.get_all_passthrough",
+            lambda: frozenset(),
+        )
+        env = SSHEnvironment(host="h", user="u")
+        cmd = env._build_ssh_command()
+        assert "SendEnv" not in " ".join(cmd)
+
+    def test_send_env_added_for_registered_passthrough_var(self, monkeypatch):
+        """Issue #14091: skill-declared env vars must be forwarded via -o SendEnv."""
+        monkeypatch.setattr(
+            "tools.env_passthrough.get_all_passthrough",
+            lambda: frozenset({"NEXTCLOUD_URL", "NEXTCLOUD_USER"}),
+        )
+        monkeypatch.setenv("NEXTCLOUD_URL", "https://x.example")
+        monkeypatch.setenv("NEXTCLOUD_USER", "alice")
+        env = SSHEnvironment(host="h", user="u")
+        cmd = env._build_ssh_command()
+        joined = " ".join(cmd)
+        assert "SendEnv=NEXTCLOUD_URL" in joined
+        assert "SendEnv=NEXTCLOUD_USER" in joined
+
+    def test_send_env_skips_unset_vars(self, monkeypatch):
+        """Allowlisted but unset vars should NOT produce -o SendEnv noise."""
+        monkeypatch.setattr(
+            "tools.env_passthrough.get_all_passthrough",
+            lambda: frozenset({"REAL_VAR", "GHOST_VAR"}),
+        )
+        monkeypatch.setenv("REAL_VAR", "present")
+        monkeypatch.delenv("GHOST_VAR", raising=False)
+        env = SSHEnvironment(host="h", user="u")
+        joined = " ".join(env._build_ssh_command())
+        assert "SendEnv=REAL_VAR" in joined
+        assert "SendEnv=GHOST_VAR" not in joined
+
+    def test_send_env_is_deterministic(self, monkeypatch):
+        """Sorted order keeps the SSH command stable for ControlMaster reuse."""
+        monkeypatch.setattr(
+            "tools.env_passthrough.get_all_passthrough",
+            lambda: frozenset({"BBB", "AAA", "CCC"}),
+        )
+        for n in ("AAA", "BBB", "CCC"):
+            monkeypatch.setenv(n, "x")
+        env = SSHEnvironment(host="h", user="u")
+        cmd = env._build_ssh_command()
+        # Find the order of SendEnv flags in the cmd list.
+        send_envs = [a.split("=", 1)[1] for a in cmd if a.startswith("SendEnv=")]
+        assert send_envs == ["AAA", "BBB", "CCC"]
+
+    def test_passthrough_failure_is_non_fatal(self, monkeypatch):
+        """If env_passthrough import/lookup blows up, SSH still works."""
+        def boom():
+            raise RuntimeError("passthrough exploded")
+        monkeypatch.setattr(
+            "tools.env_passthrough.get_all_passthrough", boom
+        )
+        env = SSHEnvironment(host="h", user="u")
+        cmd = env._build_ssh_command()  # must not raise
+        assert "SendEnv" not in " ".join(cmd)
+
+    def test_subprocess_env_includes_passthrough_values(self, monkeypatch):
+        """-o SendEnv only ships names; the ssh client reads values from its env."""
+        monkeypatch.setattr(
+            "tools.env_passthrough.get_all_passthrough",
+            lambda: frozenset({"NEXTCLOUD_PASS"}),
+        )
+        monkeypatch.setenv("NEXTCLOUD_PASS", "hunter2")
+        env = SSHEnvironment(host="h", user="u")
+        sub_env = env._build_subprocess_env()
+        assert sub_env is not None
+        assert sub_env["NEXTCLOUD_PASS"] == "hunter2"
+
+    def test_subprocess_env_is_none_when_no_passthrough(self, monkeypatch):
+        """No passthrough → don't override default child env semantics."""
+        monkeypatch.setattr(
+            "tools.env_passthrough.get_all_passthrough",
+            lambda: frozenset(),
+        )
+        env = SSHEnvironment(host="h", user="u")
+        assert env._build_subprocess_env() is None
+
 
 class TestControlSocketPath:
     """Regression tests for issue #11840.
