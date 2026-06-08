@@ -4682,7 +4682,10 @@ def _stub_urlopen(monkeypatch, *, ok: bool):
 
     import urllib.request
 
+    import utils
+
     monkeypatch.setattr(urllib.request, "urlopen", _opener)
+    monkeypatch.setattr(utils, "urlopen_bypass_proxy_for_loopback", _opener)
 
 
 def _stub_urlopen_capture(monkeypatch, *, ok: bool):
@@ -4705,7 +4708,10 @@ def _stub_urlopen_capture(monkeypatch, *, ok: bool):
 
     import urllib.request
 
+    import utils
+
     monkeypatch.setattr(urllib.request, "urlopen", _opener)
+    monkeypatch.setattr(utils, "urlopen_bypass_proxy_for_loopback", _opener)
     return urls
 
 
@@ -4964,7 +4970,10 @@ def test_browser_manage_connect_default_local_retries_after_launch(monkeypatch):
 
     import urllib.request
 
+    import utils
+
     monkeypatch.setattr(urllib.request, "urlopen", _opener)
+    monkeypatch.setattr(utils, "urlopen_bypass_proxy_for_loopback", _opener)
     with patch.dict(sys.modules, {"tools.browser_tool": fake}):
         with patch(
             "hermes_cli.browser_connect.try_launch_chrome_debug", return_value=True

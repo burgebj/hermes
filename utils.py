@@ -1,10 +1,13 @@
 """Shared utility functions for hermes-agent."""
 
+import ipaddress
 import json
 import logging
 import os
+import socket
 import stat
 import tempfile
+import urllib.request
 from pathlib import Path
 from typing import Any, Union
 from urllib.parse import urlparse
@@ -374,3 +377,43 @@ def base_url_host_matches(base_url: str, domain: str) -> bool:
     if not domain:
         return False
     return hostname == domain or hostname.endswith("." + domain)
+
+
+def is_loopback_host(host: str | None) -> bool:
+    """Return True when *host* refers to the loopback interface.
+
+    Recognises ``localhost`` plus any literal address in 127.0.0.0/8 and
+    ``::1``. Used to decide whether an internal HTTP request should bypass a
+    configured HTTP(S) proxy.
+    """
+    if not host:
+        return False
+    name = host.strip().strip("[]").lower().rstrip(".")
+    if name == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
+def urlopen_bypass_proxy_for_loopback(
+    request, *, timeout=socket._GLOBAL_DEFAULT_TIMEOUT
+):
+    """``urllib.request.urlopen`` that ignores HTTP(S) proxies for loopback hosts.
+
+    Many users export ``HTTP_PROXY`` / ``HTTPS_PROXY`` pointing at a local
+    proxy (v2ray / clash / privoxy / corporate). Plain ``urlopen`` then relays
+    even ``127.0.0.1`` requests through that proxy, which rejects
+    loopback-to-loopback relays with 503 / connection-refused even though the
+    local service is up. For loopback destinations this opens the connection
+    with an empty ``ProxyHandler`` so the request goes direct; external hosts
+    keep using the configured proxy.
+
+    *request* may be a URL string or a ``urllib.request.Request``.
+    """
+    url = request.full_url if isinstance(request, urllib.request.Request) else request
+    if is_loopback_host(urlparse(url).hostname):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        return opener.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
