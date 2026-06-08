@@ -1475,6 +1475,7 @@ AUTHOR_MAP = {
     "leonard@sellem.me": "leonardsellem",  # PR #37405 (desktop WS origin guard on remote/Tailscale binds)
     "42903577+ohMyJason@users.noreply.github.com": "ohMyJason",  # PR #29810 (discover_models in custom_providers section 4)
     "singhsanidhya741@gmail.com": "sanidhyasin",  # PR #40403 salvage (model.default_headers for custom OpenAI-compatible providers, #40033)
+    "290877012+itswane@users.noreply.github.com": "itswane",  # file_sync sync_back tarfile filter compat for Python 3.11.0-3.11.3
 }
 
 

@@ -14,6 +14,7 @@ fcntl = pytest.importorskip("fcntl")
 
 from tools.environments.file_sync import (
     FileSyncManager,
+    _safe_extractall,
     _sha256_file,
     _SYNC_BACK_BACKOFF,
     _SYNC_BACK_MAX_RETRIES,
@@ -471,3 +472,82 @@ class TestSyncBackSizeCap:
         # Default cap (2 GiB) is far above our tiny tar; extraction should proceed
         mgr.sync_back(hermes_home=tmp_path / ".hermes")
         assert Path(host_file).read_bytes() == b"remote_version"
+
+
+def _patch_extractall_without_filter():
+    """Patch ``TarFile.extractall`` to emulate a pre-PEP-706 interpreter.
+
+    On Python 3.11.0–3.11.3 (still within ``requires-python = ">=3.11"``)
+    ``extractall`` has no ``filter`` keyword, so passing one raises
+    ``TypeError``.  Re-dispatch to the real method only for filter-less calls
+    so the fallback extraction path can still complete.
+    """
+    real_extractall = tarfile.TarFile.extractall
+
+    def fake_extractall(self, *args, **kwargs):
+        if "filter" in kwargs:
+            raise TypeError(
+                "extractall() got an unexpected keyword argument 'filter'"
+            )
+        return real_extractall(self, *args, **kwargs)
+
+    return patch.object(tarfile.TarFile, "extractall", fake_extractall)
+
+
+class TestSafeExtractAll:
+    """``_safe_extractall`` keeps working on interpreters without ``filter``."""
+
+    def test_falls_back_when_filter_kwarg_unsupported(self, tmp_path):
+        """A pre-PEP-706 interpreter (no ``filter`` kwarg) still extracts."""
+        tar_path = tmp_path / "archive.tar"
+        _make_tar({"root/.hermes/skill.md": b"remote_version"}, tar_path)
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        with _patch_extractall_without_filter():
+            with tarfile.open(tar_path) as tar:
+                _safe_extractall(tar, str(dest))
+
+        assert (dest / "root" / ".hermes" / "skill.md").read_bytes() == b"remote_version"
+
+    def test_fallback_rejects_path_traversal(self, tmp_path):
+        """The filter-less fallback must still refuse ``..`` escapes."""
+        tar_path = tmp_path / "evil.tar"
+        with tarfile.open(tar_path, "w") as tar:
+            payload = b"pwned"
+            info = tarfile.TarInfo(name="../escape.txt")
+            info.size = len(payload)
+            tar.addfile(info, io.BytesIO(payload))
+        dest = tmp_path / "out"
+        dest.mkdir()
+
+        with _patch_extractall_without_filter():
+            with tarfile.open(tar_path) as tar:
+                with pytest.raises(tarfile.TarError):
+                    _safe_extractall(tar, str(dest))
+
+        # Nothing escaped the destination directory.
+        assert not (tmp_path / "escape.txt").exists()
+
+
+class TestSyncBackWithoutFilterKwarg:
+    """sync_back applies remote changes on interpreters lacking ``filter``."""
+
+    def test_sync_back_applies_changes_pre_pep706(self, tmp_path):
+        """Without the compat guard this would abort with TypeError, leaving
+        the host file stale.  With it, the remote version is applied."""
+        host_file = tmp_path / "host" / "skill.py"
+        _write_file(host_file, b"print('v1')")
+        remote_path = "/root/.hermes/skill.py"
+        mapping = [(str(host_file), remote_path)]
+
+        remote_content = b"print('v2 - edited on remote')"
+        download_fn = _make_download_fn({"root/.hermes/skill.py": remote_content})
+
+        mgr = _make_manager(tmp_path, file_mapping=mapping, bulk_download_fn=download_fn)
+        mgr._pushed_hashes[remote_path] = _sha256_bytes(b"print('v1')")
+
+        with _patch_extractall_without_filter():
+            mgr.sync_back(hermes_home=tmp_path / ".hermes")
+
+        assert host_file.read_bytes() == remote_content

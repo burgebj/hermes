@@ -100,6 +100,36 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+def _safe_extractall(tar: tarfile.TarFile, dest: str) -> None:
+    """Extract *tar* into *dest* with path-traversal protection.
+
+    Prefers the stdlib ``data`` extraction filter (PEP 706). That ``filter``
+    keyword only exists on Python >= 3.12 and the >= 3.11.4 / >= 3.10.12
+    backports; on the older 3.11.0–3.11.3 interpreters this project still
+    supports (``requires-python = ">=3.11"``) calling ``extractall`` with it
+    raises ``TypeError``. An unconditional ``filter="data"`` call therefore
+    aborts every ``sync_back`` on those interpreters, so remote→host changes
+    for the SSH / Modal / Daytona backends are silently never applied.
+
+    On the fallback path we reject absolute paths and ``..`` components up
+    front so dropping the filter does not reintroduce the directory-traversal
+    risk it was added to close (CVE-2007-4559). This mirrors the guard
+    already used in ``agent/curator_backup.py``.
+    """
+    try:
+        tar.extractall(dest, filter="data")  # type: ignore[call-arg]
+        return
+    except TypeError:
+        # Python < 3.11.4 / < 3.12 — no ``filter`` kwarg (PEP 706 backport).
+        pass
+
+    for member in tar.getmembers():
+        name = member.name
+        if name.startswith("/") or ".." in Path(name).parts:
+            raise tarfile.TarError(f"refusing to extract unsafe path: {name!r}")
+    tar.extractall(dest)
+
+
 _SYNC_BACK_MAX_RETRIES = 3
 _SYNC_BACK_BACKOFF = (2, 4, 8)  # seconds between retries
 _SYNC_BACK_MAX_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB — refuse to extract larger tars
@@ -325,7 +355,7 @@ class FileSyncManager:
 
             with tempfile.TemporaryDirectory(prefix="hermes-sync-back-") as staging:
                 with tarfile.open(tf.name) as tar:
-                    tar.extractall(staging, filter="data")
+                    _safe_extractall(tar, staging)
 
                 applied = 0
                 for dirpath, _dirnames, filenames in os.walk(staging):
