@@ -427,7 +427,3 @@ class DeliveryRouter:
             if _send_result_failed(result):
                 raise RuntimeError(_send_result_error(result) or f"{target.platform.value} delivery failed")
         return result
-
-
-
-

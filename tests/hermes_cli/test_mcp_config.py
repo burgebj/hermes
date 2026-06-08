@@ -745,4 +745,3 @@ class TestMcpLogin:
 
         assert "Authenticated — 3 tool(s) available" in out
         assert "no OAuth token" not in out
-

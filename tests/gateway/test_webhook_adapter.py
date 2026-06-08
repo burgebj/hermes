@@ -1031,4 +1031,3 @@ class TestInsecureNoAuthSafetyRail:
             assert result is True
         finally:
             await adapter.disconnect()
-

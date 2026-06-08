@@ -62,4 +62,3 @@ def _safe_parse(parser, subparsers, argv):
     else:
         subparsers.required = False
         return parser.parse_args(argv)
-

@@ -543,4 +543,3 @@ class TestEscapeNormalizedNewString:
         assert err is None
         assert count == 1
         assert "return 2" in new
-

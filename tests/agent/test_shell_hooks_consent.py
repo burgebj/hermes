@@ -309,4 +309,3 @@ class TestHooksAutoAcceptParsing:
         assert shell_hooks._resolve_effective_accept(
             {"hooks_auto_accept": "false"}, accept_hooks_arg=True,
         ) is True
-

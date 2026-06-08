@@ -355,4 +355,3 @@ class TestAIAgentUserIdPropagation:
             agent = object.__new__(AIAgent)
             agent._user_id = None
             assert agent._user_id is None
-

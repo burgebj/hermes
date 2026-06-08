@@ -722,4 +722,3 @@ def test_x_search_not_degraded_when_no_filters_active(monkeypatch):
     assert result["success"] is True
     assert result["degraded"] is False
     assert result["degraded_reason"] is None
-

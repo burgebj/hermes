@@ -55,6 +55,3 @@ class TestApprovalHeartbeat:
             else:
                 os.environ[k] = v
         _clear_approval_state()
-
-
-

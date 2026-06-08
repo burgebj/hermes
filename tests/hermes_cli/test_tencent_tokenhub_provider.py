@@ -505,4 +505,3 @@ class TestTencentTokenhubKnownProviderNames:
     def test_alias_known(self, alias):
         from hermes_cli.models import _KNOWN_PROVIDER_NAMES
         assert alias in _KNOWN_PROVIDER_NAMES
-

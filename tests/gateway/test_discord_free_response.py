@@ -925,5 +925,3 @@ async def test_discord_auto_thread_skips_backfill(adapter, monkeypatch):
 
     adapter._auto_create_thread.assert_awaited_once()
     adapter._fetch_channel_context.assert_not_awaited()
-
-

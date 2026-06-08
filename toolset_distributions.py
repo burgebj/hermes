@@ -361,4 +361,3 @@ if __name__ == "__main__":
     print("-" * 40)
     print_distribution_info("image_gen")
     print_distribution_info("research")
-

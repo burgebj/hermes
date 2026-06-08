@@ -142,4 +142,3 @@ def test_clear_interrupt_clears_worker_tids(monkeypatch):
         "clear_interrupt() did not clear the interrupt bit for a tracked "
         "worker tid — stale interrupt can leak into the next turn"
     )
-
