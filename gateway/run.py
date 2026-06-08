@@ -12122,15 +12122,20 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
     # would otherwise be silently ignored until the user triggers a
     # different cache eviction (model switch, /reset, etc.).
     #
-    # Each entry is a tuple of (section, key) read from the raw config dict.
+    # Each entry is a config path read from the raw config dict.
     # Add more here as new baked-at-construction config settings are added.
-    _CACHE_BUSTING_CONFIG_KEYS: tuple = (
+    _CACHE_BUSTING_CONFIG_KEYS: tuple[tuple[str, ...], ...] = (
         ("model", "context_length"),
         ("model", "max_tokens"),
         ("compression", "enabled"),
         ("compression", "threshold"),
         ("compression", "target_ratio"),
         ("compression", "protect_last_n"),
+        ("auxiliary", "compression", "provider"),
+        ("auxiliary", "compression", "model"),
+        ("auxiliary", "compression", "base_url"),
+        ("auxiliary", "compression", "api_mode"),
+        ("auxiliary", "compression", "context_length"),
         ("agent", "disabled_toolsets"),
         ("memory", "provider"),
     )
@@ -12142,7 +12147,9 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         "honcho.runtime_peer_prefix",
         "honcho.user_peer_aliases",
     )
-    _HONCHO_CACHE_BUSTING_MEMO: dict[tuple[str, int | None], dict[str, Any]] = {}
+    _HONCHO_CACHE_BUSTING_MEMO: dict[
+        tuple[str, int | None, int | None, int | None], dict[str, Any]
+    ] = {}
 
     @classmethod
     def _empty_honcho_cache_busting_config(cls) -> dict[str, Any]:
@@ -12150,16 +12157,21 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
 
     @classmethod
     def _extract_honcho_cache_busting_config(cls) -> dict[str, Any]:
-        """Extract Honcho identity keys, memoized by honcho.json mtime."""
+        """Extract Honcho identity keys, memoized by honcho.json fingerprint."""
         try:
             from plugins.memory.honcho.client import HonchoClientConfig, resolve_config_path
 
             path = resolve_config_path()
             try:
-                mtime_ns = path.stat().st_mtime_ns
+                stat = path.stat()
+                file_fingerprint = (
+                    stat.st_mtime_ns,
+                    stat.st_ctime_ns,
+                    stat.st_size,
+                )
             except OSError:
-                mtime_ns = None
-            memo_key = (str(path), mtime_ns)
+                file_fingerprint = (None, None, None)
+            memo_key = (str(path), *file_fingerprint)
             cached = cls._HONCHO_CACHE_BUSTING_MEMO.get(memo_key)
             if cached is not None:
                 return dict(cached)
@@ -12182,9 +12194,9 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
     def _extract_cache_busting_config(cls, user_config: dict | None) -> dict:
         """Pull values that must bust the cached agent.
 
-        Returns a flat dict keyed by 'section.key'.  Missing config keys and
-        non-dict sections yield None values, which still contribute to the
-        signature (so 'absent' vs 'present-and-null' differ).
+        Returns a flat dict keyed by dotted config path.  Missing config keys
+        and non-dict intermediate sections yield None values, which still
+        contribute to the signature (so 'absent' vs 'present-and-null' differ).
 
         The live tool registry generation is included too.  MCP reloads and
         dynamic MCP tool-list changes mutate the registry without necessarily
@@ -12194,12 +12206,15 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         """
         out: Dict[str, Any] = {}
         cfg = user_config if isinstance(user_config, dict) else {}
-        for section, key in cls._CACHE_BUSTING_CONFIG_KEYS:
-            section_val = cfg.get(section)
-            if isinstance(section_val, dict):
-                out[f"{section}.{key}"] = section_val.get(key)
-            else:
-                out[f"{section}.{key}"] = None
+        for path in cls._CACHE_BUSTING_CONFIG_KEYS:
+            cur: Any = cfg
+            for part in path:
+                if isinstance(cur, dict):
+                    cur = cur.get(part)
+                else:
+                    cur = None
+                    break
+            out[".".join(path)] = cur
         try:
             from tools.registry import registry
 
