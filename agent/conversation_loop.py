@@ -4372,10 +4372,27 @@ def run_conversation(
                     )
                     if _truly_empty and (not _has_structured or _prefill_exhausted) and agent._empty_content_retries < 3:
                         agent._empty_content_retries += 1
+                        # #34246: when users report 'response was non-empty per
+                        # curl but Hermes treats it as empty' on custom OpenAI-
+                        # compatible endpoints, the most useful debug signal
+                        # is the SHAPE of what arrived. Log content type/len
+                        # so the user can see if the API returned None vs ''
+                        # vs only think-blocks vs structured-reasoning-only.
+                        _raw_content = getattr(assistant_message, "content", None)
+                        _content_type = type(_raw_content).__name__
+                        _content_len = len(_raw_content) if isinstance(_raw_content, str) else None
+                        _content_preview = (
+                            _raw_content[:80] if isinstance(_raw_content, str) and _raw_content
+                            else repr(_raw_content)[:80]
+                        )
                         logger.warning(
                             "Empty response (no content or reasoning) — "
-                            "retry %d/3 (model=%s)",
+                            "retry %d/3 (model=%s, content_type=%s, "
+                            "content_len=%s, content_preview=%r, "
+                            "has_structured=%s, prefill_retries=%d)",
                             agent._empty_content_retries, agent.model,
+                            _content_type, _content_len, _content_preview,
+                            _has_structured, agent._thinking_prefill_retries,
                         )
                         agent._buffer_status(
                             f"⚠️ Empty response from model — retrying "
