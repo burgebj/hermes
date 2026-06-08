@@ -4402,8 +4402,26 @@ class AIAgent:
         not receive those image parts, because a rejected tool result becomes
         part of the canonical history and can make the next user turn fail before
         the agent has a chance to recover.
+
+        Non-_multimodal results may still carry image parts as list-type
+        content (e.g. MCP tools that return image_url blocks).  When the
+        active model is text-only, proactively strip those images.
         """
         if not _is_multimodal_tool_result(result):
+            if isinstance(result, list) and self._content_has_image_parts(result):
+                if not self._model_supports_vision():
+                    text_parts = []
+                    for p in result:
+                        if isinstance(p, dict) and p.get("type") == "text":
+                            text_parts.append(str(p.get("text", "")))
+                        elif isinstance(p, dict) and p.get("type") in {"image_url", "input_image", "image"}:
+                            text_parts.append("[screenshot]")
+                    logger.warning(
+                        "Tool %s returned non-_multimodal image content for "
+                        "non-vision model %s/%s; falling back to text summary",
+                        tool_name, self.provider, self.model,
+                    )
+                    return "\n".join(text_parts) if text_parts else "[image content removed]"
             return result
 
         content = result.get("content") or []

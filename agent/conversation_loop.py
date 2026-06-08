@@ -1961,9 +1961,12 @@ def run_conversation(
                     "image_url'. expected",
                     # DeepSeek's OpenAI-compatible API reports text-only
                     # request-body variants as:
-                    # "unknown variant `image_url`, expected `text`".
+                    # "unknown variant `image_url`, expected `text`"
+                    # or "unknown variant 'image_url', expected 'text'".
                     "unknown variant `image_url`, expected `text`",
+                    "unknown variant 'image_url', expected 'text'",
                     "unknown variant image_url, expected text",
+                    "unknown variant 'image_url'",
                 )
                 _err_lower = _err_body.lower()
                 _looks_like_image_rejection = any(
