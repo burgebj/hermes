@@ -229,6 +229,42 @@ class TestRunJobImmediate:
         sched._running_job_ids.discard(job_id)
         sched._shutdown_parallel_pool()
 
+    def test_run_job_immediate_returns_false_if_claimed_in_other_process(self, tmp_path):
+        """Immediate runs must respect the cross-process per-job run lock."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        lock_dir = tmp_path / "cron"
+        lock_dir.mkdir()
+        tick_lock = lock_dir / ".tick.lock"
+
+        with patch("cron.scheduler._get_lock_paths", return_value=(lock_dir, tick_lock)):
+            job = create_job(
+                prompt="test prompt",
+                schedule="every 5m",
+                name="cross-process-running-immediate"
+            )
+            job_id = job["id"]
+
+            foreign_lock = open(sched._get_job_run_lock_path(job_id), "a+", encoding="utf-8")
+            assert sched._try_lock_file(foreign_lock) is True
+            try:
+                dispatched, error = sched.run_job_immediate(job_id)
+            finally:
+                sched._unlock_file(foreign_lock)
+                foreign_lock.close()
+
+        assert dispatched is False
+        assert error is not None
+        assert "already running" in error.lower()
+        assert job_id not in sched._running_job_ids
+
+        sched._shutdown_parallel_pool()
+
     def test_run_job_immediate_does_not_advance_when_already_running(self, monkeypatch):
         """Already-running jobs must not consume the next scheduled run."""
         import cron.scheduler as sched
@@ -502,5 +538,45 @@ class TestRunJobImmediate:
 
         # Assert the job was removed from _running_job_ids (cleanup happened).
         assert job_id not in sched._running_job_ids
+
+        sched._shutdown_parallel_pool()
+
+    def test_tick_skips_job_claimed_in_other_process(self, tmp_path, monkeypatch):
+        """tick() must share the same cross-process running claim as manual runs."""
+        import cron.scheduler as sched
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        lock_dir = tmp_path / "cron"
+        lock_dir.mkdir()
+        tick_lock = lock_dir / ".tick.lock"
+        job = {
+            "id": "cross-process-due-job",
+            "name": "Cross-process due job",
+            "schedule": {"kind": "interval", "minutes": 5},
+        }
+        run_job_calls = []
+
+        monkeypatch.setattr(sched, "get_due_jobs", lambda: [job])
+        monkeypatch.setattr(sched, "advance_next_run", lambda *_a, **_kw: True)
+        monkeypatch.setattr(sched, "run_job", lambda j: run_job_calls.append(j["id"]) or (True, "output", "response", None))
+        monkeypatch.setattr(sched, "save_job_output", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "mark_job_run", lambda *_a, **_kw: None)
+        monkeypatch.setattr(sched, "_deliver_result", lambda *_a, **_kw: None)
+
+        with patch("cron.scheduler._get_lock_paths", return_value=(lock_dir, tick_lock)):
+            foreign_lock = open(sched._get_job_run_lock_path(job["id"]), "a+", encoding="utf-8")
+            assert sched._try_lock_file(foreign_lock) is True
+            try:
+                dispatched_count = sched.tick(sync=True)
+            finally:
+                sched._unlock_file(foreign_lock)
+                foreign_lock.close()
+
+        assert dispatched_count == 0
+        assert run_job_calls == []
+        assert job["id"] not in sched._running_job_ids
 
         sched._shutdown_parallel_pool()
