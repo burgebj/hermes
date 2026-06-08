@@ -81,6 +81,33 @@ def test_stash_local_changes_if_needed_returns_specific_stash_commit(monkeypatch
     assert calls[3][0][-3:] == ["rev-parse", "--verify", "refs/stash"]
 
 
+def test_stash_local_changes_if_needed_prints_git_failure(monkeypatch, tmp_path, capsys):
+    def fake_run(cmd, **kwargs):
+        if cmd[-2:] == ["status", "--porcelain"]:
+            return SimpleNamespace(stdout=" M hermes_cli/main.py\n", returncode=0)
+        if cmd[-2:] == ["ls-files", "--unmerged"]:
+            return SimpleNamespace(stdout="", returncode=0)
+        if cmd[1:4] == ["stash", "push", "--include-untracked"]:
+            return SimpleNamespace(
+                stdout="",
+                stderr="error: pathspec 'plugins/web/readability' did not match any files\n",
+                returncode=1,
+                args=cmd,
+            )
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(hermes_main.subprocess, "run", fake_run)
+
+    with pytest.raises(CalledProcessError) as exc:
+        hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
+
+    out = capsys.readouterr().out
+    assert exc.value.returncode == 1
+    assert "Could not stash local changes" in out
+    assert "pathspec 'plugins/web/readability'" in out
+    assert "working tree was left unchanged" in out
+
+
 def test_resolve_stash_selector_returns_matching_entry(monkeypatch, tmp_path):
     def fake_run(cmd, **kwargs):
         assert cmd == ["git", "stash", "list", "--format=%gd %H"]

@@ -8267,11 +8267,26 @@ def _stash_local_changes_if_needed(git_cmd: list[str], cwd: Path) -> Optional[st
         "hermes-update-autostash-%Y%m%d-%H%M%S"
     )
     print("→ Local changes detected — stashing before update...")
-    subprocess.run(
+    stash = subprocess.run(
         git_cmd + ["stash", "push", "--include-untracked", "-m", stash_name],
         cwd=cwd,
-        check=True,
+        capture_output=True,
+        text=True,
     )
+    if stash.returncode != 0:
+        print("✗ Could not stash local changes before updating.")
+        if stash.stdout.strip():
+            print(stash.stdout.strip())
+        if stash.stderr.strip():
+            print(stash.stderr.strip())
+        print("  Your working tree was left unchanged.")
+        print("  Commit, move, or remove the files above, then rerun `hermes update`.")
+        raise subprocess.CalledProcessError(
+            stash.returncode,
+            stash.args,
+            output=stash.stdout,
+            stderr=stash.stderr,
+        )
     stash_ref = subprocess.run(
         git_cmd + ["rev-parse", "--verify", "refs/stash"],
         cwd=cwd,

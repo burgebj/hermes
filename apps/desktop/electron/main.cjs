@@ -1694,6 +1694,18 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`
 }
 
+function launchAppBundle(appBundle) {
+  if (!IS_MAC || !appBundle) return false
+  try {
+    const child = spawn('/usr/bin/open', [appBundle], { detached: true, stdio: 'ignore' })
+    child.unref()
+    return true
+  } catch (err) {
+    rememberLog(`[updates] relaunch failed for ${appBundle}: ${err.message}`)
+    return false
+  }
+}
+
 // macOS/Linux in-app update: backend (`hermes update`) + OS-aware GUI rebuild
 // (`hermes desktop --build-only`), then atomically swap the running .app bundle
 // with the freshly built one and relaunch. Degrades to "backend updated,
@@ -1797,6 +1809,13 @@ async function applyUpdatesPosixInApp() {
   }
 
   emitUpdateProgress({ stage: 'restart', message: 'Installing the updated app and restarting…', percent: 95 })
+
+  if (IS_MAC && rebuiltApp === targetApp) {
+    rememberLog(`[updates] rebuilt app is the running bundle; relaunching ${targetApp}`)
+    launchAppBundle(targetApp)
+    setTimeout(() => app.quit(), 600)
+    return { ok: true, handedOff: true, rebuiltApp, targetApp, relaunchOnly: true }
+  }
 
   // Detached swapper: wait for THIS process to exit (so the bundle is free),
   // ditto the rebuilt app over the running one, clear quarantine, relaunch.
