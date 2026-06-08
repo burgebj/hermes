@@ -4944,3 +4944,148 @@ class TestChatLockEviction(unittest.TestCase):
                 held.release()
 
         asyncio.run(_run())
+
+
+class TestCardTableLimitSplitting(unittest.TestCase):
+    """Verify Feishu CardKit table-count splitting (ErrCode 11310 workaround).
+
+    Feishu rejects any interactive card whose total GFM table count exceeds
+    _CARD_MAX_TABLES (5, verified empirically). When content has more tables,
+    we split it into multiple cards before sending — splitting markdown
+    elements within a single card does NOT bypass the limit (it is per-card,
+    not per-element).
+    """
+
+    def _make_table(self, idx: int) -> str:
+        return (
+            f"\n\n### 表格 {idx}\n\n"
+            "| A | B | C |\n"
+            "|---|---|---|\n"
+            "| 1 | 2 | 3 |\n"
+            "| 4 | 5 | 6 |\n"
+        )
+
+    def _count_tables(self, card: dict) -> int:
+        """Count GFM tables across all markdown elements of a card."""
+        from gateway.platforms.feishu import _TABLE_MARKDOWN_RE
+
+        return sum(
+            len(_TABLE_MARKDOWN_RE.findall(el["content"]))
+            for el in card["body"]["elements"]
+        )
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_table_routes_to_interactive_card(self):
+        """含 GFM 表格的内容应路由到 CardKit 2.0 交互卡片，而非 text/post。"""
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        msg_type, payload = adapter._build_outbound_payload(
+            "## 标题\n" + self._make_table(1)
+        )
+        self.assertEqual(msg_type, "interactive")
+        card = json.loads(payload)
+        self.assertEqual(card["schema"], "2.0")
+        self.assertEqual(card["body"]["elements"][0]["tag"], "markdown")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_multiline_code_block_routes_to_interactive_card(self):
+        """多行围栏代码块在 post/md 中会被截断，应路由到交互卡片。"""
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        content = "输出：\n```python\nprint('a')\nprint('b')\nprint('c')\n```"
+        msg_type, payload = adapter._build_outbound_payload(content)
+        self.assertEqual(msg_type, "interactive")
+        card = json.loads(payload)
+        self.assertIn("```python", card["body"]["elements"][0]["content"])
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_under_limit_yields_single_card(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        content = "## 标题\n" + "".join(self._make_table(i + 1) for i in range(5))
+        messages = adapter._build_outbound_messages(content)
+
+        self.assertEqual(len(messages), 1)
+        msg_type, payload = messages[0]
+        self.assertEqual(msg_type, "interactive")
+        card = json.loads(payload)
+        # All 5 tables go into one element of one card.
+        self.assertEqual(len(card["body"]["elements"]), 1)
+        self.assertEqual(self._count_tables(card), 5)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_over_limit_yields_multiple_cards(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        # 6 tables — must be split into 2 cards (5 + 1) because per-card cap is 5.
+        content = "## 标题\n" + "".join(self._make_table(i + 1) for i in range(6))
+        messages = adapter._build_outbound_messages(content)
+
+        self.assertEqual(len(messages), 2)
+        for msg_type, _ in messages:
+            self.assertEqual(msg_type, "interactive")
+
+        first = json.loads(messages[0][1])
+        second = json.loads(messages[1][1])
+        # First card carries 5 tables, second carries the remaining 1.
+        self.assertEqual(self._count_tables(first), 5)
+        self.assertEqual(self._count_tables(second), 1)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_far_over_limit_splits_into_three_cards(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        # 12 tables → 3 cards (5 + 5 + 2).
+        content = "## 标题\n" + "".join(self._make_table(i + 1) for i in range(12))
+        messages = adapter._build_outbound_messages(content)
+
+        self.assertEqual(len(messages), 3)
+        table_counts = [self._count_tables(json.loads(p)) for _, p in messages]
+        self.assertEqual(table_counts, [5, 5, 2])
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_no_tables_returns_post_or_text(self):
+        """Tables-only logic doesn't disturb non-table routing."""
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        messages = adapter._build_outbound_messages("just plain text")
+        self.assertEqual(len(messages), 1)
+        msg_type, _ = messages[0]
+        self.assertEqual(msg_type, "text")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_prose_between_tables_stays_with_following_table(self):
+        """Splitting must happen at table boundaries, not mid-paragraph."""
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        parts = []
+        for i in range(6):
+            parts.append(f"\n\n这是第 {i + 1} 段说明文字。")
+            parts.append(self._make_table(i + 1))
+        content = "## 标题" + "".join(parts)
+        messages = adapter._build_outbound_messages(content)
+
+        self.assertEqual(len(messages), 2)
+        first_content = json.loads(messages[0][1])["body"]["elements"][0]["content"]
+        second_content = json.loads(messages[1][1])["body"]["elements"][0]["content"]
+        # Tables 1..5 live in card 1, table 6 in card 2 — each table's
+        # preceding prose travels with it (no orphaned paragraphs).
+        for i in range(1, 6):
+            self.assertIn(f"第 {i} 段说明文字", first_content)
+            self.assertIn(f"### 表格 {i}", first_content)
+        self.assertIn("第 6 段说明文字", second_content)
+        self.assertIn("### 表格 6", second_content)
