@@ -31,16 +31,19 @@ const DESKTOP_COMMAND_META = [
   ['/goal', 'Manage the standing goal for this session'],
   ['/help', 'Show desktop slash commands'],
   ['/new', 'Start a new desktop chat'],
+  ['/personality', 'Switch personality for this session'],
   ['/profile', 'Switch the active Hermes profile'],
   ['/queue', 'Queue a prompt for the next turn'],
   ['/resume', 'Resume a saved session'],
   ['/retry', 'Retry the last user message'],
   ['/rollback', 'List or restore filesystem checkpoints'],
+  ['/save', 'Save the current transcript to JSON'],
   ['/skin', 'Switch desktop theme or cycle to the next one'],
   ['/status', 'Show current session status'],
   ['/steer', 'Steer the current run after the next tool call'],
   ['/stop', 'Stop running background processes'],
   ['/title', 'Rename the current session'],
+  ['/tools', 'List or toggle tools available to the agent'],
   ['/undo', 'Remove the last user/assistant exchange'],
   ['/usage', 'Show token usage for this session'],
   ['/version', 'Show Hermes Agent version'],
@@ -90,7 +93,6 @@ const TERMINAL_ONLY_COMMANDS = new Set([
   '/redraw',
   '/reload',
   '/restart',
-  '/save',
   '/sb',
   '/set-home',
   '/sethome',
@@ -98,7 +100,6 @@ const TERMINAL_ONLY_COMMANDS = new Set([
   '/snapshot',
   '/statusbar',
   '/toolsets',
-  '/tools',
   '/update',
   '/verbose'
 ])
@@ -112,7 +113,6 @@ const ADVANCED_COMMANDS = new Set([
   '/fast',
   '/insights',
   '/kanban',
-  '/personality',
   '/reasoning',
   '/reload-mcp',
   '/reload-skills',
@@ -274,10 +274,32 @@ export function filterDesktopCommandsCatalog(catalog: CommandsCatalogLike): Comm
     ?.filter(([command]) => isDesktopSlashSuggestion(command))
     .map(([command, description]) => [command, desktopSlashDescription(command, description)] as [string, string])
 
+  // Recount skill commands from the filtered output so /help's footer reflects
+  // what the user actually sees. Backend's skill_count includes commands the
+  // desktop hides (terminal-only, picker-owned, advanced), producing a footer
+  // like "60 skill commands available" while only ~29 appear in the list.
+  const filteredCommands = new Set<string>()
+  for (const section of categories ?? []) {
+    for (const [command] of section.pairs) {
+      filteredCommands.add(canonicalDesktopSlashCommand(command))
+    }
+  }
+  for (const [command] of pairs ?? []) {
+    filteredCommands.add(canonicalDesktopSlashCommand(command))
+  }
+  let skillCount = 0
+  for (const command of filteredCommands) {
+    if (isDesktopSlashExtensionCommand(command)) {
+      skillCount += 1
+    }
+  }
+  const hasSkillCount = catalog.skill_count !== undefined || skillCount > 0
+
   return {
     ...catalog,
     ...(categories ? { categories } : {}),
-    ...(pairs ? { pairs } : {})
+    ...(pairs ? { pairs } : {}),
+    ...(hasSkillCount ? { skill_count: skillCount } : {})
   }
 }
 

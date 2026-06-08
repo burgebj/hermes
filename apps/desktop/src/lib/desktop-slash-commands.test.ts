@@ -38,6 +38,18 @@ describe('desktop slash command curation', () => {
     expect(isDesktopSlashSuggestion('/curator')).toBe(false)
   })
 
+  it('surfaces /tools, /save, and /personality on the desktop', () => {
+    expect(isDesktopSlashSuggestion('/tools')).toBe(true)
+    expect(isDesktopSlashSuggestion('/save')).toBe(true)
+    expect(isDesktopSlashSuggestion('/personality')).toBe(true)
+    expect(isDesktopSlashCommand('/tools')).toBe(true)
+    expect(isDesktopSlashCommand('/save')).toBe(true)
+    expect(isDesktopSlashCommand('/personality')).toBe(true)
+    expect(desktopSlashUnavailableMessage('/tools')).toBeNull()
+    expect(desktopSlashUnavailableMessage('/save')).toBeNull()
+    expect(desktopSlashUnavailableMessage('/personality')).toBeNull()
+  })
+
   it('allows aliases to execute without cluttering the popover', () => {
     expect(isDesktopSlashSuggestion('/reset')).toBe(false)
     expect(isDesktopSlashCommand('/reset')).toBe(true)
@@ -74,6 +86,24 @@ describe('desktop slash command curation', () => {
       ['/new', 'Start a new desktop chat'],
       ['/ship-it', 'Run release checklist']
     ])
+    // skill_count is recomputed from the filtered output (only /ship-it is an
+    // extension command — /new is a built-in) so the /help footer matches what
+    // the user actually sees rather than echoing the unfiltered backend total.
+    expect(filtered.skill_count).toBe(1)
+  })
+
+  it('recomputes skill_count to reflect only extensions surfaced on desktop', () => {
+    const filtered = filterDesktopCommandsCatalog({
+      pairs: [
+        ['/new', 'Start a new session'],
+        ['/clear', 'Clear terminal screen'],
+        ['/gif-search', 'Search for a gif'],
+        ['/ship-it', 'Run release checklist']
+      ],
+      skill_count: 12
+    })
+
+    expect(filtered.pairs?.map(([cmd]) => cmd)).toEqual(['/new', '/gif-search', '/ship-it'])
     expect(filtered.skill_count).toBe(2)
   })
 

@@ -67,10 +67,30 @@ export function useSlashCompletions(options: { gateway: HermesGateway | null }):
           return { items, query }
         }
 
-        const result = await gateway.request<{ items?: CompletionEntry[] }>('complete.slash', { text })
+        const result = await gateway.request<{ items?: CompletionEntry[]; replace_from?: number }>(
+          'complete.slash',
+          { text }
+        )
+
+        // Arg-completion items (replace_from > 1) carry just the arg stub —
+        // e.g. complete.slash returns `{text: "alice"}` for `/personality alic`
+        // with replace_from = 14. Rewrite those entries so the popover inserts
+        // the full `/personality alice` token instead of stranding `/alice`.
+        const replaceFrom = typeof result.replace_from === 'number' ? result.replace_from : 1
+        const isArgCompletion = replaceFrom > 1
+        const prefix = isArgCompletion ? text.slice(0, replaceFrom) : ''
 
         const items = (result.items ?? [])
-          .filter(item => isDesktopSlashSuggestion(item.text))
+          .map(item => {
+            if (!isArgCompletion) {
+              return item
+            }
+
+            const argText = typeof item.text === 'string' ? item.text : ''
+
+            return { ...item, text: `${prefix}${argText}` }
+          })
+          .filter(item => isArgCompletion || isDesktopSlashSuggestion(item.text))
           .map(item => ({
             ...item,
             meta: desktopSlashDescription(item.text, textValue(item.meta))
