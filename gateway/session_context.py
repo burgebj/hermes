@@ -83,7 +83,7 @@ _VAR_MAP = {
 }
 
 
-def set_current_session_id(session_id: str) -> None:
+def set_current_session_id(session_id: str, *, update_environ: bool = True) -> None:
     """Synchronize ``HERMES_SESSION_ID`` across ContextVar and ``os.environ``.
 
     Long-lived single-process entrypoints like the CLI can rotate sessions via
@@ -91,10 +91,17 @@ def set_current_session_id(session_id: str) -> None:
     reconstructing the entire agent. Tools still consult
     ``get_session_env("HERMES_SESSION_ID")`` with an ``os.environ`` fallback,
     so both storage paths must move together when the active session changes.
+
+    ``delegate_task`` children run in worker threads inside the parent process.
+    They need a child-local ContextVar value, but must not mutate the global
+    process environment that later parent tool calls inherit.  Those callers
+    pass ``update_environ=False`` and rely on ``get_session_env`` seeing the
+    thread-local ContextVar before falling back to ``os.environ``.
     """
     import os
 
-    os.environ["HERMES_SESSION_ID"] = session_id
+    if update_environ:
+        os.environ["HERMES_SESSION_ID"] = session_id
     _SESSION_ID.set(session_id)
 
 

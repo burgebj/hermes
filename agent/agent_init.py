@@ -1019,9 +1019,10 @@ def init_agent(
     try:
         from gateway.session_context import set_current_session_id
 
-        set_current_session_id(agent.session_id)
+        set_current_session_id(agent.session_id, update_environ=not bool(parent_session_id))
     except Exception:
-        os.environ["HERMES_SESSION_ID"] = agent.session_id
+        if not parent_session_id:
+            os.environ["HERMES_SESSION_ID"] = agent.session_id
 
     # Session logs go into ~/.hermes/sessions/ alongside gateway sessions
     hermes_home = get_hermes_home()
