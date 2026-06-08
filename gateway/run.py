@@ -14550,8 +14550,8 @@ class GatewayRunner:
             return "\n".join(lines)
 
         except Exception as e:
-            logger.warning("MCP reload failed: %s", e)
-            return t("gateway.reload_mcp.failed", error=e)
+            logger.warning("MCP reload failed: %s", repr(e))
+            return t("gateway.reload_mcp.failed", error=repr(e))
 
     async def _handle_reload_skills_command(self, event: MessageEvent) -> str:
         """Handle /reload-skills — rescan skills dir, queue a note for next turn.
@@ -14954,6 +14954,7 @@ class GatewayRunner:
     def _reply_anchor_for_event(event: MessageEvent) -> Optional[str]:
         """Return the platform-specific reply anchor for GatewayRunner sends."""
         return _reply_anchor_for_event(event)
+
 
 
     # ------------------------------------------------------------------
