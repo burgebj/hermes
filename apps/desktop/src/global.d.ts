@@ -66,6 +66,7 @@ declare global {
       renamePath?: (fromPath: string, toPath: string) => Promise<HermesFsMutationResult>
       deletePath?: (path: string) => Promise<HermesFsMutationResult>
       uploadFile?: (localPath: string, destDir: string) => Promise<HermesFsMutationResult>
+      writeFile?: (path: string, content: string) => Promise<HermesFsMutationResult>
       terminal: {
         dispose: (id: string) => Promise<boolean>
         onData: (id: string, callback: (payload: string) => void) => () => void

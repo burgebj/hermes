@@ -325,6 +325,33 @@ function upload(cfg, localPath, remoteDir) {
   })
 }
 
+// Overwrite a remote file's contents. Writes the text to a local temp file and
+// scp's it to the exact remote path (file -> file), then removes the temp.
+function writeFile(cfg, remotePath, content) {
+  return new Promise(resolve => {
+    let tmp
+    try {
+      tmp = path.join(os.tmpdir(), `hermes-write-${crypto.randomBytes(8).toString('hex')}`)
+      fs.writeFileSync(tmp, typeof content === 'string' ? content : String(content ?? ''), 'utf8')
+    } catch (error) {
+      resolve({ ok: false, error: 'temp-write-failed' })
+      return
+    }
+
+    const dest = `${sshTarget(cfg)}:${String(remotePath || '')}`
+    const args = [...scpBaseArgs(cfg), tmp, dest]
+
+    execFile(scpBinary(), args, { timeout: 120_000, windowsHide: true }, (error, _stdout, stderr) => {
+      try {
+        fs.unlinkSync(tmp)
+      } catch {
+        // best-effort temp cleanup
+      }
+      resolve({ ok: !error, error: error ? stderr.trim() || String(error.message || error) : undefined })
+    })
+  })
+}
+
 // Argv for an interactive remote shell, spawned through node-pty. node-pty owns
 // the *local* PTY; `ssh -tt` allocates the *remote* PTY and forwards window-size
 // changes, so node-pty's resize() reaches the remote shell as a normal SIGWINCH.
@@ -347,6 +374,7 @@ module.exports = {
   rename,
   sshBaseArgs,
   statFile,
+  writeFile,
   terminalSpawn,
   upload
 }

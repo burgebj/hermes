@@ -14,6 +14,7 @@ import { HERMES_PATHS_MIME } from '@/app/chat/hooks/use-composer-actions'
 import { PageLoader } from '@/components/page-loader'
 import { translateNow, useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
+import { notify, notifyError } from '@/store/notifications'
 import type { PreviewTarget } from '@/store/preview'
 
 const SHIKI_THEME = { dark: 'github-dark-default', light: 'github-light-default' } as const
@@ -296,18 +297,115 @@ function MarkdownPreview({ text }: { text: string }) {
   )
 }
 
-function PreviewToggle({ asSource, onToggle }: { asSource: boolean; onToggle: () => void }) {
-  const { t } = useI18n()
+const PREVIEW_BAR_BUTTON =
+  'text-[0.625rem] font-bold text-muted-foreground underline decoration-current/20 underline-offset-4 transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:no-underline'
+
+// Text/code preview with an inline edit mode. Reading uses the existing
+// readFileText path; saving routes through hermes:fs:writeFile (local fs or, in
+// remote mode, scp back to the remote host) so the same surface edits whichever
+// machine the workspace lives on.
+function FileTextBody({
+  filePath,
+  language,
+  text,
+  truncated
+}: {
+  filePath: string
+  language: string
+  text: string
+  truncated?: boolean
+}) {
+  const isMarkdown = language === 'markdown'
+  const [asSource, setAsSource] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(text)
+  const [saved, setSaved] = useState(text)
+  const [saving, setSaving] = useState(false)
+
+  // Reset when a different file is shown or the underlying content reloads.
+  useEffect(() => {
+    setSaved(text)
+    setDraft(text)
+    setEditing(false)
+    setAsSource(false)
+  }, [text, filePath])
+
+  // Truncated previews only hold the first 512 KB, so saving would silently
+  // drop the rest — never offer editing in that case.
+  const canEdit = !truncated && Boolean(window.hermesDesktop?.writeFile)
+  const showRendered = isMarkdown && !asSource && !editing
+  const dirty = draft !== saved
+
+  const save = async () => {
+    setSaving(true)
+
+    try {
+      const result = await window.hermesDesktop?.writeFile?.(filePath, draft)
+
+      if (!result?.ok) {
+        throw new Error(result?.error || 'Save failed')
+      }
+
+      setSaved(draft)
+      setEditing(false)
+      notify({ kind: 'success', title: 'Saved', message: filePath })
+    } catch (error) {
+      notifyError(error, 'Could not save file')
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
-    <div className="sticky top-0 z-10 flex justify-end border-b border-border/40 bg-transparent px-3 py-1 backdrop-blur">
-      <button
-        className="text-[0.625rem] font-bold text-muted-foreground underline decoration-current/20 underline-offset-4 transition-colors hover:text-foreground"
-        onClick={onToggle}
-        type="button"
-      >
-        {asSource ? t.preview.renderedPreview : t.preview.source}
-      </button>
+    <div className="flex h-full flex-col overflow-hidden bg-transparent">
+      <div className="sticky top-0 z-10 flex items-center gap-3 border-b border-border/40 bg-transparent px-3 py-1 backdrop-blur">
+        {truncated && <span className="text-[0.625rem] text-muted-foreground">Showing first 512 KB.</span>}
+        <div className="ml-auto flex items-center gap-3">
+          {isMarkdown && !editing && (
+            <button className={PREVIEW_BAR_BUTTON} onClick={() => setAsSource(s => !s)} type="button">
+              {showRendered ? 'SOURCE' : 'PREVIEW'}
+            </button>
+          )}
+          {canEdit && !editing && (
+            <button className={PREVIEW_BAR_BUTTON} onClick={() => setEditing(true)} type="button">
+              EDIT
+            </button>
+          )}
+          {editing && (
+            <>
+              <button
+                className={PREVIEW_BAR_BUTTON}
+                disabled={saving}
+                onClick={() => {
+                  setDraft(saved)
+                  setEditing(false)
+                }}
+                type="button"
+              >
+                CANCEL
+              </button>
+              <button className={PREVIEW_BAR_BUTTON} disabled={saving || !dirty} onClick={() => void save()} type="button">
+                {saving ? 'SAVING…' : 'SAVE'}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto">
+        {editing ? (
+          <textarea
+            className="h-full w-full resize-none bg-transparent p-3 font-mono text-xs leading-relaxed text-foreground outline-none"
+            onChange={event => setDraft(event.target.value)}
+            spellCheck={false}
+            value={draft}
+          />
+        ) : showRendered ? (
+          <MarkdownPreview text={saved} />
+        ) : (
+          <SourceView filePath={filePath} language={language || 'text'} text={saved} />
+        )}
+      </div>
     </div>
   )
 }
@@ -415,7 +513,6 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
   const { t } = useI18n()
   const [state, setState] = useState<LocalPreviewState>({ loading: true })
   const [forcePreview, setForcePreview] = useState(false)
-  const [renderMarkdownAsSource, setRenderMarkdownAsSource] = useState(false)
   const filePath = filePathForTarget(target)
   const isImage = target.previewKind === 'image'
 
@@ -530,23 +627,13 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
   }
 
   if (isText && state.text !== undefined) {
-    const isMarkdown = (state.language || target.language) === 'markdown'
-    const showRendered = isMarkdown && !renderMarkdownAsSource
-
     return (
-      <div className="h-full overflow-auto bg-transparent">
-        {state.truncated && (
-          <div className="border-b border-border/60 bg-muted/35 px-3 py-1.5 text-[0.68rem] text-muted-foreground">
-            {t.preview.truncated}
-          </div>
-        )}
-        {isMarkdown && <PreviewToggle asSource={!showRendered} onToggle={() => setRenderMarkdownAsSource(s => !s)} />}
-        {showRendered ? (
-          <MarkdownPreview text={state.text} />
-        ) : (
-          <SourceView filePath={filePath} language={state.language || 'text'} text={state.text} />
-        )}
-      </div>
+      <FileTextBody
+        filePath={filePath}
+        language={state.language || target.language || 'text'}
+        text={state.text}
+        truncated={state.truncated}
+      />
     )
   }
 
