@@ -1608,6 +1608,10 @@ DEFAULT_CONFIG = {
         },
         "openai": {
             "model": "whisper-1",  # whisper-1, gpt-4o-mini-transcribe, gpt-4o-transcribe
+            "language": "",        # optional ISO language hint, e.g. "en", "fr"
+            "prompt": "",          # optional short transcription hint
+            "prompt_file": "",     # optional UTF-8 file with a reusable transcription prompt
+            "hotwords": "",        # optional OpenAI-compatible endpoint hint
         },
         "mistral": {
             "model": "voxtral-mini-latest",  # voxtral-mini-latest, voxtral-mini-2602

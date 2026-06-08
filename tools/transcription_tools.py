@@ -1325,8 +1325,36 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _get_openai_stt_prompt(openai_cfg: Optional[dict] = None) -> Optional[str]:
+    """Return the configured OpenAI-compatible STT prompt, if any.
+
+    ``stt.openai.prompt`` is convenient for short inline hints.  For prompts
+    shared across clients/machines, ``stt.openai.prompt_file`` points to a
+    versioned UTF-8 text file.  Inline config wins so users can temporarily
+    override a file-backed prompt without editing the shared source.
+    """
+    if openai_cfg is None:
+        openai_cfg = _load_stt_config().get("openai", {})
+    if not isinstance(openai_cfg, dict):
+        openai_cfg = {}
+
+    inline_prompt = str(openai_cfg.get("prompt") or "").strip()
+    if inline_prompt:
+        return inline_prompt
+
+    prompt_file = str(openai_cfg.get("prompt_file") or "").strip()
+    if not prompt_file:
+        return None
+
+    try:
+        return Path(prompt_file).expanduser().read_text(encoding="utf-8").strip() or None
+    except OSError as exc:
+        logger.warning("Configured STT prompt file '%s' could not be read: %s", prompt_file, exc)
+        return None
+
+
 def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
-    """Transcribe using OpenAI Whisper API (paid)."""
+    """Transcribe using OpenAI Whisper API (paid or OpenAI-compatible endpoint)."""
     try:
         api_key, base_url = _resolve_openai_audio_client_config()
     except ValueError as exc:
@@ -1344,15 +1372,29 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
         logger.info("Model %s not available on OpenAI, using %s", model_name, DEFAULT_STT_MODEL)
         model_name = DEFAULT_STT_MODEL
 
+    openai_cfg = _load_stt_config().get("openai", {})
+    create_kwargs: Dict[str, Any] = {
+        "model": model_name,
+        "response_format": "text" if model_name == "whisper-1" else "json",
+    }
+    prompt = _get_openai_stt_prompt(openai_cfg)
+    if prompt:
+        create_kwargs["prompt"] = prompt
+    language = str(openai_cfg.get("language") or "").strip()
+    if language:
+        create_kwargs["language"] = language
+    hotwords = str(openai_cfg.get("hotwords") or "").strip()
+    if hotwords:
+        create_kwargs["hotwords"] = hotwords
+
     try:
         from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
         try:
             with open(file_path, "rb") as audio_file:
                 transcription = client.audio.transcriptions.create(
-                    model=model_name,
                     file=audio_file,
-                    response_format="text" if model_name == "whisper-1" else "json",
+                    **create_kwargs,
                 )
 
             transcript_text = _extract_transcript_text(transcription)
