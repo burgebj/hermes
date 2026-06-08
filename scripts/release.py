@@ -76,6 +76,7 @@ AUTHOR_MAP = {
     "16943149+nepenth@users.noreply.github.com": "nepenth",
     "ben.bartholomew@vectorize.io": "benfrank241",
     "74339271+SaguaroDev@users.noreply.github.com": "SaguaroDev",
+    "hermes-agent@users.noreply.github.com": "BROCCOLO1D",
     "subw3@mail2.sysu.edu.cn": "Subway2023",
     "trevin@trevinchow.com": "tmchow",
     "zhipengli@thebrainly.ai": "a1245582339",

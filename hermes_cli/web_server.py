@@ -518,6 +518,10 @@ _CATEGORY_MERGE: Dict[str, str] = {
     # with the other messaging-platform config (discord) so it isn't an
     # orphan tab of one field.
     "telegram": "discord",
+    # Spotify currently exposes a single non-secret preference; keep it with
+    # agent/runtime settings until the integration has enough config to merit
+    # its own dashboard tab.
+    "spotify": "agent",
 }
 
 # Display order for tabs — unlisted categories sort alphabetically after these.

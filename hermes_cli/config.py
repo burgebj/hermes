@@ -2356,6 +2356,15 @@ DEFAULT_CONFIG = {
         "servers": {},
     },
 
+    # Spotify playback preferences. Authentication lives in auth.json and
+    # HERMES_SPOTIFY_CLIENT_ID / HERMES_SPOTIFY_REDIRECT_URI live in .env;
+    # this section is only for non-secret runtime behavior.
+    "spotify": {
+        # Optional Spotify Connect device name to target when playback tools
+        # omit device_id. Matched case-insensitively against
+        # spotify_devices list at call time (e.g. "Kitchen Sonos").
+        "default_device_name": "",
+    },
 
     # X (Twitter) Search via xAI's built-in x_search Responses tool.
     # The tool registers when xAI credentials are available (SuperGrok
