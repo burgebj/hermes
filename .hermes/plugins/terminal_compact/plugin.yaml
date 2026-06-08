@@ -1,0 +1,5 @@
+name: terminal_compact
+version: 0.1.0
+description: Safe terminal command compaction for noisy read-only workflows
+provides_hooks:
+  - pre_tool_call

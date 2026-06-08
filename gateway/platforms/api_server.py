@@ -3177,6 +3177,27 @@ class APIServerAdapter(BasePlatformAdapter):
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
+    async def _handle_minions_completion(self, request: "web.Request") -> "web.Response":
+        """POST /api/minions/completions — accept queued worker completions."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            envelope = await request.json()
+        except (json.JSONDecodeError, Exception):
+            return web.json_response({"error": "Invalid JSON in request body"}, status=400)
+
+        if not isinstance(envelope, dict):
+            return web.json_response({"error": "Completion payload must be a JSON object"}, status=400)
+
+        from agent.job_callbacks import deliver_completion
+
+        error = deliver_completion(envelope)
+        if error:
+            return web.json_response({"error": str(error)}, status=400)
+        return web.json_response({"ok": True})
+
     async def _handle_get_job(self, request: "web.Request") -> "web.Response":
         """GET /api/jobs/{job_id} — get a single cron job."""
         auth_err = self._check_auth(request)
@@ -4152,6 +4173,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_post("/api/jobs/{job_id}/pause", self._handle_pause_job)
             self._app.router.add_post("/api/jobs/{job_id}/resume", self._handle_resume_job)
             self._app.router.add_post("/api/jobs/{job_id}/run", self._handle_run_job)
+            self._app.router.add_post("/api/minions/completions", self._handle_minions_completion)
             # Structured event streaming
             self._app.router.add_post("/v1/runs", self._handle_runs)
             self._app.router.add_get("/v1/runs/{run_id}", self._handle_get_run)
