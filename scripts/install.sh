@@ -1773,10 +1773,25 @@ run_browser_install_with_timeout() {
     local timeout_seconds="$1"
     shift
 
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "$timeout_seconds" "$@"
-    else
+    if ! command -v timeout >/dev/null 2>&1; then
+        # No `timeout` (common on stock macOS) — run directly so the user
+        # keeps normal terminal Ctrl+C behaviour.
         "$@"
+        return $?
+    fi
+
+    # GNU `timeout` runs COMMAND in its own process group, so a terminal Ctrl+C
+    # is delivered to `timeout` but not the child: the Playwright download then
+    # looks frozen and ignores Ctrl+C (#35166). `--foreground` keeps COMMAND in
+    # the shell's foreground process group so Ctrl+C reaches it, and `-k` forces
+    # a SIGKILL if COMMAND ignores the SIGTERM sent at the deadline — otherwise a
+    # download wedged in an uninterruptible state keeps `timeout` waiting past
+    # the deadline, defeating the timeout entirely. Both flags are GNU-only;
+    # probe once and fall back to plain `timeout` on BusyBox / other variants.
+    if timeout --foreground -k 10 1 true >/dev/null 2>&1; then
+        timeout --foreground -k 10 "$timeout_seconds" "$@"
+    else
+        timeout "$timeout_seconds" "$@"
     fi
 }
 

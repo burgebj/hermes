@@ -39,6 +39,20 @@ def test_playwright_installs_are_timeout_guarded() -> None:
     assert "run_browser_install_with_timeout 600 npx playwright install --with-deps chromium" in text
 
 
+def test_browser_install_timeout_stays_interruptible() -> None:
+    """The browser-install timeout must forward terminal Ctrl+C and hard-kill a
+    wedged download, so the Playwright step never looks frozen / uninterruptible
+    (regression for #35166)."""
+    text = INSTALL_SH.read_text()
+
+    # --foreground keeps the child in the shell's foreground process group so a
+    # terminal Ctrl+C reaches it; -k guarantees a SIGKILL if SIGTERM is ignored
+    # at the deadline. Both are GNU-only and must be probed before use so
+    # BusyBox/macOS fall back to plain `timeout` / direct exec.
+    assert "timeout --foreground -k 10 1 true" in text
+    assert "timeout --foreground -k 10 \"$timeout_seconds\" \"$@\"" in text
+
+
 def test_install_script_supports_skip_browser_flag() -> None:
     """--skip-browser (and --no-playwright alias) skips the Playwright install."""
     text = INSTALL_SH.read_text()
