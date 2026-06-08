@@ -4106,6 +4106,12 @@ _PLATFORMS = [
         ],
     },
     {
+        "key": "webhook",
+        "label": "Webhook",
+        "emoji": "🔗",
+        "token_var": "WEBHOOK_ENABLED",
+    },
+    {
         "key": "dingtalk",
         "label": "DingTalk",
         "emoji": "💬",
@@ -5637,6 +5643,7 @@ def _builtin_setup_fn(key: str):
         # plugins/platforms/mattermost/adapter.py::register() and dispatched
         # via the plugin path in _configure_platform().
         "bluebubbles": _s._setup_bluebubbles,
+        "webhook": _s._setup_webhooks,
         "webhooks": _s._setup_webhooks,
         "signal": _setup_signal,
         "whatsapp": _setup_whatsapp,
