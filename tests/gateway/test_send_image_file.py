@@ -57,6 +57,22 @@ class TestExtractMediaImages:
         assert "/audio.ogg" in paths
         assert "/screenshot.png" in paths
 
+    def test_markdown_document_extracted(self):
+        """MEDIA: tags with .markdown extension should be extracted as documents."""
+        content = "MEDIA:/tmp/report.markdown"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert len(media) == 1
+        assert media[0][0] == "/tmp/report.markdown"
+        assert "MEDIA:" not in cleaned
+
+    def test_md_document_extracted(self):
+        """MEDIA: tags with .md extension should be extracted as documents."""
+        content = "MEDIA:/tmp/notes.md"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert len(media) == 1
+        assert media[0][0] == "/tmp/notes.md"
+        assert "MEDIA:" not in cleaned
+
 
 # ---------------------------------------------------------------------------
 # Telegram send_image_file tests
