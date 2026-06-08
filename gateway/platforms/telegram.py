@@ -105,7 +105,7 @@ _TELEGRAM_IMAGE_EXT_TO_MIME = {
 }
 
 
-MAX_COMMANDS_PER_SCOPE = 30
+MAX_COMMANDS_PER_SCOPE = 100
 
 
 def check_telegram_requirements() -> bool:
@@ -1738,9 +1738,8 @@ class TelegramAdapter(BasePlatformAdapter):
                     BotCommandScopeDefault,
                 )
                 from hermes_cli.commands import telegram_menu_commands
-                # Telegram allows up to 100 commands but has an undocumented
-                # payload size limit (~4KB total).  Limit to 30 core commands
-                # to stay well under the threshold while covering all categories.
+                # Telegram allows up to 100 commands via setMyCommands.
+                # Register all discovered commands (core + plugin + skill).
                 menu_commands, hidden_count = telegram_menu_commands(max_commands=MAX_COMMANDS_PER_SCOPE)
                 bot_commands = [BotCommand(name, desc) for name, desc in menu_commands]
                 # Register for all scopes independently — Telegram picks the
@@ -1760,7 +1759,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 if hidden_count:
                     logger.info(
                         "[%s] Telegram menu: %d commands registered, %d hidden (over %d limit). Use /commands for full list.",
-                        self.name, len(menu_commands), hidden_count, 30,
+                        self.name, len(menu_commands), hidden_count, MAX_COMMANDS_PER_SCOPE,
                     )
             except Exception as e:
                 logger.warning(

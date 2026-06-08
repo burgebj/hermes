@@ -981,6 +981,38 @@ class TestTelegramMenuCommands:
         ):
             assert name in names
 
+
+    def test_plugin_commands_survive_hundred_command_cap(self, tmp_path, monkeypatch):
+        """Regression test for #33480: plugin commands must appear in Telegram menu.
+
+        With MAX_COMMANDS_PER_SCOPE raised from 30 to 100, plugin commands
+        should no longer be truncated by the built-in command priority.
+        """
+        from unittest.mock import patch
+        import hermes_cli.plugins as plugins_mod
+
+        plugin_dir = tmp_path / "plugins" / "test-plugin"
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        (plugin_dir / "plugin.yaml").write_text(
+            "name: test-plugin\nversion: 0.1.0\ndescription: Test plugin\n"
+        )
+        (plugin_dir / "__init__.py").write_text(
+            "def register(ctx):\n"
+            "    ctx.register_command('my_plugin_cmd', lambda args: 'ok', description='Plugin test command')\n"
+        )
+        (tmp_path / "config.yaml").write_text(
+            "plugins:\n  enabled:\n    - test-plugin\n"
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        with patch.object(plugins_mod, "_plugin_manager", None):
+            menu, _ = telegram_menu_commands(max_commands=100)
+
+        menu_names = {name for name, _ in menu}
+        assert "my_plugin_cmd" in menu_names, (
+            "Plugin command 'my_plugin_cmd' should appear in Telegram menu "
+            "with 100-command cap (#33480 regression)"
+        )
     def test_includes_plugin_commands_via_lazy_discovery(self, tmp_path, monkeypatch):
         """Telegram menu generation should discover plugin slash commands on first access."""
         from unittest.mock import patch
