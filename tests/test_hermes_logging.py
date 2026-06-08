@@ -181,6 +181,38 @@ class TestSetupLogging:
         assert "this is a warning" in agent_log.read_text()
         assert "this is a warning" in errors_log.read_text()
 
+    def test_windows_locked_rollover_falls_back_to_append(self, hermes_home):
+        hermes_logging.setup_logging(hermes_home=hermes_home)
+        root = logging.getLogger()
+        agent_handler = next(
+            h for h in root.handlers
+            if isinstance(h, RotatingFileHandler)
+            and "agent.log" in getattr(h, "baseFilename", "")
+        )
+
+        test_logger = logging.getLogger("test_hermes_logging.rollover_lock")
+        test_logger.info("seed message before forced rollover")
+        for h in root.handlers:
+            h.flush()
+
+        agent_handler.maxBytes = 1
+        locked_error = PermissionError(
+            32,
+            "The process cannot access the file because it is being used by another process",
+        )
+        locked_error.winerror = 32
+
+        with patch.object(agent_handler, "rotate", side_effect=locked_error):
+            test_logger.info("message after locked rollover")
+
+        for h in root.handlers:
+            h.flush()
+
+        agent_log = hermes_home / "logs" / "agent.log"
+        content = agent_log.read_text()
+        assert "message after locked rollover" in content
+        assert getattr(agent_handler, "_rollover_disabled", False) is True
+
     def test_info_not_in_errors_log(self, hermes_home):
         hermes_logging.setup_logging(hermes_home=hermes_home)
 

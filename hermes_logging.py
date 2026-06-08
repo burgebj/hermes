@@ -356,33 +356,40 @@ def setup_verbose_logging() -> None:
 # ---------------------------------------------------------------------------
 
 class _ManagedRotatingFileHandler(RotatingFileHandler):
-    """RotatingFileHandler that ensures group-writable perms in managed mode
-    AND survives external rotation.
+    """RotatingFileHandler for shared Hermes logs.
 
-    Two responsibilities:
+    Responsibilities:
 
-    1.  In managed mode (NixOS), the stateDir uses setgid (2770) so new files
-        inherit the hermes group. However, both ``_open()`` (initial creation)
-        and ``doRollover()`` create files via ``open()``, which uses the
-        process umask — typically 0022, producing 0644. This subclass applies
-        ``chmod 0660`` after both operations so the gateway and interactive
-        users can share log files.
+    1. In managed mode (NixOS), the stateDir uses setgid (2770) so new files
+       inherit the hermes group. However, both ``_open()`` (initial creation)
+       and ``doRollover()`` create files via ``open()``, which uses the
+       process umask — typically 0022, producing 0644. This subclass applies
+       ``chmod 0660`` after both operations so the gateway and interactive
+       users can share log files.
 
-    2.  ``RotatingFileHandler`` keeps an open file descriptor.  If anything
-        rotates the file *externally* (``logrotate``, manual ``mv``,
-        another process rotating under us, a transient unlink), our fd
-        keeps pointing at the renamed/unlinked inode and every subsequent
-        write goes to ``gateway.log.1`` instead of ``gateway.log`` — silent
-        log loss for the file every operator expects to read.  Before each
-        emit we ``stat`` ``baseFilename`` and compare it against the open
-        stream's inode; on mismatch we reopen.  This is the same pattern
-        as stdlib ``WatchedFileHandler.reopenIfNeeded()``, adapted for
-        rotating handlers.
+    2. ``RotatingFileHandler`` keeps an open file descriptor. If anything
+       rotates the file *externally* (``logrotate``, manual ``mv``, another
+       process rotating under us, a transient unlink), our fd keeps pointing
+       at the renamed/unlinked inode and subsequent writes go to the wrong
+       file. Before each emit we ``stat`` ``baseFilename`` and compare it
+       against the open stream's inode; on mismatch we reopen. This mirrors
+       stdlib ``WatchedFileHandler.reopenIfNeeded()``, adapted for rotating
+       handlers.
+
+    3. On Windows, multiple Hermes processes can legitimately share the same
+       ``agent.log`` path (for example the gateway plus an interactive CLI
+       session). If the file has reached the rotation threshold, one process
+       may try to rename ``agent.log`` to ``agent.log.1`` while another still
+       holds the file open, producing ``PermissionError: [WinError 32]``. In
+       that case we disable further rollover attempts for this handler
+       instance and keep appending to the current file instead of spamming
+       stderr with logging tracebacks.
     """
 
     def __init__(self, *args, **kwargs):
         from hermes_cli.config import is_managed
         self._managed = is_managed()
+        self._rollover_disabled = False
         super().__init__(*args, **kwargs)
         # Snapshot the inode of the currently open stream so emit() can
         # detect external rotation without an extra fstat per write.
@@ -466,8 +473,21 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
         self._chmod_if_managed()
         return stream
 
+    def shouldRollover(self, record):
+        if self._rollover_disabled:
+            return False
+        return super().shouldRollover(record)
+
     def doRollover(self):
-        super().doRollover()
+        if self._rollover_disabled:
+            return
+        try:
+            super().doRollover()
+        except PermissionError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) == 32:
+                self._rollover_disabled = True
+                return
+            raise
         self._chmod_if_managed()
         # Our own rollover writes a new baseFilename; refresh the snapshot
         # so the next emit doesn't mistake it for external rotation.
