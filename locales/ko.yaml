@@ -350,6 +350,11 @@ gateway:
     disabled:                   "⚠️ 이 세션에서 YOLO 모드 **꺼짐** — 위험한 명령은 승인이 필요합니다."
     enabled:                    "⚡ 이 세션에서 YOLO 모드 **켜짐** — 모든 명령이 자동 승인됩니다. 주의해서 사용하세요."
 
+  provider_errors:
+    auth_failed:               "⚠️ Provider authentication failed. Check the configured credentials; raw provider details are in the gateway logs."
+    policy_rejected:           "⚠️ The model provider rejected the request. I kept the raw provider error out of chat; check gateway logs for details or try rephrasing."
+    rate_limited:              "⏱️ The model provider is rate-limiting requests. Please wait a moment and try again."
+    failed_after_retries:      "⚠️ The model provider failed after retries. I kept raw provider details out of chat; check gateway logs for diagnostics."
   shared:
     session_db_unavailable:      "세션 데이터베이스를 사용할 수 없습니다."
     session_db_unavailable_prefix: "세션 데이터베이스를 사용할 수 없습니다"

@@ -350,6 +350,12 @@ gateway:
     disabled:                   "⚠️ 本工作階段 YOLO 模式 **已關閉** — 危險指令將需要批准。"
     enabled:                    "⚡ 本工作階段 YOLO 模式 **已開啟** — 所有指令自動批准。請謹慎使用。"
 
+  provider_errors:
+    auth_failed:               "⚠️ 模型提供方驗證失敗。請檢查已設定的憑證；原始提供方詳情請見閘道日誌。"
+    policy_rejected:           "⚠️ 模型提供方拒絕了此請求。對話中已隱藏原始錯誤；請查看閘道日誌或嘗試改寫請求。"
+    rate_limited:              "⏱️ 模型提供方正在限速。請稍候片刻後再試。"
+    failed_after_retries:      "⚠️ 模型提供方在重試後仍失敗。對話中已隱藏原始詳情；請查看閘道日誌進行診斷。"
+
   shared:
     session_db_unavailable:      "工作階段資料庫無法使用。"
     session_db_unavailable_prefix: "工作階段資料庫無法使用"

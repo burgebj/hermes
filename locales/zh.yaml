@@ -350,6 +350,12 @@ gateway:
     disabled:                   "⚠️ 本会话 YOLO 模式 **已关闭** — 危险命令将需要批准。"
     enabled:                    "⚡ 本会话 YOLO 模式 **已开启** — 所有命令自动批准。请谨慎使用。"
 
+  provider_errors:
+    auth_failed:               "⚠️ 模型提供商认证失败。请检查已配置的凭据；原始提供商详情见网关日志。"
+    policy_rejected:           "⚠️ 模型提供商拒绝了该请求。聊天中已隐藏原始错误；请查看网关日志或尝试改写请求。"
+    rate_limited:              "⏱️ 模型提供商正在限流。请稍等片刻后重试。"
+    failed_after_retries:      "⚠️ 模型提供商在重试后仍失败。聊天中已隐藏原始详情；请查看网关日志进行诊断。"
+
   shared:
     session_db_unavailable:      "会话数据库不可用。"
     session_db_unavailable_prefix: "会话数据库不可用"

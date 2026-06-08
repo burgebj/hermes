@@ -230,21 +230,12 @@ def _redact_gateway_user_facing_secrets(text: str) -> str:
 def _gateway_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a short user-safe Telegram reply."""
     if _GATEWAY_AUTH_ERROR_RE.search(text):
-        return (
-            "⚠️ Provider authentication failed. Check the configured credentials; "
-            "raw provider details are in the gateway logs."
-        )
+        return t("gateway.provider_errors.auth_failed")
     if _GATEWAY_PROVIDER_POLICY_RE.search(text):
-        return (
-            "⚠️ The model provider rejected the request. I kept the raw provider "
-            "error out of chat; check gateway logs for details or try rephrasing."
-        )
+        return t("gateway.provider_errors.policy_rejected")
     if _GATEWAY_RATE_LIMIT_RE.search(text):
-        return "⏱️ The model provider is rate-limiting requests. Please wait a moment and try again."
-    return (
-        "⚠️ The model provider failed after retries. I kept raw provider details "
-        "out of chat; check gateway logs for diagnostics."
-    )
+        return t("gateway.provider_errors.rate_limited")
+    return t("gateway.provider_errors.failed_after_retries")
 
 
 _GATEWAY_PROVIDER_ERROR_SHAPE_RE = re.compile(

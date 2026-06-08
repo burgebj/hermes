@@ -169,6 +169,35 @@ def test_t_unknown_language_uses_english():
     assert i18n.t("approval.denied", lang="klingon") == i18n.t("approval.denied", lang="en")
 
 
+def test_gateway_provider_error_replies_use_i18n_keys(monkeypatch):
+    """Gateway provider error categories must resolve through i18n keys.
+
+    This keeps Telegram-safe provider failures localizable without exercising
+    the full gateway runner or platform adapters.
+    """
+    from gateway import run as gateway_run
+
+    seen_keys = []
+
+    def fake_t(key: str, **kwargs):
+        seen_keys.append(key)
+        return f"translated:{key}"
+
+    monkeypatch.setattr(gateway_run, "t", fake_t)
+
+    cases = [
+        ("Provider authentication failed: invalid API key", "gateway.provider_errors.auth_failed"),
+        ("Request blocked by provider security policy", "gateway.provider_errors.policy_rejected"),
+        ("HTTP 429 rate limit exceeded", "gateway.provider_errors.rate_limited"),
+        ("API call failed after retries", "gateway.provider_errors.failed_after_retries"),
+    ]
+
+    for raw_error, expected_key in cases:
+        assert gateway_run._gateway_provider_error_reply(raw_error) == f"translated:{expected_key}"
+
+    assert seen_keys == [expected_key for _, expected_key in cases]
+
+
 # ---------------------------------------------------------------------------
 # _locales_dir resolution ladder -- regression for #23943 / #27632 / #35374.
 # Sealed installs (Nix store venv, pip wheel) have no source tree next to

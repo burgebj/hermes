@@ -350,6 +350,11 @@ gateway:
     disabled:                   "⚠️ YOLO mód **KI** ebben a munkamenetben — a veszélyes parancsok jóváhagyást igényelnek."
     enabled:                    "⚡ YOLO mód **BE** ebben a munkamenetben — minden parancs automatikusan jóváhagyva. Óvatosan használd."
 
+  provider_errors:
+    auth_failed:               "⚠️ Provider authentication failed. Check the configured credentials; raw provider details are in the gateway logs."
+    policy_rejected:           "⚠️ The model provider rejected the request. I kept the raw provider error out of chat; check gateway logs for details or try rephrasing."
+    rate_limited:              "⏱️ The model provider is rate-limiting requests. Please wait a moment and try again."
+    failed_after_retries:      "⚠️ The model provider failed after retries. I kept raw provider details out of chat; check gateway logs for diagnostics."
   shared:
     session_db_unavailable:      "A munkamenet-adatbázis nem érhető el."
     session_db_unavailable_prefix: "A munkamenet-adatbázis nem érhető el"

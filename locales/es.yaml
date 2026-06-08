@@ -350,6 +350,11 @@ gateway:
     disabled:                   "⚠️ Modo YOLO **DESACTIVADO** en esta sesión — los comandos peligrosos requerirán aprobación."
     enabled:                    "⚡ Modo YOLO **ACTIVADO** en esta sesión — todos los comandos se aprueban automáticamente. Úsalo con precaución."
 
+  provider_errors:
+    auth_failed:               "⚠️ Provider authentication failed. Check the configured credentials; raw provider details are in the gateway logs."
+    policy_rejected:           "⚠️ The model provider rejected the request. I kept the raw provider error out of chat; check gateway logs for details or try rephrasing."
+    rate_limited:              "⏱️ The model provider is rate-limiting requests. Please wait a moment and try again."
+    failed_after_retries:      "⚠️ The model provider failed after retries. I kept raw provider details out of chat; check gateway logs for diagnostics."
   shared:
     session_db_unavailable:      "Base de datos de sesiones no disponible."
     session_db_unavailable_prefix: "Base de datos de sesiones no disponible"
