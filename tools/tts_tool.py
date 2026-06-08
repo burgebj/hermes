@@ -9,6 +9,7 @@ Built-in TTS providers:
 - MiniMax TTS: High-quality with voice cloning, needs MINIMAX_API_KEY
 - Mistral (Voxtral TTS): Multilingual, native Opus, needs MISTRAL_API_KEY
 - Google Gemini TTS: Controllable, 30 prebuilt voices, needs GEMINI_API_KEY
+- Murf TTS: Gen2/Falcon models, needs MURF_API_KEY
 - xAI TTS: Grok voices, uses xAI Grok OAuth credentials or XAI_API_KEY
 - NeuTTS (local, free, no API key): On-device TTS via neutts
 - KittenTTS (local, free, no API key): On-device 25MB model
@@ -50,7 +51,7 @@ import threading
 import uuid
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from hermes_constants import display_hermes_home
 
@@ -138,6 +139,21 @@ def _import_mistral_client():
     from mistralai.client import Mistral
     return Mistral
 
+
+def _import_murf_sdk():
+    """Lazy import Murf SDK classes. Returns (Murf, MurfRegion)."""
+    try:
+        from tools.lazy_deps import ensure as _lazy_ensure
+        _lazy_ensure("tts.murf", prompt=False)
+    except ImportError:
+        pass
+    except Exception as e:
+        raise ImportError(str(e))
+    from murf import Murf
+    from murf.region import MurfRegion
+    return Murf, MurfRegion
+
+
 def _import_sounddevice():
     """Lazy import sounddevice. Returns the module or raises ImportError/OSError."""
     import sounddevice as sd
@@ -181,6 +197,8 @@ DEFAULT_MINIMAX_VOICE_ID = "English_expressive_narrator"
 DEFAULT_MINIMAX_BASE_URL = "https://api.minimax.io/v1/t2a_v2"
 DEFAULT_MISTRAL_TTS_MODEL = "voxtral-mini-tts-2603"
 DEFAULT_MISTRAL_TTS_VOICE_ID = "c69964a6-ab8b-4f8a-9465-ec0925096ec8"  # Paul - Neutral
+DEFAULT_MURF_MODEL = "GEN2"
+DEFAULT_MURF_VOICE_ID = "en-US-natalie"
 DEFAULT_XAI_VOICE_ID = "eve"
 DEFAULT_XAI_LANGUAGE = "en"
 DEFAULT_XAI_SAMPLE_RATE = 24000
@@ -215,6 +233,7 @@ PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
     "minimax": 10000,     # https://platform.minimax.io/docs/api-reference/speech-t2a-http (sync)
     "mistral": 4000,      # conservative; no published per-request cap
     "gemini": 5000,       # Gemini TTS caps at ~8k input tokens / ~655s audio
+    "murf": 5000,         # conservative default for Murf speech synthesis
     "elevenlabs": 10000,  # fallback when model-aware lookup can't resolve (multilingual_v2)
     "neutts": 2000,       # local model, quality falls off on long text
     "kittentts": 2000,    # local 25MB model
@@ -362,6 +381,7 @@ BUILTIN_TTS_PROVIDERS = frozenset({
     "xai",
     "mistral",
     "gemini",
+    "murf",
     "neutts",
     "kittentts",
     "piper",
@@ -1524,6 +1544,115 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
 
 
 # ===========================================================================
+# Provider: Murf TTS (Gen2 + Falcon)
+# ===========================================================================
+def _validate_murf_audio_url(audio_url: str) -> str:
+    """Validate Murf audio URL before fetching to reduce SSRF risk."""
+    candidate = str(audio_url).strip()
+    parsed = urlparse(candidate)
+    scheme = (parsed.scheme or "").lower()
+    if scheme != "https":
+        raise RuntimeError("Murf audio URL fetch blocked: only https URLs are allowed")
+    host = (parsed.hostname or "").lower()
+    if host != "murf.ai" and not host.endswith(".murf.ai"):
+        raise RuntimeError(f"Murf audio URL fetch blocked: untrusted host '{host}'")
+    return candidate
+
+
+def _generate_murf_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate audio using Murf TTS.
+
+    Uses the official Murf Python SDK:
+    - ``GEN2`` via ``client.text_to_speech.generate``
+    - ``FALCON`` via ``client.text_to_speech.stream``
+    """
+    import requests
+
+    api_key = (get_env_value("MURF_API_KEY") or "").strip()
+    if not api_key:
+        raise ValueError("MURF_API_KEY not set. Get one at https://murf.ai/api/docs")
+
+    murf_config = tts_config.get("murf", {}) if isinstance(tts_config, dict) else {}
+    Murf, MurfRegion = _import_murf_sdk()
+    model = str(murf_config.get("model", DEFAULT_MURF_MODEL)).strip().upper() or DEFAULT_MURF_MODEL
+    if model == "GEN_FALCON":
+        model = "FALCON"
+    voice_id = str(murf_config.get("voice_id", DEFAULT_MURF_VOICE_ID)).strip() or DEFAULT_MURF_VOICE_ID
+    region_name = str(murf_config.get("region") or get_env_value("MURF_REGION") or "default").strip().upper()
+    region = getattr(MurfRegion, region_name, MurfRegion.DEFAULT)
+    # Gen2 only supports DEFAULT region
+    if model != "FALCON" :
+        region = MurfRegion.DEFAULT
+    client = Murf(api_key=api_key, region=region)
+
+    ext = output_path.lower().rsplit('.', 1)[-1]
+    format_map = {
+        "mp3": "MP3",
+        "wav": "WAV",
+        "flac": "FLAC",
+        "alaw": "ALAW",
+        "ulaw": "ULAW",
+        "pcm": "PCM",
+        "ogg": "OGG",
+    }
+    output_format = format_map.get(ext, "MP3")
+   
+
+    # `speaking_rate` is the canonical config key; keep `rate` as a legacy alias.
+    speaking_rate = murf_config.get("speaking_rate", murf_config.get("rate"))
+    sample_rate = murf_config.get("sample_rate", murf_config.get("sampleRate"))
+
+    shared_kwargs: Dict[str, Any] = {
+        "text": text,
+        "voice_id": voice_id,
+        "format": output_format,
+    }
+    if murf_config.get("style") is not None:
+        shared_kwargs["style"] = murf_config.get("style")
+    if murf_config.get("pitch") is not None:
+        shared_kwargs["pitch"] = murf_config.get("pitch")
+    if speaking_rate is not None:
+        # murf sdk expects functional argument rate not as speaking rate
+        shared_kwargs["rate"] = speaking_rate
+    if sample_rate is not None:
+        shared_kwargs["sample_rate"] = sample_rate
+
+    if model == "FALCON":
+        stream_iter = client.text_to_speech.stream(
+            model="FALCON",
+            **shared_kwargs,
+        )
+        with open(output_path, "wb") as f:
+            for chunk in stream_iter:
+                if chunk:
+                    f.write(chunk)
+        return output_path
+
+    # Prefer base64 payload so we can avoid an extra manual HTTP call.
+    response = client.text_to_speech.generate(
+        model_version="GEN2",
+        encode_as_base_64=True,
+        **shared_kwargs,
+    )
+    encoded_audio = getattr(response, "encoded_audio", None)
+    if isinstance(encoded_audio, str) and encoded_audio.strip():
+        audio_bytes = base64.b64decode(encoded_audio)
+        with open(output_path, "wb") as f:
+            f.write(audio_bytes)
+        return output_path
+
+    audio_url = getattr(response, "audio_file", None)
+    if not isinstance(audio_url, str) or not audio_url.strip():
+        raise RuntimeError("Murf TTS response contained no audio output")
+    url_response = requests.get(_validate_murf_audio_url(audio_url), timeout=60)
+    url_response.raise_for_status()
+    audio_bytes = url_response.content
+    with open(output_path, "wb") as f:
+        f.write(audio_bytes)
+    return output_path
+
+
+# ===========================================================================
 # NeuTTS (local, on-device TTS via neutts_cli)
 # ===========================================================================
 
@@ -2003,6 +2132,17 @@ def text_to_speech_tool(
             logger.info("Generating speech with Google Gemini TTS...")
             _generate_gemini_tts(text, file_str, tts_config)
 
+        elif provider == "murf":
+            try:
+                _import_murf_sdk()
+            except ImportError:
+                return json.dumps({
+                    "success": False,
+                    "error": 'Murf provider selected but "murf" package not installed. Run: pip install murf or pip install "hermes-agent[tts-premium]"'
+                }, ensure_ascii=False)
+            logger.info("Generating speech with Murf TTS...")
+            _generate_murf_tts(text, file_str, tts_config)
+
         elif provider == "neutts":
             if not _check_neutts_available():
                 return json.dumps({
@@ -2104,7 +2244,7 @@ def text_to_speech_tool(
                 voice_compatible = file_str.endswith(".ogg")
         elif (
             want_opus
-            and provider in {"edge", "neutts", "minimax", "xai", "kittentts", "piper"}
+            and provider in {"edge", "neutts", "minimax", "xai", "kittentts", "piper", "murf"}
             and not file_str.endswith(".ogg")
         ):
             opus_path = _convert_to_opus(file_str)
@@ -2172,6 +2312,12 @@ def check_tts_requirements() -> bool:
     try:
         _import_elevenlabs()
         if get_env_value("ELEVENLABS_API_KEY"):
+            return True
+    except ImportError:
+        pass
+    try:
+        _import_murf_sdk()
+        if get_env_value("MURF_API_KEY"):
             return True
     except ImportError:
         pass
@@ -2506,6 +2652,13 @@ if __name__ == "__main__":
         f"{'set' if resolve_openai_audio_api_key() else 'not set (VOICE_TOOLS_OPENAI_KEY or OPENAI_API_KEY)'}"
     )
     print(f"  MiniMax:    {'API key set' if get_env_value('MINIMAX_API_KEY') else 'not set (MINIMAX_API_KEY)'}")
+    murf_sdk_status = (
+        "installed"
+        if _check(_import_murf_sdk, "murf")
+        else "not installed (pip install 'hermes-agent[tts-premium]')"
+    )
+    print(f"  Murf SDK:   {murf_sdk_status}")
+    print(f"    API Key:  {'set' if get_env_value('MURF_API_KEY') else 'not set (MURF_API_KEY)'}")
     print(f"  Piper:      {'installed' if _check_piper_available() else 'not installed (pip install piper-tts)'}")
     print(f"  ffmpeg:     {'✅ found' if _has_ffmpeg() else '❌ not found (needed for Telegram Opus)'}")
     print(f"\n  Output dir: {DEFAULT_OUTPUT_DIR}")

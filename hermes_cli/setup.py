@@ -25,7 +25,6 @@ from hermes_cli.nous_subscription import get_nous_subscription_features
 from tools.tool_backend_helpers import managed_nous_tools_enabled
 from utils import base_url_hostname
 from hermes_constants import get_optional_skills_dir
-
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
@@ -296,6 +295,42 @@ def prompt_yes_no(question: str, default: bool = True) -> bool:
         print_error("Please enter 'y' or 'n'")
 
 
+def _murf_voice_field(voice: Any, field: str, default: Any = "") -> Any:
+    """Best-effort field access for Murf SDK voice objects."""
+    if isinstance(voice, dict):
+        return voice.get(field, default)
+    return getattr(voice, field, default)
+
+
+def _murf_voice_choices(voices: list[Any]) -> tuple[list[str], list[str]]:
+    """Build display labels for Murf voices and parallel voice_id values."""
+    labels: list[str] = []
+    voice_ids: list[str] = []
+    for voice in voices:
+        voice_id = str(_murf_voice_field(voice, "voice_id", "")).strip()
+        if not voice_id:
+            continue
+        display_name = str(_murf_voice_field(voice, "display_name", "")).strip() or voice_id
+        locale = str(_murf_voice_field(voice, "locale", "")).strip()
+        label = f"{display_name} [{voice_id}]"
+        if locale:
+            label = f"{display_name} ({locale}) [{voice_id}]"
+        labels.append(label)
+        voice_ids.append(voice_id)
+    return labels, voice_ids
+
+
+def _murf_voice_styles(voice: Any) -> list[str]:
+    """Return de-duplicated styles for a Murf voice."""
+    raw_styles = _murf_voice_field(voice, "available_styles", []) or []
+    styles: list[str] = []
+    for style in raw_styles:
+        value = str(style).strip()
+        if value and value not in styles:
+            styles.append(value)
+    return styles
+
+
 def prompt_checklist(title: str, items: list, pre_selected: list = None) -> list:
     """
     Display a multi-select checklist and return the indices of selected items.
@@ -492,6 +527,8 @@ def _print_setup_summary(config: dict, hermes_home):
         tool_status.append(("Text-to-Speech (Mistral Voxtral)", True, None))
     elif tts_provider == "gemini" and (get_env_value("GEMINI_API_KEY") or get_env_value("GOOGLE_API_KEY")):
         tool_status.append(("Text-to-Speech (Google Gemini)", True, None))
+    elif tts_provider == "murf" and get_env_value("MURF_API_KEY"):
+        tool_status.append(("Text-to-Speech (Murf)", True, None))
     elif tts_provider == "neutts":
         try:
             neutts_ok = importlib.util.find_spec("neutts") is not None
@@ -899,6 +936,7 @@ def _setup_tts_provider(config: dict):
         "minimax": "MiniMax TTS",
         "mistral": "Mistral Voxtral TTS",
         "gemini": "Google Gemini TTS",
+        "murf": "Murf TTS",
         "neutts": "NeuTTS",
         "kittentts": "KittenTTS",
     }
@@ -923,11 +961,12 @@ def _setup_tts_provider(config: dict):
             "MiniMax TTS (high quality with voice cloning, needs API key)",
             "Mistral Voxtral TTS (multilingual, native Opus, needs API key)",
             "Google Gemini TTS (30 prebuilt voices, prompt-controllable, needs API key)",
+            "Murf TTS (Gen2/Falcon models, rich voice styles, needs API key)",
             "NeuTTS (local on-device, free, ~300MB model download)",
             "KittenTTS (local on-device, free, lightweight ~25-80MB ONNX)",
         ]
     )
-    providers.extend(["edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "neutts", "kittentts"])
+    providers.extend(["edge", "elevenlabs", "openai", "xai", "minimax", "mistral", "gemini", "murf", "neutts", "kittentts"])
     choices.append(f"Keep current ({current_label})")
     keep_current_idx = len(choices) - 1
     idx = prompt_choice("Select TTS provider:", choices, keep_current_idx)
@@ -1090,6 +1129,139 @@ def _setup_tts_provider(config: dict):
             else:
                 print_warning("No API key provided. Falling back to Edge TTS.")
                 selected = "edge"
+
+    elif selected == "murf":
+        from tools import tts_tool
+        # Check if Murf SDK is installed
+        try:
+            tts_tool._import_murf_sdk()
+        except ImportError:
+            print_warning("Murf SDK is not installed. Please install it through pip install hermes-agent[tts-premium].")
+            return
+        existing = get_env_value("MURF_API_KEY")
+        if not existing:
+            print()
+            print_info("Get your Murf API key at https://murf.ai/api/docs")
+            api_key = prompt("Murf API key for TTS", password=True)
+            if api_key:
+                save_env_value("MURF_API_KEY", api_key)
+                print_success("Murf TTS API key saved")
+                existing = api_key
+            else:
+                print_warning("No API key provided. Falling back to Edge TTS.")
+                selected = "edge"
+        if selected == "murf":
+            Murf , MurfRegion = tts_tool._import_murf_sdk()
+            murf_client = Murf(api_key=existing)
+            print()
+            print_info("Murf voice docs:")
+            print_info("  • Voice Library: https://murf.ai/api/docs/voices-styles/voice-library")
+            print_info("  • Voices & Styles Overview: https://murf.ai/api/docs/voices-styles/overview")
+            murf_cfg = config.setdefault("tts", {}).setdefault("murf", {})
+            current_model = str(murf_cfg.get("model", "GEN2")).strip().upper() or "GEN2"
+            if current_model == "GEN_FALCON":
+                current_model = "FALCON"
+            model_choices = [
+                "GEN2 (studio quality, richer controls)",
+                "FALCON (ultra-low latency streaming)",
+            ]
+            model_default = 1 if current_model == "FALCON" else 0
+            model_idx = prompt_choice("Select Murf model:", model_choices, model_default)
+            murf_cfg["model"] = "FALCON" if model_idx == 1 else "GEN2"
+            print_success(f"Murf model set to: {murf_cfg['model']}")
+
+            default_voice = str(murf_cfg.get("voice_id", "en-US-natalie")).strip() or "en-US-natalie"
+            default_style = str(murf_cfg.get("style", "Conversational")).strip() or "Conversational"
+            selected_voice = None
+            try:
+                voices = murf_client.text_to_speech.get_voices(model=murf_cfg["model"]) or []
+            except Exception as exc:
+                voices = []
+                print_warning(f"Unable to fetch Murf voices automatically: {exc}")
+
+            voice_labels, voice_ids = _murf_voice_choices(voices)
+            if voice_labels:
+                try:
+                    voice_default_idx = voice_ids.index(default_voice)
+                except ValueError:
+                    voice_default_idx = 0
+                voice_idx = prompt_choice("Select Murf voice:", voice_labels, voice_default_idx)
+                murf_cfg["voice_id"] = voice_ids[voice_idx]
+                selected_voice = next(
+                    (
+                        voice
+                        for voice in voices
+                        if str(_murf_voice_field(voice, "voice_id", "")).strip() == murf_cfg["voice_id"]
+                    ),
+                    None,
+                )
+            else:
+                voice_id = prompt("Murf voice_id", default=default_voice)
+                murf_cfg["voice_id"] = voice_id
+
+            style_choices = _murf_voice_styles(selected_voice)
+            if style_choices:
+                try:
+                    style_default_idx = style_choices.index(default_style)
+                except ValueError:
+                    style_default_idx = 0
+                style_idx = prompt_choice("Select Murf style:", style_choices, style_default_idx)
+                murf_cfg["style"] = style_choices[style_idx]
+            else:
+                style = prompt("Murf style", default=default_style)
+                murf_cfg["style"] = style
+
+            default_rate = str(murf_cfg.get("speaking_rate", murf_cfg.get("rate", 0))).strip()
+            try:
+                default_rate_int = int(default_rate)
+            except Exception:
+                default_rate_int = 0
+            default_rate_int = max(-50, min(50, default_rate_int))
+            speaking_rate = prompt("Murf Speaking Rate (-50 to 50)", default=str(default_rate_int))
+            try:
+                speaking_rate_int = int(speaking_rate)
+            except Exception:
+                speaking_rate_int = 0
+            speaking_rate_int = max(-50, min(50, speaking_rate_int))
+            murf_cfg["speaking_rate"] = speaking_rate_int
+            murf_cfg.pop("rate", None)
+
+            default_pitch = str(murf_cfg.get("pitch", 0)).strip()
+            try:
+                default_pitch_int = int(default_pitch)
+            except Exception:
+                default_pitch_int = 0
+            default_pitch_int = max(-50, min(50, default_pitch_int))
+            pitch = prompt("Murf pitch (-50 to 50)", default=str(default_pitch_int))
+            try:
+                pitch_int = int(pitch)
+            except Exception:
+                pitch_int = 0
+            pitch_int = max(-50, min(50, pitch_int))
+            murf_cfg["pitch"] = pitch_int
+
+            # Multi-region support works only for Falcon model
+            if murf_cfg["model"] == "FALCON":
+                default_region = str(murf_cfg.get("region", "DEFAULT")).strip() or "DEFAULT"
+                region_keys = [region.name for region in MurfRegion]
+                region_labels = {
+                    "DEFAULT": "DEFAULT (SDK default routing)",
+                    "GLOBAL": "GLOBAL (nearest Murf region)",
+                }
+                for key in region_keys:
+                    region_labels.setdefault(key, key)
+                try:
+                    region_default = region_keys.index(default_region.upper())
+                except ValueError:
+                    region_default = 0
+                region_idx = prompt_choice(
+                    "Select Murf region:",
+                    [region_labels[k] for k in region_keys],
+                    region_default,
+                )
+                murf_cfg["region"] = region_keys[region_idx]
+                print_success(f"Murf region set to: {murf_cfg['region']}")
+
 
     elif selected == "kittentts":
         # Check if already installed
