@@ -156,6 +156,32 @@ class TestStripBlockedTools(unittest.TestCase):
         result = _strip_blocked_tools([])
         self.assertEqual(result, [])
 
+    def test_strips_messaging_so_leaf_loses_send_message(self):
+        # send_message lives in the 'messaging' toolset, which every gateway/CLI
+        # session enables. Leaving it in let a leaf child DM/post to arbitrary
+        # chats — the cross-platform side effect the isolation invariant forbids.
+        result = _strip_blocked_tools(["terminal", "file", "messaging", "web"])
+        self.assertNotIn("messaging", result)
+        self.assertEqual(sorted(result), ["file", "terminal", "web"])
+
+    def test_every_blocked_tool_has_its_toolset_stripped(self):
+        # _strip_blocked_tools is the only runtime enforcement of
+        # DELEGATE_BLOCKED_TOOLS, so each blocked tool's canonical toolset must
+        # be removed. Guards against the two lists drifting apart again.
+        import model_tools
+
+        for tool in DELEGATE_BLOCKED_TOOLS:
+            toolset = model_tools.get_toolset_for_tool(tool)
+            if toolset is None:
+                continue  # tool module unavailable in this env — skip mapping
+            stripped = _strip_blocked_tools([toolset, "terminal"])
+            self.assertNotIn(
+                toolset,
+                stripped,
+                f"blocked tool {tool!r} maps to toolset {toolset!r}, "
+                f"which _strip_blocked_tools must remove",
+            )
+
 
 class TestDelegateTask(unittest.TestCase):
     def test_no_parent_agent(self):

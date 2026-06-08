@@ -704,12 +704,30 @@ def _resolve_workspace_hint(parent_agent) -> Optional[str]:
 
 
 def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
-    """Remove toolsets that contain only blocked tools."""
+    """Remove toolsets whose tools are blocked for child agents.
+
+    This is the ONLY runtime enforcement of DELEGATE_BLOCKED_TOOLS — that
+    frozenset is otherwise used just to build the capability-hint string. Each
+    name here is the canonical toolset (``model_tools.get_toolset_for_tool``)
+    that carries one of the blocked tools, so the two lists must stay in sync:
+
+      delegate_task -> delegation, clarify -> clarify, memory -> memory,
+      execute_code  -> code_execution, send_message -> messaging
+
+    ``messaging`` was missing, so a leaf child inherited ``send_message`` and
+    could post/DM arbitrary chats — the exact cross-platform side effect the
+    leaf isolation invariant forbids. Every gateway/CLI session enables the
+    ``messaging`` toolset, so this leaked on normal delegate_task use. The list
+    is kept static rather than derived from DELEGATE_BLOCKED_TOOLS on purpose:
+    a derived lookup fails open when a tool's module can't import (returns
+    None), and this is a security control that must fail closed.
+    """
     blocked_toolset_names = {
         "delegation",
         "clarify",
         "memory",
         "code_execution",
+        "messaging",
     }
     return [t for t in toolsets if t not in blocked_toolset_names]
 
