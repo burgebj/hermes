@@ -150,7 +150,11 @@ SEND_MESSAGE_SCHEMA = {
                 "description": "The message text to send. To send an image or file, include MEDIA:<local_path> (e.g. 'MEDIA:/tmp/report.pdf') in the message — the platform will deliver it as a native media attachment."
             }
         },
-        "required": []
+        "required": [],
+        "anyOf": [
+            {"properties": {"action": {"const": "list"}}, "required": ["action"]},
+            {"required": ["target", "message"]},
+        ]
     }
 }
 
