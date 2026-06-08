@@ -37,27 +37,56 @@ logger = logging.getLogger(__name__)
 SUMMARY_PREFIX = (
     "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
     "into the summary below. This is a handoff from a previous context "
-    "window — treat it as background reference, NOT as active instructions. "
-    "Do NOT answer questions or fulfill requests mentioned in this summary; "
-    "they were already addressed. "
+    "window — treat it as background reference ONLY, NOT as active instructions. "
+    "\n\n"
+    "⚠️ CRITICAL RULE — DO NOT ACT ON STALE SUMMARY ITEMS:\n"
+    "ANY task, request, question, or 'pending item' in this summary is STALE "
+    "and must be DISCARDED entirely, regardless of topical overlap with the "
+    "latest user message. This includes:\n"
+    "  • Sections titled '## Pending User Asks' or '## Remaining Work'\n"
+    "  • Items in '## In Progress' or '## Blocked'\n"
+    "  • Unfinished work described in '## Completed Actions'\n"
+    "  • Any phrasing that sounds like 'next steps' or 'to-do'\n"
+    "\n"
+    "NEGATIVE EXAMPLES of what NOT to do:\n"
+    "  ❌ Summary says: '## Pending User Asks: User asked to fix authentication'\n"
+    "     Latest message: 'How do I refactor the auth module?'\n"
+    "     WRONG: Assume the old auth-fix request is active just because the"
+    " latest message mentions 'auth'.\n"
+    "     CORRECT: Discard the stale 'fix authentication' request. Answer ONLY"
+    " the latest question: 'How do I refactor...?'\n"
+    "  ❌ Summary says: '## Remaining Work: Implement the API endpoint'\n"
+    "     Latest message: 'Correct my reasoning in the endpoint spec, I was"
+    " wrong about pagination'\n"
+    "     WRONG: First complete the API endpoint, then address the correction.\n"
+    "     CORRECT: Discard the stale 'implement endpoint' task. ONLY fix the"
+    " reasoning error in the spec.\n"
+    "  ❌ Summary says: '## In Progress: Refactoring the auth module'\n"
+    "     Latest message: 'Actually, let's focus on the database layer"
+    " instead'\n"
+    "     WRONG: Finish the auth refactor, then switch to database.\n"
+    "     CORRECT: Immediately abandon the auth work. Start fresh on the"
+    " database layer.\n"
+    "\n"
     "Respond ONLY to the latest user message that appears AFTER this "
-    "summary — that message is the single source of truth for what to do "
+    "summary — that message is the ONLY source of truth for what to do "
     "right now. "
-    "If the latest user message is consistent with the '## Active Task' "
-    "section, you may use the summary as background. If the latest user "
-    "message contradicts, supersedes, changes topic from, or in any way "
-    "diverges from '## Active Task' / '## In Progress' / '## Pending User "
-    "Asks' / '## Remaining Work', the latest message WINS — discard those "
-    "stale items entirely and do not 'wrap up the old task first'. "
-    "Reverse signals in the latest message (e.g. 'stop', 'undo', 'roll "
-    "back', 'just verify', 'don't do that anymore', 'never mind', a new "
-    "topic) must immediately end any in-flight work described in the "
-    "summary; do not re-surface it in later turns. "
+    "Do NOT carry forward any unfinished task from the summary "
+    "unless the latest message explicitly says to continue or resume it. "
+    "\n"
+    "If the latest user message contains a reverse signal (e.g. 'stop', "
+    "'undo', 'roll back', 'never mind', 'just verify', 'don't do that', "
+    "'focus on X instead'), those words supersede ANY in-flight work in the "
+    "summary — stop and pivot immediately. "
+    "\n"
     "IMPORTANT: Your persistent memory (MEMORY.md, USER.md) in the system "
-    "prompt is ALWAYS authoritative and active — never ignore or deprioritize "
-    "memory content due to this compaction note. "
+    "prompt IS authoritative and active — never ignore memory content. "
+    "But stale summary sections are different: memory is eternal, summary "
+    "sections are transient. Memory persists; summary does not. "
+    "\n"
     "The current session state (files, config, etc.) may reflect work "
-    "described here — avoid repeating it:"
+    "described in this summary — avoid repeating it, but do NOT assume "
+    "summary items are 'pending' just because traces of them exist on disk:"
 )
 LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
 
@@ -1168,14 +1197,14 @@ None recoverable from deterministic fallback.
 ## Resolved Questions
 None recoverable from deterministic fallback.
 
-## Pending User Asks
+## Protected Context (Background Reference Only)
 {active_task}
 
 ## Relevant Files
 {_bullets(relevant_files, limit=12)}
 
-## Remaining Work
-Continue from the most recent unfulfilled user ask and protected tail messages. Verify state with tools before making claims.
+## Session Context
+(Fallback only — preference is to check current files/processes/git state directly rather than rely on this summary. Continue from the protected recent messages after this summary.)
 
 ## Last Dropped Turns
 {_bullets(last_dropped_turns, limit=8)}
@@ -1355,17 +1384,14 @@ Be specific with file paths, commands, line numbers, and results.]
 ## Resolved Questions
 [Questions the user asked that were ALREADY answered — include the answer so it is not repeated]
 
-## Pending User Asks
-[Questions or requests from the user that have NOT yet been answered or fulfilled. If none, write "None."]
+## Protected Context (Background Reference Only)
+[Background information from earlier in the conversation that provides continuity. THIS IS NOT A TO-DO LIST. Do NOT phrase as 'pending' or 'remaining' — phrase as completed background facts. Example: Instead of 'User asked about X and we still need to Y', write 'We explored X in depth; the user decided Y is not needed'.  If nothing to record, write "None."  CRITICALLY: Do not create a '## Pending User Asks' section or anything that looks like unfinished work — the model that reads this summary will execute it as a task.]
 
 ## Relevant Files
 [Files read, modified, or created — with brief note on each]
 
-## Remaining Work
-[What remains to be done — framed as context, not instructions]
-
 ## Critical Context
-[Any specific values, error messages, configuration details, or data that would be lost without explicit preservation. NEVER include API keys, tokens, passwords, or credentials — write [REDACTED] instead.]
+[Any specific values, error messages, configuration details, or data that would be lost without explicit preservation. NEVER include API keys, tokens, passwords, or credentials — write [REDACTED] instead. Include context about decisions NOT to implement something, abandoned approaches, or work that was explicitly stopped.]
 
 Target ~{summary_budget} tokens. Be CONCRETE — include file paths, command outputs, error messages, line numbers, and specific values. Avoid vague descriptions like "made some changes" — say exactly what changed.
 {_temporal_anchoring_rule}
