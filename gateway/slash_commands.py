@@ -360,6 +360,7 @@ class GatewaySlashCommandsMixin:
                                     thread_id=thread_id or None,
                                     user_id=user_id,
                                     notifier_profile=getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
+                                    trigger_agent=True,
                                 )
                             finally:
                                 conn.close()

@@ -148,6 +148,10 @@ SEND_MESSAGE_SCHEMA = {
             "message": {
                 "type": "string",
                 "description": "The message text to send. To send an image or file, include MEDIA:<local_path> (e.g. 'MEDIA:/tmp/report.pdf') in the message — the platform will deliver it as a native media attachment."
+            },
+            "trigger_agent": {
+                "type": "boolean",
+                "description": "Opt-in active handoff. When true, a successful platform send also schedules an internal inbound event for the live destination gateway agent. Defaults false for passive notifications and loop prevention."
             }
         },
         "required": []
@@ -178,6 +182,7 @@ def _handle_send(args):
     """Send a message to a platform target."""
     target = args.get("target", "")
     message = args.get("message", "")
+    trigger_agent = bool(args.get("trigger_agent", False))
     if not target or not message:
         return tool_error("Both 'target' and 'message' are required when action='send'")
 
@@ -325,30 +330,151 @@ def _handle_send(args):
         if used_home_channel and isinstance(result, dict) and result.get("success"):
             result["note"] = f"Sent to {platform_name} home channel (chat_id: {chat_id})"
 
-        # Mirror the sent message into the target's gateway session
+        # Mirror passive sends into the target's gateway session. Active
+        # handoffs use a synthetic inbound event instead; mirroring those too
+        # would record duplicate context without waking anything extra.
         if isinstance(result, dict) and result.get("success") and mirror_text:
-            try:
-                from gateway.mirror import mirror_to_session
-                from gateway.session_context import get_session_env
-                source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
-                user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
-                if mirror_to_session(
-                    platform_name,
-                    chat_id,
-                    mirror_text,
-                    source_label=source_label,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                ):
-                    result["mirrored"] = True
-            except Exception:
-                pass
+            if trigger_agent:
+                try:
+                    trigger_result = _run_async(
+                        _trigger_gateway_agent(
+                            platform_name,
+                            chat_id,
+                            mirror_text,
+                            thread_id=thread_id,
+                        )
+                    )
+                    result.update(trigger_result)
+                except Exception as exc:
+                    result["trigger_error"] = _sanitize_error_text(str(exc))
+            else:
+                try:
+                    from gateway.mirror import mirror_to_session
+                    from gateway.session_context import get_session_env
+                    source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
+                    user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
+                    if mirror_to_session(
+                        platform_name,
+                        chat_id,
+                        mirror_text,
+                        source_label=source_label,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    ):
+                        result["mirrored"] = True
+                except Exception:
+                    pass
 
         if isinstance(result, dict) and "error" in result:
             result["error"] = _sanitize_error_text(result["error"])
         return json.dumps(result)
     except Exception as e:
         return json.dumps(_error(f"Send failed: {e}"))
+
+
+async def _trigger_gateway_agent(platform_name: str, chat_id: str, text: str, *, thread_id: str | None = None) -> dict:
+    """Schedule a synthetic inbound event for a live gateway destination.
+
+    This is intentionally explicit and opt-in: passive cross-channel sends must
+    not process bot/self-authored platform messages globally, because that would
+    create self-loop risk. ``trigger_agent=True`` callers get either
+    ``triggered_agent`` when the event is queued or ``trigger_error`` explaining
+    why active wake was not available in this process.
+    """
+    if not chat_id:
+        return {"trigger_error": "missing destination chat_id"}
+    if not text:
+        return {"trigger_error": "missing trigger text"}
+
+    try:
+        from gateway.config import Platform
+        from gateway.platforms.base import MessageEvent, MessageType
+        from gateway.session import SessionSource
+        from gateway.run import _gateway_runner_ref
+    except Exception as exc:
+        return {"trigger_error": _sanitize_error_text(f"gateway imports unavailable: {exc}")}
+
+    runner = _gateway_runner_ref()
+    if runner is None:
+        return {"trigger_error": "no live gateway runner in this process"}
+
+    try:
+        platform = Platform(platform_name)
+    except Exception as exc:
+        return {"trigger_error": _sanitize_error_text(f"unknown platform for trigger: {exc}")}
+
+    adapter = getattr(runner, "adapters", {}).get(platform)
+    if adapter is None:
+        return {"trigger_error": f"no live adapter for {platform_name}"}
+
+    loop = getattr(runner, "_gateway_loop", None) or getattr(runner, "_loop", None)
+    if loop is None or not getattr(loop, "is_running", lambda: False)():
+        return {"trigger_error": "no live gateway event loop"}
+
+    chat_name = None
+    chat_type = "group"
+    guild_id = None
+    parent_chat_id = None
+    chat_topic = None
+    auto_skill = None
+    channel_prompt = None
+    if platform_name == "discord":
+        try:
+            client = getattr(adapter, "_client", None) or getattr(adapter, "client", None)
+            channel = client.get_channel(int(chat_id)) if client and str(chat_id).isdigit() else None
+            if channel is not None:
+                chat_name = getattr(channel, "name", None)
+                parent = getattr(channel, "parent_id", None)
+                parent_chat_id = str(parent) if parent is not None else None
+                topic = getattr(channel, "topic", None)
+                chat_topic = str(topic) if topic else None
+                guild = getattr(channel, "guild", None)
+                gid = getattr(guild, "id", None)
+                guild_id = str(gid) if gid is not None else None
+                if getattr(channel, "type", None) is not None:
+                    chat_type = "thread" if parent_chat_id and thread_id else "channel"
+            if hasattr(adapter, "_resolve_channel_skills"):
+                auto_skill = adapter._resolve_channel_skills(str(chat_id), parent_chat_id)
+            if hasattr(adapter, "_resolve_channel_prompt"):
+                channel_prompt = adapter._resolve_channel_prompt(str(chat_id), parent_chat_id)
+        except Exception:
+            logger.debug("Discord trigger metadata resolution failed", exc_info=True)
+
+    source = SessionSource(
+        platform=platform,
+        chat_id=str(chat_id),
+        chat_name=chat_name,
+        chat_type=chat_type,
+        user_id="hermes-internal-trigger",
+        user_name="Hermes internal handoff",
+        thread_id=thread_id,
+        chat_topic=chat_topic,
+        is_bot=False,
+        guild_id=guild_id,
+        parent_chat_id=parent_chat_id,
+    )
+    event = MessageEvent(
+        text=text,
+        message_type=MessageType.TEXT,
+        source=source,
+        internal=True,
+        auto_skill=auto_skill,
+        channel_prompt=channel_prompt,
+    )
+
+    async def _run_handle_message():
+        await adapter.handle_message(event)
+
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop is loop:
+        loop.create_task(_run_handle_message())
+    else:
+        loop.call_soon_threadsafe(lambda: loop.create_task(_run_handle_message()))
+    return {"triggered_agent": True}
 
 
 def _parse_target_ref(platform_name: str, target_ref: str):

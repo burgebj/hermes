@@ -307,6 +307,31 @@ class GatewayKanbanWatchersMixin:
                                 "kanban notifier: delivered %s event for %s to %s/%s on board %s",
                                 kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
                             )
+                            if sub.get("trigger_agent"):
+                                try:
+                                    from tools.send_message_tool import _trigger_gateway_agent
+                                    trigger_result = await _trigger_gateway_agent(
+                                        platform_str,
+                                        sub["chat_id"],
+                                        msg,
+                                        thread_id=sub.get("thread_id") or None,
+                                    )
+                                    if trigger_result.get("triggered_agent"):
+                                        logger.debug(
+                                            "kanban notifier: active wake scheduled for %s to %s/%s",
+                                            sub["task_id"], platform_str, sub["chat_id"],
+                                        )
+                                    else:
+                                        logger.warning(
+                                            "kanban notifier: active wake failed for %s to %s/%s: %s",
+                                            sub["task_id"], platform_str, sub["chat_id"],
+                                            trigger_result.get("trigger_error", "unknown trigger failure"),
+                                        )
+                                except Exception as trigger_exc:
+                                    logger.warning(
+                                        "kanban notifier: active wake exception for %s to %s/%s: %s",
+                                        sub["task_id"], platform_str, sub["chat_id"], trigger_exc,
+                                    )
                             # After delivering the text notification, surface
                             # any artifact paths the worker referenced in
                             # ``kanban_complete(summary=..., artifacts=[...])``
