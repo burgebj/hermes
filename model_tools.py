@@ -329,6 +329,8 @@ def get_tool_definitions(
         # agent inits and providers that enforce unique tool names
         # (DeepSeek, Xiaomi MiMo, Moonshot Kimi) reject the request with
         # HTTP 400. Mirrors the cache-hit path above. (issue #17335)
+        if len(_tool_defs_cache) >= 8:
+            _tool_defs_cache.pop(next(iter(_tool_defs_cache)))  # evict oldest
         _tool_defs_cache[cache_key] = result
         return list(result)
     return result

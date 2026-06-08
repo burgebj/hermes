@@ -12390,7 +12390,56 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         _lock = getattr(self, "_agent_cache_lock", None)
         if _lock:
             with _lock:
-                self._agent_cache.pop(session_key, None)
+                entry = self._agent_cache.pop(session_key, None)
+            # Release clients on a daemon thread, same as _enforce_agent_cache_cap.
+            if entry is not None:
+                agent = entry[0] if isinstance(entry, tuple) and entry else None
+                if agent is not None:
+                    threading.Thread(
+                        target=self._release_evicted_agent_soft,
+                        args=(agent,),
+                        daemon=True,
+                        name=f"agent-cache-cmd-evict-{session_key[:24]}",
+                    ).start()
+
+    def _prune_stale_session_dicts(self, evicted_keys: set, *, lock_held: bool = False) -> None:
+        """Drop per-session dict entries for keys no longer in the agent cache.
+
+        Per-session override/approval dicts grow one entry per session and are
+        never cleaned when the backing agent leaves _agent_cache, so over long
+        uptimes they accumulate unboundedly (issue #18438).  Called from every
+        eviction path (idle sweep AND cap enforcement) so no path leaks.
+
+        We re-check live cache membership before pruning: a key that was
+        evicted but immediately re-inserted by a new turn must keep its
+        overrides.  ``lock_held=True`` MUST be passed by callers that already
+        hold ``_agent_cache_lock`` (e.g. _enforce_agent_cache_cap) — the lock
+        is a plain ``threading.Lock`` (non-reentrant), so re-acquiring it here
+        would deadlock.
+        """
+        if not evicted_keys:
+            return
+        _lock = getattr(self, "_agent_cache_lock", None)
+        _cache = getattr(self, "_agent_cache", None)
+        if _cache is None:
+            live_keys = set()
+        elif lock_held or _lock is None:
+            live_keys = set(_cache.keys())
+        else:
+            with _lock:
+                live_keys = set(_cache.keys())
+        stale_keys = evicted_keys - live_keys
+        if not stale_keys:
+            return
+        for d in (
+            getattr(self, "_session_model_overrides", None),
+            getattr(self, "_session_reasoning_overrides", None),
+            getattr(self, "_pending_approvals", None),
+            getattr(self, "_update_prompt_pending", None),
+        ):
+            if d is not None:
+                for sk in stale_keys:
+                    d.pop(sk, None)
 
     @staticmethod
     def _init_cached_agent_for_turn(agent: Any, interrupt_depth: int) -> None:
@@ -12432,6 +12481,10 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 self._cleanup_agent_resources(agent)
         except Exception:
             pass
+        # Free conversation history memory — can be tens of MB with tool
+        # outputs (file reads, terminal output, search results).
+        if hasattr(agent, '_session_messages'):
+            agent._session_messages = []
 
     def _enforce_agent_cache_cap(self) -> None:
         """Evict oldest cached agents when cache exceeds _AGENT_CACHE_MAX_SIZE.
@@ -12508,6 +12561,15 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     daemon=True,
                     name=f"agent-cache-evict-{key[:24]}",
                 ).start()
+        # Prune stale per-session dict entries for evicted keys (issue #18438).
+        # Sibling of the idle-sweep pruning — cap enforcement evicts agents too,
+        # so the same override/approval dicts would otherwise leak here.
+        # lock_held=True: this method runs with _agent_cache_lock already held
+        # (see docstring), and the lock is non-reentrant.
+        if evict_plan:
+            self._prune_stale_session_dicts(
+                {key for key, _ in evict_plan}, lock_held=True
+            )
 
     def _sweep_idle_cached_agents(self) -> int:
         """Evict cached agents whose AIAgent has been idle > _AGENT_CACHE_IDLE_TTL_SECS.
@@ -12556,6 +12618,9 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 daemon=True,
                 name=f"agent-cache-idle-{key[:24]}",
             ).start()
+        # Prune stale per-session dict entries for evicted keys (issue #18438).
+        if to_evict:
+            self._prune_stale_session_dicts({key for key, _ in to_evict})
         return len(to_evict)
 
     # ------------------------------------------------------------------
