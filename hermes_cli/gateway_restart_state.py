@@ -747,6 +747,7 @@ _VALID_STATES = frozenset({
     "stopping",
     "waiting_pid_exit",
     "waiting_port_release",
+    "waiting_task_ready",
     "starting_task",
     "starting_direct_fallback",
     "verifying",
@@ -823,6 +824,7 @@ def append_restart_log(
     launcher: str = "",
     reason: str = "",
     error: str = "",
+    detail: str = "",
     listener_pid: int = 0,
     port: int = 0,
 ) -> None:
@@ -838,6 +840,7 @@ def append_restart_log(
         "launcher": launcher,
         "reason": reason,
         "error": error,
+        "detail": detail,
         "listener_pid": listener_pid,
         "port": port,
     }
