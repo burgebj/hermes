@@ -3178,6 +3178,208 @@ class TestCodexAuxiliaryAdapterNullOutputRecovery:
 
 
 # ---------------------------------------------------------------------------
+# Issue #23975 — gateway interrupts must not abort context compression
+# ---------------------------------------------------------------------------
+
+
+class TestCodexAuxiliaryCompressionInterruptProtection:
+    """Context compression must complete atomically even when a new gateway
+    message arrives mid-stream.  Without this, the Codex Responses stream is
+    aborted, Hermes inserts a fallback context marker, and the middle of the
+    conversation is effectively lost from model context."""
+
+    @staticmethod
+    def _make_streaming_client():
+        """Build a fake Codex client whose stream yields a single event."""
+        final = SimpleNamespace(
+            output=[SimpleNamespace(
+                type="message",
+                content=[SimpleNamespace(type="output_text", text="summary")],
+            )],
+            usage=None,
+        )
+
+        class _Stream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                yield SimpleNamespace(type="response.in_progress")
+
+            def get_final_response(self):
+                return final
+
+        return SimpleNamespace(responses=SimpleNamespace(stream=lambda **k: _Stream()))
+
+    def test_interrupt_during_stream_aborts_non_compression_call(self):
+        """Baseline: without protection, a thread-local interrupt aborts the
+        Codex Responses stream with InterruptedError (existing behavior)."""
+        from agent.auxiliary_client import _CodexCompletionsAdapter
+        from tools.interrupt import set_interrupt
+
+        adapter = _CodexCompletionsAdapter(self._make_streaming_client(), "gpt-5.5")
+        set_interrupt(True)
+        try:
+            with pytest.raises(InterruptedError):
+                adapter.create(messages=[{"role": "user", "content": "x"}])
+        finally:
+            set_interrupt(False)
+
+    def test_interrupt_protection_masks_codex_stream_cancel(self):
+        """With protection active on this thread, _check_cancelled must NOT
+        raise InterruptedError even when the per-thread interrupt is set."""
+        from agent.auxiliary_client import (
+            _CodexCompletionsAdapter, _AuxInterruptProtection,
+        )
+        from tools.interrupt import set_interrupt
+
+        adapter = _CodexCompletionsAdapter(self._make_streaming_client(), "gpt-5.5")
+        set_interrupt(True)
+        try:
+            with _AuxInterruptProtection(active=True):
+                response = adapter.create(messages=[{"role": "user", "content": "x"}])
+        finally:
+            set_interrupt(False)
+
+        assert response.choices[0].message.content == "summary"
+
+    def test_protection_does_not_mask_timeout(self):
+        """Protection only suppresses the interrupt check; deadline enforcement
+        is independent and must still fire so a hung Codex stream doesn't sit
+        forever during compression."""
+        from agent.auxiliary_client import (
+            _CodexCompletionsAdapter, _AuxInterruptProtection,
+        )
+
+        class _SlowStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                for _ in range(5):
+                    time.sleep(0.03)
+                    yield SimpleNamespace(type="response.in_progress")
+
+            def get_final_response(self):
+                return SimpleNamespace(output=[], usage=None)
+
+        slow_client = SimpleNamespace(
+            responses=SimpleNamespace(stream=lambda **k: _SlowStream()),
+            close=lambda: None,
+        )
+        adapter = _CodexCompletionsAdapter(slow_client, "gpt-5.5")
+        with _AuxInterruptProtection(active=True), pytest.raises(TimeoutError):
+            adapter.create(
+                messages=[{"role": "user", "content": "x"}],
+                timeout=0.05,
+            )
+
+    def test_protection_is_thread_local_and_nests(self):
+        """The protection flag must not leak to other threads, and nested
+        ``with`` blocks must restore the outer state instead of unconditionally
+        clearing it."""
+        import threading as _threading
+        from agent.auxiliary_client import (
+            _AuxInterruptProtection, _is_interrupt_protected,
+        )
+
+        # Sibling thread sees its own (un-set) state.
+        sibling_saw = []
+        with _AuxInterruptProtection(active=True):
+            assert _is_interrupt_protected() is True
+
+            def _check():
+                sibling_saw.append(_is_interrupt_protected())
+
+            t = _threading.Thread(target=_check)
+            t.start()
+            t.join()
+
+            with _AuxInterruptProtection(active=True):
+                assert _is_interrupt_protected() is True
+            # Inner block exited; outer protection must still be active.
+            assert _is_interrupt_protected() is True
+
+        assert sibling_saw == [False]
+        assert _is_interrupt_protected() is False
+
+    def test_call_llm_enables_protection_for_compression_task(self):
+        """call_llm(task="compression", ...) must run the inner call with the
+        protection flag active so an interrupt landing mid-stream doesn't
+        abort the summary."""
+        from agent.auxiliary_client import call_llm, _is_interrupt_protected
+        from tools.interrupt import set_interrupt
+
+        observed = {}
+
+        def _fake_create(**kwargs):
+            observed["protected_during_call"] = _is_interrupt_protected()
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="summary"),
+            )])
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.side_effect = _fake_create
+        fake_client.base_url = "https://example.test/v1/"
+
+        set_interrupt(True)
+        try:
+            with patch("agent.auxiliary_client._resolve_task_provider_model",
+                       return_value=("openai-codex", "m", None, None, None)), \
+                 patch("agent.auxiliary_client._get_cached_client",
+                       return_value=(fake_client, "m")), \
+                 patch("agent.auxiliary_client._build_call_kwargs",
+                       return_value={"model": "m", "messages": [{"role": "user", "content": "x"}]}):
+                call_llm(
+                    task="compression",
+                    messages=[{"role": "user", "content": "x"}],
+                )
+        finally:
+            set_interrupt(False)
+
+        assert observed["protected_during_call"] is True
+        # Flag is cleared once call_llm returns so it doesn't bleed into the
+        # next non-compression auxiliary call on this thread.
+        assert _is_interrupt_protected() is False
+
+    def test_call_llm_does_not_enable_protection_for_other_tasks(self):
+        """Non-compression auxiliary tasks (vision, web_extract, etc.) must
+        still observe interrupts so a user can cancel a long-running call."""
+        from agent.auxiliary_client import call_llm, _is_interrupt_protected
+
+        observed = {}
+
+        def _fake_create(**kwargs):
+            observed["protected_during_call"] = _is_interrupt_protected()
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="ok"),
+            )])
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.side_effect = _fake_create
+        fake_client.base_url = "https://example.test/v1/"
+
+        with patch("agent.auxiliary_client._resolve_task_provider_model",
+                   return_value=("openrouter", "m", None, None, None)), \
+             patch("agent.auxiliary_client._get_cached_client",
+                   return_value=(fake_client, "m")), \
+             patch("agent.auxiliary_client._build_call_kwargs",
+                   return_value={"model": "m", "messages": [{"role": "user", "content": "x"}]}):
+            call_llm(
+                task="web_extract",
+                messages=[{"role": "user", "content": "x"}],
+            )
+
+        assert observed["protected_during_call"] is False
+
+
+# ---------------------------------------------------------------------------
 # Issue #23432 — auxiliary timeout poisons cached client; later aux calls fail
 # ---------------------------------------------------------------------------
 

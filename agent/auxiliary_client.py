@@ -128,6 +128,42 @@ def _extract_url_query_params(url: str):
 # Module-level flag: only warn once per process about stale OPENAI_BASE_URL.
 _stale_base_url_warned = False
 
+# Thread-local flag set while an auxiliary call must survive a session-level
+# interrupt (e.g. context compression).  Compression is infrastructure that
+# protects conversation continuity: if it aborts mid-stream because a new
+# gateway message arrived, Hermes inserts a fallback marker and the middle
+# of the session is effectively lost from model context.  The next user
+# message is already queued by the gateway (`_pending_messages`) and will be
+# processed once compression returns, so deferring the interrupt is safe.
+# See https://github.com/NousResearch/hermes-agent/issues/23975.
+_aux_interrupt_protection = threading.local()
+
+
+def _is_interrupt_protected() -> bool:
+    return bool(getattr(_aux_interrupt_protection, "active", False))
+
+
+class _AuxInterruptProtection:
+    """Context manager that masks per-thread interrupt checks for the
+    duration of an auxiliary call.  Nests safely: inner ``with`` blocks
+    restore the outer state instead of clearing it unconditionally."""
+
+    def __init__(self, active: bool):
+        self._active = active
+        self._prev: Optional[bool] = None
+
+    def __enter__(self):
+        if self._active:
+            self._prev = bool(getattr(_aux_interrupt_protection, "active", False))
+            _aux_interrupt_protection.active = True
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._active:
+            _aux_interrupt_protection.active = bool(self._prev)
+        return False
+
+
 _PROVIDER_ALIASES = {
     "google": "gemini",
     "google-gemini": "gemini",
@@ -803,6 +839,11 @@ class _CodexCompletionsAdapter:
                 if not timed_out.is_set():
                     _close_client_on_timeout()
                 raise TimeoutError(_timeout_message())
+            # Auxiliary tasks marked as interrupt-protected (currently context
+            # compression) must complete atomically even if a new gateway
+            # message arrives mid-stream — see _AuxInterruptProtection.
+            if _is_interrupt_protected():
+                return
             try:
                 from tools.interrupt import is_interrupted
                 if is_interrupted():
@@ -5039,6 +5080,44 @@ def _validate_llm_response(response: Any, task: str = None) -> Any:
 
 
 def call_llm(
+    task: str = None,
+    *,
+    provider: str = None,
+    model: str = None,
+    base_url: str = None,
+    api_key: str = None,
+    main_runtime: Optional[Dict[str, Any]] = None,
+    messages: list,
+    temperature: float = None,
+    max_tokens: int = None,
+    tools: list = None,
+    timeout: float = None,
+    extra_body: dict = None,
+) -> Any:
+    """Synchronous LLM call entry point.
+
+    Wraps :func:`_call_llm_impl` with thread-local interrupt protection for
+    tasks that must complete atomically (currently ``compression``).  See
+    :class:`_AuxInterruptProtection` and issue #23975.
+    """
+    with _AuxInterruptProtection(active=(task == "compression")):
+        return _call_llm_impl(
+            task=task,
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            main_runtime=main_runtime,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            timeout=timeout,
+            extra_body=extra_body,
+        )
+
+
+def _call_llm_impl(
     task: str = None,
     *,
     provider: str = None,
