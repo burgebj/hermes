@@ -468,6 +468,16 @@ class MemoryManager:
         """Check if any provider handles this tool."""
         return tool_name in self._tool_to_provider
 
+    def unregister_tool(self, tool_name: str) -> None:
+        """Remove a tool from the routing table.
+
+        Called by agent_init when a memory-provider tool conflicts with a
+        built-in tool name.  Without this, the skipped tool remains in
+        ``_tool_to_provider`` and ``invoke_tool`` incorrectly dispatches to
+        it instead of the built-in handler.
+        """
+        self._tool_to_provider.pop(tool_name, None)
+
     def handle_tool_call(
         self, tool_name: str, args: Dict[str, Any], **kwargs
     ) -> str:

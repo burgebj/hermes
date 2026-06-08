@@ -1215,6 +1215,9 @@ def init_agent(
         for _schema in agent._memory_manager.get_all_tool_schemas():
             _tname = _schema.get("name", "")
             if _tname and _tname in _existing_tool_names:
+                # Remove from _tool_to_provider so invoke_tool() won't
+                # dispatch to this conflicting tool (fixes #40466).
+                agent._memory_manager.unregister_tool(_tname)
                 continue  # already registered via plugin path
             _wrapped = {"type": "function", "function": _schema}
             agent.tools.append(_wrapped)
