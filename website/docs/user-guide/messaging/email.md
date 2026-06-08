@@ -79,6 +79,7 @@ EMAIL_IMAP_PORT=993                    # Default: 993 (IMAP SSL)
 EMAIL_SMTP_PORT=587                    # Default: 587 (SMTP STARTTLS)
 EMAIL_POLL_INTERVAL=15                 # Seconds between inbox checks (default: 15)
 EMAIL_HOME_ADDRESS=your@email.com      # Default delivery target for cron jobs
+EMAIL_VERIFY_SSL=1                     # Set to 0 to skip TLS cert verification (self-signed certs)
 ```
 
 ---
@@ -165,6 +166,7 @@ Email access follows the same pattern as all other Hermes platforms:
 | **Duplicate replies** | Ensure only one gateway instance is running. Check `hermes gateway status`. |
 | **Slow response** | The default poll interval is 15 seconds. Reduce with `EMAIL_POLL_INTERVAL=5` for faster response (but more IMAP connections). |
 | **Replies not threading** | The adapter uses In-Reply-To headers. Some email clients (especially web-based) may not thread correctly with automated messages. |
+| **SSL certificate error** | If using a self-signed certificate or a CA not in the system trust store, set `EMAIL_VERIFY_SSL=0` to disable verification. Only use on trusted networks. |
 
 ---
 
@@ -178,6 +180,7 @@ Email access follows the same pattern as all other Hermes platforms:
 - Set `EMAIL_ALLOWED_USERS` to restrict who can interact with the agent
 - The password is stored in `~/.hermes/.env` — protect this file (`chmod 600`)
 - IMAP uses SSL (port 993) and SMTP uses STARTTLS (port 587) by default — connections are encrypted
+- `EMAIL_VERIFY_SSL=0` disables certificate verification — only use this for self-signed certs on trusted networks
 
 ---
 
@@ -195,3 +198,4 @@ Email access follows the same pattern as all other Hermes platforms:
 | `EMAIL_ALLOWED_USERS` | No | — | Comma-separated allowed sender addresses |
 | `EMAIL_HOME_ADDRESS` | No | — | Default delivery target for cron jobs |
 | `EMAIL_ALLOW_ALL_USERS` | No | `false` | Allow all senders (not recommended) |
+| `EMAIL_VERIFY_SSL` | No | `1` | Set to `0`/`false`/`no` to skip TLS cert verification (self-signed certs) |
