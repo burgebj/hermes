@@ -61,6 +61,14 @@ class TestMergeHelper:
         # models.dev casing wins since it came first
         assert out == ["MiniMax-M2.7", "minimax-m2.5"]
 
+    def test_deepseek_is_curated_first(self):
+        """DeepSeek leads with V4 curated models even if discovery returns legacy aliases first."""
+        mdev = ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash", "deepseek-v4-pro"]
+        curated = ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"]
+        with patch("agent.models_dev.list_agentic_models", return_value=mdev):
+            out = _merge_with_models_dev("deepseek", curated)
+        assert out[:4] == curated
+
 
 class TestProviderModelIdsPreferred:
     def test_opencode_go_is_preferred(self):

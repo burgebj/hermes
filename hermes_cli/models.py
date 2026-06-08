@@ -2048,15 +2048,19 @@ def _merge_with_models_dev(provider: str, curated: list[str]) -> list[str]:
         return list(curated)
 
     # Case-insensitive dedup while preserving order and curated casing.
+    # DeepSeek is intentionally curated-first: models.dev/live discovery can
+    # surface legacy aliases first (chat/reasoner) while the picker should lead
+    # with the current V4 agentic slugs.
+    primary, secondary = (curated, mdev) if provider == "deepseek" else (mdev, curated)
     seen_lower: set[str] = set()
     merged: list[str] = []
-    for mid in mdev:
+    for mid in primary:
         key = str(mid).lower()
         if key in seen_lower:
             continue
         seen_lower.add(key)
         merged.append(mid)
-    for mid in curated:
+    for mid in secondary:
         key = str(mid).lower()
         if key in seen_lower:
             continue
@@ -2234,10 +2238,33 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
             if api_key:
                 live = _p.fetch_models(api_key=api_key)
                 if live:
+                    # Some providers expose only legacy/API aliases from their
+                    # /v1/models endpoint while the agentic catalog tracks newer
+                    # routable slugs from models.dev/static curation (DeepSeek is
+                    # the common case: the live endpoint may list only
+                    # deepseek-chat/reasoner even when deepseek-v4-pro is valid).
+                    # For models.dev-preferred providers, merge instead of
+                    # replacing so the picker does not hide curated modern models.
+                    if normalized in _MODELS_DEV_PREFERRED:
+                        curated = list(_PROVIDER_MODELS.get(normalized, [])) or list(live)
+                        # Preserve curated-first ordering for DeepSeek while
+                        # still appending any live-only slugs.
+                        if normalized == "deepseek":
+                            live_lower = {m.lower() for m in curated}
+                            curated.extend([m for m in live if m.lower() not in live_lower])
+                        else:
+                            curated = list(live)
+                        return _merge_with_models_dev(normalized, curated)
                     return live
             # Use profile's fallback_models if defined
             if _p.fallback_models:
-                return list(_p.fallback_models)
+                fallback = list(_p.fallback_models)
+                if normalized in _MODELS_DEV_PREFERRED:
+                    curated = list(_PROVIDER_MODELS.get(normalized, [])) or fallback
+                    if normalized != "deepseek":
+                        curated = fallback
+                    return _merge_with_models_dev(normalized, curated)
+                return fallback
     except Exception:
         pass
 
