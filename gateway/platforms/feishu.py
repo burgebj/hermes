@@ -160,6 +160,15 @@ _MARKDOWN_TABLE_RE = re.compile(r"^\|.*\|\n\|[-|: ]+\|", re.MULTILINE)
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _MARKDOWN_FENCE_OPEN_RE = re.compile(r"^```([^\n`]*)\s*$")
 _MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^```\s*$")
+# Markdown table detection — Feishu's post `md` tag does NOT support pipe
+# table syntax, so contiguous table blocks must be wrapped in a code fence
+# (which the post payload renders as monospace) to keep the columns
+# visible. Without this, tables silently disappear from outgoing messages
+# (#18756).
+_MARKDOWN_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_MARKDOWN_TABLE_SEPARATOR_RE = re.compile(
+    r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$"
+)
 _MENTION_RE = re.compile(r"@_user_\d+")
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 _POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)
@@ -560,6 +569,73 @@ def _build_markdown_post_payload(content: str) -> str:
     )
 
 
+def _wrap_markdown_tables_in_fences(content: str) -> str:
+    r"""Wrap contiguous Markdown pipe-table blocks in code fences.
+
+    Feishu's post ``md`` tag does NOT support Markdown table syntax — table
+    rows are silently dropped on outbound. Wrapping each detected table
+    block in a triple-backtick fence routes it through the existing
+    code-block handling in ``_build_markdown_post_rows``, which renders
+    monospace text inside its own row. The columns stay visible (#18756).
+
+    A table is detected as: a row matching ``_MARKDOWN_TABLE_ROW_RE``
+    immediately followed by a separator row (``|---|---|...``) followed by
+    zero or more additional table rows. Lines inside an existing fenced
+    code block are left untouched.
+    """
+    if "|" not in content:
+        return content
+
+    lines = content.splitlines()
+    out: List[str] = []
+    in_code_block = False
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+
+        # Toggle fence-state so we don't double-wrap tables that already
+        # live inside a user-authored code fence.
+        if not in_code_block and _MARKDOWN_FENCE_OPEN_RE.match(stripped):
+            out.append(line)
+            in_code_block = True
+            i += 1
+            continue
+        if in_code_block and _MARKDOWN_FENCE_CLOSE_RE.match(stripped):
+            out.append(line)
+            in_code_block = False
+            i += 1
+            continue
+        if in_code_block:
+            out.append(line)
+            i += 1
+            continue
+
+        # Detect: header row → separator row → 0+ data rows.
+        if (
+            _MARKDOWN_TABLE_ROW_RE.match(line)
+            and i + 1 < n
+            and _MARKDOWN_TABLE_SEPARATOR_RE.match(lines[i + 1].strip())
+        ):
+            table_block: List[str] = [line, lines[i + 1]]
+            j = i + 2
+            while j < n and _MARKDOWN_TABLE_ROW_RE.match(lines[j]):
+                table_block.append(lines[j])
+                j += 1
+            out.append("```")
+            out.extend(table_block)
+            out.append("```")
+            i = j
+            continue
+
+        out.append(line)
+        i += 1
+
+    return "\n".join(out)
+
+
 def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
     """Build Feishu post rows while isolating fenced code blocks.
 
@@ -567,9 +643,14 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
     appears inside one large markdown element. Split the reply at real fence
     lines so prose before/after the code block remains visible while code stays
     in a dedicated row.
+
+    Markdown pipe tables are also rewritten into fenced code blocks before
+    splitting, because Feishu's ``md`` renderer does not support pipe-table
+    syntax and would silently drop the table (#18756).
     """
     if not content:
         return [[{"tag": "md", "text": ""}]]
+    content = _wrap_markdown_tables_in_fences(content)
     if "```" not in content:
         return [[{"tag": "md", "text": content}]]
 

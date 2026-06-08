@@ -2708,6 +2708,96 @@ class TestAdapterBehavior(unittest.TestCase):
         )
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_build_post_payload_wraps_pipe_table_in_code_fence(self):
+        """Pipe tables are silently dropped by Feishu's md tag, so wrap each
+        contiguous table block in a code fence so the columns survive (#18756).
+        """
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        content = (
+            "Comparison results:\n"
+            "| Model | Tokens | Latency |\n"
+            "|-------|--------|---------|\n"
+            "| A     | 1024   | 800ms   |\n"
+            "| B     | 2048   | 1500ms  |\n"
+            "Conclusion: A wins."
+        )
+        payload = json.loads(adapter._build_post_payload(content))
+
+        self.assertEqual(
+            payload["zh_cn"]["content"],
+            [
+                [{"tag": "md", "text": "Comparison results:"}],
+                [
+                    {
+                        "tag": "md",
+                        "text": (
+                            "```\n"
+                            "| Model | Tokens | Latency |\n"
+                            "|-------|--------|---------|\n"
+                            "| A     | 1024   | 800ms   |\n"
+                            "| B     | 2048   | 1500ms  |\n"
+                            "```"
+                        ),
+                    }
+                ],
+                [{"tag": "md", "text": "Conclusion: A wins."}],
+            ],
+        )
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_build_post_payload_leaves_table_inside_existing_code_block_untouched(self):
+        """A pipe table that is already inside a user-authored code fence
+        must NOT be double-wrapped (#18756)."""
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        content = (
+            "Sample:\n"
+            "```\n"
+            "| a | b |\n"
+            "|---|---|\n"
+            "| 1 | 2 |\n"
+            "```\n"
+            "Done."
+        )
+        payload = json.loads(adapter._build_post_payload(content))
+
+        self.assertEqual(
+            payload["zh_cn"]["content"],
+            [
+                [{"tag": "md", "text": "Sample:"}],
+                [
+                    {
+                        "tag": "md",
+                        "text": "```\n| a | b |\n|---|---|\n| 1 | 2 |\n```",
+                    }
+                ],
+                [{"tag": "md", "text": "Done."}],
+            ],
+        )
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_build_post_payload_ignores_pipes_without_separator_row(self):
+        """A line with pipe characters but NO separator row underneath is not
+        a Markdown table — leave it as inline markdown so single-line uses
+        of pipes (e.g. union types ``Foo | Bar``) are not falsely wrapped."""
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        content = "Type signature: ``f(x: int | str) -> bool``."
+        payload = json.loads(adapter._build_post_payload(content))
+
+        self.assertEqual(
+            payload["zh_cn"]["content"],
+            [[{"tag": "md", "text": content}]],
+        )
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_send_falls_back_to_text_when_post_payload_is_rejected(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
