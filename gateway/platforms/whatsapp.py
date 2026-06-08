@@ -443,6 +443,19 @@ class WhatsAppAdapter(BasePlatformAdapter):
             normalized = normalized.replace(":", "@", 1)
         return normalized
 
+    @staticmethod
+    def _ensure_jid_suffix(chat_id: str) -> str:
+        """Append ``@s.whatsapp.net`` to bare phone numbers.
+
+        The Baileys bridge expects full WhatsApp JIDs.  A bare phone
+        number like ``"15551234567"`` causes ``jidDecode()`` to return
+        ``null`` and the bridge to crash.  If *chat_id* already
+        contains ``@`` it is returned unchanged.
+        """
+        if not chat_id or "@" in chat_id:
+            return chat_id
+        return f"{chat_id}@s.whatsapp.net"
+
     def _bot_ids_from_message(self, data: Dict[str, Any]) -> set[str]:
         bot_ids = set()
         for candidate in data.get("botIds") or []:
@@ -929,6 +942,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
 
+        chat_id = self._ensure_jid_suffix(chat_id)
+
         try:
             import aiohttp
 
@@ -983,6 +998,9 @@ class WhatsAppAdapter(BasePlatformAdapter):
         bridge_exit = await self._check_managed_bridge_exit()
         if bridge_exit:
             return SendResult(success=False, error=bridge_exit)
+
+        chat_id = self._ensure_jid_suffix(chat_id)
+
         try:
             import aiohttp
             async with self._http_session.post(
@@ -1016,6 +1034,9 @@ class WhatsAppAdapter(BasePlatformAdapter):
         bridge_exit = await self._check_managed_bridge_exit()
         if bridge_exit:
             return SendResult(success=False, error=bridge_exit)
+
+        chat_id = self._ensure_jid_suffix(chat_id)
+
         try:
             import aiohttp
 
@@ -1119,7 +1140,9 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return
         if await self._check_managed_bridge_exit():
             return
-        
+
+        chat_id = self._ensure_jid_suffix(chat_id)
+
         try:
             import aiohttp
 
