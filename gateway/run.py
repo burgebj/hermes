@@ -1175,6 +1175,23 @@ from gateway.restart import (
 )
 
 
+def _is_running_under_service_manager() -> bool:
+    """Return True when the gateway should restart via its supervisor.
+
+    Systemd advertises itself with INVOCATION_ID, but macOS launchd does not
+    inject a comparable environment variable. A launchd-managed user service
+    runs with launchd as its parent (PID 1), so a gateway /restart on macOS
+    must use the service-manager exit-code path instead of the detached helper.
+    Otherwise the gateway can exit cleanly, launchd will not relaunch it
+    (KeepAlive.SuccessfulExit=false), and the service may be left unloaded.
+    """
+    if os.environ.get("INVOCATION_ID"):
+        return True
+    if sys.platform == "darwin" and os.getppid() == 1:
+        return True
+    return False
+
+
 from gateway.whatsapp_identity import (
     canonical_whatsapp_identifier as _canonical_whatsapp_identifier,  # noqa: F401
     expand_whatsapp_aliases as _expand_whatsapp_auth_aliases,
@@ -7173,9 +7190,14 @@ class GatewayRunner:
             Platform.QQBOT: "QQ_ALLOW_ALL_USERS",
             Platform.YUANBAO: "YUANBAO_ALLOW_ALL_USERS",
         }
+        # Legacy Discord bot-to-bot admission has been decommissioned.  Keep
+        # Feishu's bot bypass, but never let DISCORD_ALLOW_BOTS resurrect a
+        # Discord bot-authored message as an authorized gateway command.
+        if source.platform == Platform.DISCORD and getattr(source, "is_bot", False):
+            return False
+
         # Bots admitted by {PLATFORM}_ALLOW_BOTS bypass the human allowlist (#4466).
         platform_allow_bots_map = {
-            Platform.DISCORD: "DISCORD_ALLOW_BOTS",
             Platform.FEISHU: "FEISHU_ALLOW_BOTS",
         }
 
@@ -16089,18 +16111,65 @@ class GatewayRunner:
         except Exception as e:
             logger.error("Watch notification injection error: %s", e)
 
+    @staticmethod
+    def _load_background_status_min_elapsed_seconds() -> float:
+        """Minimum runtime before sending a user-visible running status bubble."""
+        raw = os.getenv("HERMES_BACKGROUND_STATUS_MIN_ELAPSED_SECONDS", "")
+        if not raw:
+            try:
+                import yaml as _y
+                cfg_path = _hermes_home / "config.yaml"
+                if cfg_path.exists():
+                    with open(cfg_path, encoding="utf-8") as _f:
+                        cfg = _y.safe_load(_f) or {}
+                    raw = cfg_get(cfg, "display", "background_process_status_min_elapsed_seconds")
+            except Exception:
+                raw = ""
+        try:
+            return max(0.0, float(raw)) if raw not in {None, ""} else 30.0
+        except (TypeError, ValueError):
+            return 30.0
+
+    @staticmethod
+    def _background_duration(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes, secs = divmod(seconds, 60)
+        if minutes < 60:
+            return f"{minutes}m {secs}s"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes}m"
+
+    @staticmethod
+    def _clean_background_output(text: str, *, limit: int) -> str:
+        """Strip terminal controls before watcher text reaches chat."""
+        if not text:
+            return ""
+        from tools.ansi_strip import strip_ansi
+
+        tail = text[-limit:]
+        clean = strip_ansi(tail)
+        # Preserve newline/tab, remove other C0 controls and DEL. ANSI strip
+        # covers escape sequences; this catches raw control bytes.
+        clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", clean)
+        return clean.strip()
+
+    def _background_status_text(self, session_id: str, session: Any, *, started_at: float) -> str:
+        elapsed = self._background_duration(time.monotonic() - started_at)
+        output_len = len(getattr(session, "output_buffer", "") or "")
+        return (
+            f"⏳ Still running background process {session_id} — elapsed {elapsed}. "
+            f"Output received: {output_len:,} chars."
+        )
+
     async def _run_process_watcher(self, watcher: dict) -> None:
         """
-        Periodically check a background process and push updates to the user.
+        Periodically check a background process and notify the user.
 
-        Runs as an asyncio task. Stays silent when nothing changed.
-        Auto-removes when the process exits or is killed.
-
-        Notification mode (from ``display.background_process_notifications``):
-          - ``all``    — running-output updates + final message
-          - ``result`` — final completion message only
-          - ``error``  — final message only when exit code != 0
-          - ``off``    — no messages at all
+        Modes are re-read on each watcher tick, so changing
+        ``display.background_process_notifications`` takes effect without a
+        gateway restart for already-running processes.
         """
         from tools.process_registry import process_registry
 
@@ -16114,23 +16183,57 @@ class GatewayRunner:
         user_name = watcher.get("user_name", "")
         message_id = str(watcher.get("message_id") or "").strip() or None
         agent_notify = watcher.get("notify_on_complete", False)
-        notify_mode = self._load_background_notifications_mode()
+        started_at = time.monotonic()
+        min_status_elapsed = self._load_background_status_min_elapsed_seconds()
+        status_message_id: Optional[str] = None
+        status_text_last: Optional[str] = None
+        status_disabled = False
 
-        logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
-                      session_id, interval, notify_mode, agent_notify)
+        logger.debug(
+            "Process watcher started: %s (every %ss, agent_notify=%s)",
+            session_id,
+            interval,
+            agent_notify,
+        )
 
-        if notify_mode == "off" and not agent_notify:
-            # Still wait for the process to exit so we can log it, but don't
-            # push any messages to the user.
-            while True:
-                await asyncio.sleep(interval)
-                session = process_registry.get(session_id)
-                if session is None or session.exited:
-                    break
-            logger.debug("Process watcher ended (silent): %s", session_id)
-            return
+        def _adapter_for_platform() -> Any:
+            for p, a in self.adapters.items():
+                if getattr(p, "value", p) == platform_name:
+                    return a
+            return None
 
+        send_meta = {"thread_id": thread_id} if thread_id else None
+        discord_editable = platform_name == "discord"
         last_output_len = 0
+
+        async def _edit_status(adapter: Any, text: str) -> None:
+            nonlocal status_disabled, status_text_last
+            if not status_message_id or status_disabled:
+                return
+            if text == status_text_last:
+                return
+            try:
+                result = await adapter.edit_message(
+                    chat_id,
+                    status_message_id,
+                    text,
+                    metadata=send_meta,
+                )
+            except Exception as exc:
+                logger.warning("Watcher status edit error for %s: %s", session_id, exc)
+                status_disabled = True
+                return
+            if getattr(result, "success", False):
+                status_text_last = text
+                return
+            if not getattr(result, "retryable", False):
+                status_disabled = True
+                logger.info(
+                    "Disabling background status edits for %s after permanent edit failure: %s",
+                    session_id,
+                    getattr(result, "error", None),
+                )
+
         while True:
             await asyncio.sleep(interval)
 
@@ -16138,29 +16241,18 @@ class GatewayRunner:
             if session is None:
                 break
 
-            current_output_len = len(session.output_buffer)
+            notify_mode = self._load_background_notifications_mode()
+            current_output_len = len(getattr(session, "output_buffer", "") or "")
             has_new_output = current_output_len > last_output_len
             last_output_len = current_output_len
+            adapter = _adapter_for_platform()
 
             if session.exited:
                 # --- Agent-triggered completion: inject synthetic message ---
-                # Skip if the agent already consumed the result via wait/poll/log
+                # Skip if the agent already consumed the result via wait/poll/log.
                 from tools.process_registry import process_registry as _pr_check
                 if agent_notify and not _pr_check.is_completion_consumed(session_id):
-                    from tools.ansi_strip import strip_ansi
-                    _raw = strip_ansi(session.output_buffer) if session.output_buffer else ""
-                    # Truncate at line boundaries so notifications never start
-                    # mid-line (fixes #23284). Keep the last ~2000 chars but
-                    # snap to the nearest preceding newline, then prepend a
-                    # truncation marker when output was cut.
-                    _LIMIT = 2000
-                    if len(_raw) > _LIMIT:
-                        _tail = _raw[-_LIMIT:]
-                        _nl = _tail.find("\n")
-                        _tail = _tail[_nl + 1:] if _nl != -1 else _tail
-                        _out = f"[… output truncated — showing last {len(_tail)} chars]\n{_tail}"
-                    else:
-                        _out = _raw
+                    _out = self._clean_background_output(getattr(session, "output_buffer", "") or "", limit=2000)
                     synth_text = (
                         f"[IMPORTANT: Background process {session_id} completed "
                         f"(exit code {session.exit_code}).\n"
@@ -16183,12 +16275,12 @@ class GatewayRunner:
                         )
                         break
 
-                    adapter = None
+                    agent_adapter = None
                     for p, a in self.adapters.items():
                         if p == source.platform:
-                            adapter = a
+                            agent_adapter = a
                             break
-                    if adapter and source.chat_id:
+                    if agent_adapter and source.chat_id:
                         try:
                             synth_event = MessageEvent(
                                 text=synth_text,
@@ -16204,55 +16296,90 @@ class GatewayRunner:
                                 source.chat_id,
                                 source.thread_id,
                             )
-                            await adapter.handle_message(synth_event)
+                            await agent_adapter.handle_message(synth_event)
                         except Exception as e:
                             logger.error("Agent notify injection error: %s", e)
                     break
 
-                # --- Normal text-only notification ---
-                # Decide whether to notify based on mode
                 should_notify = (
                     notify_mode in {"all", "result"}
                     or (notify_mode == "error" and session.exit_code not in {0, None})
                 )
-                if should_notify:
-                    new_output = session.output_buffer[-1000:] if session.output_buffer else ""
+                if adapter and chat_id and discord_editable and status_message_id and not status_disabled:
+                    terminal_status = (
+                        f"✅ Background process {session_id} finished with exit code {session.exit_code}; "
+                        f"final message sent."
+                        if should_notify
+                        else f"✅ Background process {session_id} finished with exit code {session.exit_code}."
+                    )
+                    await _edit_status(adapter, terminal_status)
+
+                if should_notify and adapter and chat_id:
+                    final_output = self._clean_background_output(
+                        getattr(session, "output_buffer", "") or "",
+                        limit=1000,
+                    )
                     message_text = (
                         f"[Background process {session_id} finished with exit code {session.exit_code}~ "
-                        f"Here's the final output:\n{new_output}]"
+                        f"Here's the final output:\n{final_output}]"
                     )
-                    adapter = None
-                    for p, a in self.adapters.items():
-                        if p.value == platform_name:
-                            adapter = a
-                            break
-                    if adapter and chat_id:
-                        try:
-                            send_meta = {"thread_id": thread_id} if thread_id else None
-                            await adapter.send(chat_id, message_text, metadata=send_meta)
-                        except Exception as e:
-                            logger.error("Watcher delivery error: %s", e)
-                break
-
-            elif has_new_output and notify_mode == "all" and not agent_notify:
-                # New output available -- deliver status update (only in "all" mode)
-                # Skip periodic updates for agent_notify watchers (they only care about completion)
-                new_output = session.output_buffer[-500:] if session.output_buffer else ""
-                message_text = (
-                    f"[Background process {session_id} is still running~ "
-                    f"New output:\n{new_output}]"
-                )
-                adapter = None
-                for p, a in self.adapters.items():
-                    if p.value == platform_name:
-                        adapter = a
-                        break
-                if adapter and chat_id:
                     try:
-                        send_meta = {"thread_id": thread_id} if thread_id else None
                         await adapter.send(chat_id, message_text, metadata=send_meta)
                     except Exception as e:
                         logger.error("Watcher delivery error: %s", e)
+                break
+
+            if agent_notify or not has_new_output:
+                continue
+
+            if notify_mode == "off":
+                if adapter and chat_id and discord_editable and status_message_id and not status_disabled:
+                    await _edit_status(
+                        adapter,
+                        f"⏹ Background process {session_id} is still running; progress updates disabled.",
+                    )
+                continue
+
+            if notify_mode != "all":
+                continue
+
+            if not adapter or not chat_id:
+                continue
+
+            if discord_editable:
+                if status_disabled:
+                    continue
+                if time.monotonic() - started_at < min_status_elapsed:
+                    continue
+                status_text = self._background_status_text(session_id, session, started_at=started_at)
+                if status_message_id:
+                    await _edit_status(adapter, status_text)
+                else:
+                    try:
+                        result = await adapter.send(chat_id, status_text, metadata=send_meta)
+                    except Exception as e:
+                        logger.error("Watcher status delivery error: %s", e)
+                        status_disabled = True
+                    else:
+                        if getattr(result, "success", False) and getattr(result, "message_id", None):
+                            status_message_id = str(result.message_id)
+                            status_text_last = status_text
+                        elif not getattr(result, "retryable", False):
+                            status_disabled = True
+                continue
+
+            # Non-Discord fallback preserves existing semantics: in all mode,
+            # send running updates as separate messages. Sanitized, but still
+            # includes the recent output because other platforms may lack edit.
+            new_output = self._clean_background_output(getattr(session, "output_buffer", "") or "", limit=500)
+            message_text = (
+                f"[Background process {session_id} is still running~ "
+                f"New output:\n{new_output}]"
+            )
+            try:
+                await adapter.send(chat_id, message_text, metadata=send_meta)
+            except Exception as e:
+                logger.error("Watcher delivery error: %s", e)
 
         logger.debug("Process watcher ended: %s", session_id)
 
@@ -18899,7 +19026,7 @@ class GatewayRunner:
                             _status_detail = " — " + ", ".join(_parts)
                     except Exception:
                         pass
-                _heartbeat_text = f"⏳ Working — {_elapsed_mins} min{_status_detail}"
+                _heartbeat_text = f"⏳ Still working — {_elapsed_mins} min{_status_detail}"
                 try:
                     _notify_res = None
                     if _heartbeat_msg_id:
