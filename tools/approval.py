@@ -247,8 +247,18 @@ _CMDPOS = (
 )
 
 HARDLINE_PATTERNS = [
-    # rm recursive targeting the root filesystem or protected roots
-    (r'\brm\s+(-[^\s]*\s+)*(/|/\*|/ \*)(\s|$)', "recursive delete of root filesystem"),
+    # rm recursive targeting the root filesystem or protected roots.
+    # The target group matches any root-anchored path whose components
+    # collapse back to "/" in the shell: a bare "/", repeated slashes
+    # ("//"), and "."/".." current/parent segments ("/.", "/./", "/..")
+    # all resolve to root, optionally followed by a trailing glob
+    # ("/*", "//*"). The earlier "(/|/\*|/ \*)" form only caught the
+    # literal "/" / "/*" spellings, so "rm -rf //", "rm -rf /.", and
+    # "rm -rf /./" silently slipped the hardline floor and executed under
+    # --yolo / approvals.mode=off / cron approve-mode. A trailing non-"/."
+    # segment (e.g. "/tmp", "/home") still fails to match here and stays
+    # with the softer DANGEROUS_PATTERNS / system-directory rules.
+    (r'\brm\s+(-[^\s]*\s+)*/[/.]*\**(\s|$)', "recursive delete of root filesystem"),
     (r'\brm\s+(-[^\s]*\s+)*(/home|/home/\*|/root|/root/\*|/etc|/etc/\*|/usr|/usr/\*|/var|/var/\*|/bin|/bin/\*|/sbin|/sbin/\*|/boot|/boot/\*|/lib|/lib/\*)(\s|$)', "recursive delete of system directory"),
     (r'\brm\s+(-[^\s]*\s+)*(~|\$HOME)(/?|/\*)?(\s|$)', "recursive delete of home directory"),
     # Filesystem format
