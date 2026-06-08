@@ -2083,14 +2083,18 @@ def run_doctor(args):
             from plugins.memory.mem0 import _load_config as _load_mem0_config
             mem0_cfg = _load_mem0_config()
             mem0_key = mem0_cfg.get("api_key", "")
+            mem0_host = mem0_cfg.get("host", "")
             if mem0_key:
                 check_ok("Mem0 API key configured")
+                check_info(f"user_id={mem0_cfg.get('user_id', '?')}  agent_id={mem0_cfg.get('agent_id', '?')}")
+            elif mem0_host:
+                check_ok(f"Mem0 self-hosted mode ({mem0_host})")
                 check_info(f"user_id={mem0_cfg.get('user_id', '?')}  agent_id={mem0_cfg.get('agent_id', '?')}")
             else:
                 _fail_and_issue(
                     "Mem0 API key not set",
-                    "(set MEM0_API_KEY in .env or run hermes memory setup)",
-                    "Mem0 is set as memory provider but API key is missing",
+                    "(set MEM0_API_KEY in .env or run 'hermes memory setup')",
+                    "Mem0 is set as memory provider but neither API key nor self-hosted URL is configured",
                     issues,
                 )
         except ImportError:
