@@ -89,6 +89,27 @@ _RE_AKA          = re.compile(
     r'(\w+(?:\s+\w+)*)\s+(?:aka|also known as)\s+(\w+(?:\s+\w+)*)',
     re.IGNORECASE,
 )
+# CJK bracket/quote markers — high-signal entity delimiters used in CJK text
+_RE_CJK_BRACKET  = re.compile(
+    r'[「『《“‘]([^」』》”’]{1,40})[」』》”’]'
+)
+# Mixed-script identifiers: Latin start, must contain at least one non-letter
+# character (digit, hyphen, dot, underscore) so plain English words are skipped.
+# Captures "lark-cli", "GPT-5.5", "baitugroup.com", "IHMS_v2", etc.
+_RE_MIXED_IDENT  = re.compile(
+    r'\b([A-Za-z][A-Za-z0-9_.\-]*[0-9_.\-][A-Za-z0-9_.\-]*(?:\s+\d+(?:\.\d+)*)?)\b'
+)
+# Stopwords applied only to pure-CJK candidates to avoid extracting pronouns
+# or generic grammatical particles as entities.
+_CJK_STOPWORDS = frozenset({
+    "的", "了", "和", "与", "或", "在", "是", "有", "也", "都",
+    "我", "你", "他", "她", "它", "我们", "你们", "他们",
+    "这", "那", "哪", "什么", "为", "以", "对", "从", "到",
+    "上", "下", "中", "内", "外", "前", "后", "左", "右",
+    "时", "年", "月", "日", "天", "个", "种", "次", "件",
+    "用", "使", "让", "把", "被", "给", "向", "按", "通过",
+})
+_RE_CJK_CHAR = re.compile(r'[一-鿿぀-ヿ가-힯]')
 
 
 def _clamp_trust(value: float) -> float:
@@ -403,15 +424,27 @@ class MemoryStore:
         2. Double-quoted terms             e.g. "Python"
         3. Single-quoted terms             e.g. 'pytest'
         4. AKA patterns                    e.g. "Guido aka BDFL" -> two entities
+        5. CJK bracket/quote markers       e.g. 「白兔」《项目》 (high-signal CJK)
+        6. Mixed-script identifiers        e.g. "lark-cli", "GPT-5.5"
+
+        Pure-CJK candidates extracted by rule 5 are filtered against a small
+        stopword list (_CJK_STOPWORDS) to suppress pronouns and particles.
 
         Returns a deduplicated list preserving first-seen order.
         """
         seen: set[str] = set()
         candidates: list[str] = []
 
-        def _add(name: str) -> None:
+        def _add(name: str, cjk_candidate: bool = False) -> None:
             stripped = name.strip()
-            if stripped and stripped.lower() not in seen:
+            if not stripped:
+                return
+            if cjk_candidate and _RE_CJK_CHAR.search(stripped):
+                # Strip surrounding CJK punctuation that may bleed into the match
+                stripped = stripped.strip("，。！？、；：")
+                if stripped in _CJK_STOPWORDS:
+                    return
+            if stripped.lower() not in seen:
                 seen.add(stripped.lower())
                 candidates.append(stripped)
 
@@ -427,6 +460,12 @@ class MemoryStore:
         for m in _RE_AKA.finditer(text):
             _add(m.group(1))
             _add(m.group(2))
+
+        for m in _RE_CJK_BRACKET.finditer(text):
+            _add(m.group(1), cjk_candidate=True)
+
+        for m in _RE_MIXED_IDENT.finditer(text):
+            _add(m.group(1))
 
         return candidates
 
