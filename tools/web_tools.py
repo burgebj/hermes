@@ -1208,8 +1208,9 @@ if __name__ == "__main__":
     # Check if API keys are available
     web_available = check_web_api_key()
     tool_gateway_available = _is_tool_gateway_ready()
-    firecrawl_key_available = bool(os.getenv("FIRECRAWL_API_KEY", "").strip())
-    firecrawl_url_available = bool(os.getenv("FIRECRAWL_API_URL", "").strip())
+    from hermes_cli.config import get_env_value as _gev
+    firecrawl_key_available = bool((_gev("FIRECRAWL_API_KEY") or "").strip())
+    firecrawl_url_available = bool((_gev("FIRECRAWL_API_URL") or "").strip())
     nous_available = check_auxiliary_model()
     default_summarizer_model = _get_default_summarizer_model()
 
@@ -1229,7 +1230,7 @@ if __name__ == "__main__":
         elif backend == "ddgs":
             print("   Using DuckDuckGo via ddgs package (search only)")
         elif firecrawl_url_available:
-            print(f"   Using self-hosted Firecrawl: {os.getenv('FIRECRAWL_API_URL').strip().rstrip('/')}")
+            print(f"   Using self-hosted Firecrawl: {(_gev('FIRECRAWL_API_URL') or '').strip().rstrip('/')}")
         elif firecrawl_key_available:
             print("   Using direct Firecrawl cloud API")
         elif tool_gateway_available:
