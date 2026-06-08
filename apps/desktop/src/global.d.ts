@@ -60,6 +60,12 @@ declare global {
       getRecentLogs: () => Promise<{ path: string; lines: string[] }>
       readDir: (path: string) => Promise<HermesReadDirResult>
       gitRoot?: (path: string) => Promise<string | null>
+      getHostInfo?: () => Promise<DesktopHostInfo>
+      mkdir?: (path: string) => Promise<HermesFsMutationResult>
+      newFile?: (path: string) => Promise<HermesFsMutationResult>
+      renamePath?: (fromPath: string, toPath: string) => Promise<HermesFsMutationResult>
+      deletePath?: (path: string) => Promise<HermesFsMutationResult>
+      uploadFile?: (localPath: string, destDir: string) => Promise<HermesFsMutationResult>
       terminal: {
         dispose: (id: string) => Promise<boolean>
         onData: (id: string, callback: (payload: string) => void) => () => void
@@ -233,6 +239,23 @@ export interface DesktopConnectionConfig {
   remoteTokenPreview: string | null
   remoteTokenSet: boolean
   remoteUrl: string
+  sshUser: string
+  sshPort: number
+  sshKey: string
+}
+
+// Identity of the machine the desktop's Terminal/File Explorer run on (always
+// local, even when the chat session targets a remote gateway). See #38369.
+export interface DesktopHostInfo {
+  hostname: string
+  platform: NodeJS.Platform
+}
+
+// Result of a File Explorer mutation (create/rename/delete/upload), local or
+// remote-over-SSH. See #38671.
+export interface HermesFsMutationResult {
+  ok: boolean
+  error?: string
 }
 
 export interface DesktopConnectionConfigInput {
@@ -243,6 +266,9 @@ export interface DesktopConnectionConfigInput {
   remoteAuthMode?: 'oauth' | 'token'
   remoteToken?: string
   remoteUrl?: string
+  sshUser?: string
+  sshPort?: number
+  sshKey?: string
 }
 
 export interface DesktopConnectionTestResult {

@@ -25,6 +25,9 @@ interface GatewaySettingsState {
   remoteTokenPreview: string | null
   remoteTokenSet: boolean
   remoteUrl: string
+  sshUser: string
+  sshPort: number
+  sshKey: string
 }
 
 const EMPTY_STATE: GatewaySettingsState = {
@@ -34,7 +37,10 @@ const EMPTY_STATE: GatewaySettingsState = {
   remoteOauthConnected: false,
   remoteTokenPreview: null,
   remoteTokenSet: false,
-  remoteUrl: ''
+  remoteUrl: '',
+  sshUser: '',
+  sshPort: 22,
+  sshKey: ''
 }
 
 function ModeCard({
@@ -284,7 +290,10 @@ export function GatewaySettings() {
     profile: scope ?? undefined,
     remoteAuthMode: authMode,
     remoteToken: authMode === 'token' ? remoteToken.trim() || undefined : undefined,
-    remoteUrl: trimmedUrl
+    remoteUrl: trimmedUrl,
+    sshUser: state.sshUser.trim(),
+    sshPort: state.sshPort,
+    sshKey: state.sshKey.trim()
   })
 
   const save = async (apply: boolean) => {
@@ -580,6 +589,64 @@ export function GatewaySettings() {
           />
         ) : null}
       </div>
+
+      {state.mode === 'remote' ? (
+        <div className="mt-5">
+          <div className="mb-2 flex items-center gap-2 text-[length:var(--conversation-text-font-size)] font-medium">
+            <Monitor className="size-4 text-muted-foreground" />
+            Remote workspace (SSH)
+          </div>
+          <p className="mb-3 max-w-2xl text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
+            The File Explorer and Terminal connect to the remote machine over SSH so they operate on the same
+            filesystem the agent uses. The host is taken from the Remote URL above; authentication uses your existing
+            SSH key / agent. Leave blank to disable and keep these surfaces local.
+          </p>
+          <div className="grid gap-1">
+            <ListRow
+              action={
+                <Input
+                  className={cn('h-8', CONTROL_TEXT)}
+                  disabled={state.envOverride}
+                  onChange={event => setState(current => ({ ...current, sshUser: event.target.value }))}
+                  placeholder="e.g. ubuntu"
+                  value={state.sshUser}
+                />
+              }
+              description="SSH login user on the remote host. Required to browse files and open a remote terminal."
+              title="SSH user"
+            />
+            <ListRow
+              action={
+                <Input
+                  className={cn('h-8', CONTROL_TEXT)}
+                  disabled={state.envOverride}
+                  onChange={event =>
+                    setState(current => ({ ...current, sshPort: Number(event.target.value) || 22 }))
+                  }
+                  placeholder="22"
+                  type="number"
+                  value={String(state.sshPort)}
+                />
+              }
+              description="SSH port. Defaults to 22."
+              title="SSH port"
+            />
+            <ListRow
+              action={
+                <Input
+                  className={cn('h-8 font-mono', CONTROL_TEXT)}
+                  disabled={state.envOverride}
+                  onChange={event => setState(current => ({ ...current, sshKey: event.target.value }))}
+                  placeholder="Default key / agent (leave blank)"
+                  value={state.sshKey}
+                />
+              }
+              description="Optional path to a private key. Leave blank to use the SSH agent or your default key."
+              title="SSH key path"
+            />
+          </div>
+        </div>
+      ) : null}
 
       {lastTest ? <div className="mt-4 text-xs text-primary">{lastTest}</div> : null}
 
