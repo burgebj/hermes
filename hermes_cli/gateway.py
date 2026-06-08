@@ -3176,6 +3176,27 @@ def _launchd_fallback_to_detached(reason: str, *, exit_on_failure: bool = True) 
     return False
 
 
+def _launchd_proxy_env_xml() -> str:
+    """Build XML fragment for proxy-related env vars present in the current shell.
+
+    launchd does **not** inherit the interactive shell's environment.  On
+    macOS many users rely on ``HTTP_PROXY`` / ``HTTPS_PROXY`` / ``ALL_PROXY``
+    for networking.  We snapshot whatever proxy vars are set *now* (when the
+    user runs ``hermes gateway start``) and embed them in the plist so the
+    gateway process can reach upstream APIs through the proxy.
+    """
+    _PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+    lines: list[str] = []
+    for key in _PROXY_KEYS:
+        val = os.environ.get(key)
+        if val:
+            # XML-escape the value (& → &amp;, < → &lt;, etc.)
+            val = val.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            lines.append(f"        <key>{key}</key>")
+            lines.append(f"        <string>{val}</string>")
+    return "\n".join(lines)
+
+
 def generate_launchd_plist() -> str:
     python_path = get_python_path()
     # Stable cwd anchor — never the volatile source checkout. See
@@ -3249,6 +3270,7 @@ def generate_launchd_plist() -> str:
         <string>{venv_dir}</string>
         <key>HERMES_HOME</key>
         <string>{hermes_home}</string>
+        {_launchd_proxy_env_xml()}
     </dict>
 
     <key>LimitLoadToSessionType</key>
