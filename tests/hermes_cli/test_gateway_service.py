@@ -1,6 +1,7 @@
 """Tests for gateway service management helpers."""
 
 import os
+import plistlib
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -499,6 +500,51 @@ class TestLaunchdServiceRecovery:
             ["launchctl", "bootout", f"{domain}/{label}"],
             ["launchctl", "bootstrap", domain, str(plist_path)],
         ]
+
+    def test_launchd_install_preserves_existing_custom_hermes_home(
+        self, tmp_path, monkeypatch
+    ):
+        """Reinstalling must not silently reset a custom LaunchAgent HERMES_HOME."""
+        current_home = tmp_path / "default-hermes"
+        custom_home = tmp_path / "custom-hermes"
+        custom_venv = tmp_path / "custom-venv"
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        custom_path = "/custom/bin:/usr/bin"
+        current_home.mkdir()
+        custom_home.mkdir()
+        custom_venv.mkdir()
+
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: current_home)
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+
+        installed = plistlib.loads(gateway_cli.generate_launchd_plist().encode("utf-8"))
+        installed["EnvironmentVariables"]["HERMES_HOME"] = str(custom_home)
+        installed["EnvironmentVariables"]["PATH"] = custom_path
+        installed["EnvironmentVariables"]["VIRTUAL_ENV"] = str(custom_venv)
+        installed["StandardOutPath"] = f"{custom_home}/logs/gateway.log"
+        installed["StandardErrorPath"] = f"{custom_home}/logs/gateway.error.log"
+        installed["ThrottleInterval"] = 10
+        plist_path.write_bytes(plistlib.dumps(installed))
+
+        calls = []
+
+        def fake_run(cmd, check=False, **kwargs):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        gateway_cli.launchd_install()
+
+        updated = plistlib.loads(plist_path.read_bytes())
+        assert updated["EnvironmentVariables"]["HERMES_HOME"] == str(custom_home)
+        assert updated["EnvironmentVariables"]["PATH"] == custom_path
+        assert updated["EnvironmentVariables"]["VIRTUAL_ENV"] == str(custom_venv)
+        assert updated["StandardOutPath"] == f"{custom_home}/logs/gateway.log"
+        assert updated["StandardErrorPath"] == f"{custom_home}/logs/gateway.error.log"
+        assert "ThrottleInterval" not in updated
+        assert str(current_home) not in plist_path.read_text(encoding="utf-8")
+        assert any(cmd[:2] == ["launchctl", "bootstrap"] for cmd in calls)
 
     def test_launchd_start_reloads_unloaded_job_and_retries(self, tmp_path, monkeypatch):
         plist_path = tmp_path / "ai.hermes.gateway.plist"

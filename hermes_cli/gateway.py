@@ -7,6 +7,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 import asyncio
 import logging
 import os
+import plistlib
 import shutil
 import signal
 import subprocess
@@ -3150,14 +3151,46 @@ def _launchd_fallback_to_detached(reason: str, *, exit_on_failure: bool = True) 
     return False
 
 
-def generate_launchd_plist() -> str:
+def _read_launchd_preserved_values(plist_path: Path) -> dict[str, str]:
+    """Read service-scoped launchd values that should survive plist refreshes."""
+    try:
+        with plist_path.open("rb") as f:
+            data = plistlib.load(f)
+    except Exception:
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    preserved: dict[str, str] = {}
+    env = data.get("EnvironmentVariables")
+    if isinstance(env, dict):
+        for key in ("HERMES_HOME", "PATH", "VIRTUAL_ENV"):
+            value = env.get(key)
+            if isinstance(value, str) and value.strip():
+                preserved[key] = value
+
+    for key in ("StandardOutPath", "StandardErrorPath"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            preserved[key] = value
+
+    return preserved
+
+
+def generate_launchd_plist(preserved_values: dict[str, str] | None = None) -> str:
+    preserved_values = preserved_values or {}
     python_path = get_python_path()
     # Stable cwd anchor — never the volatile source checkout. See
     # _stable_service_working_dir() for the rationale (same rot risk applies
     # to launchd's WorkingDirectory as to systemd's).
-    working_dir = _stable_service_working_dir()
-    hermes_home = str(get_hermes_home().resolve())
-    log_dir = get_hermes_home() / "logs"
+    hermes_home = preserved_values.get("HERMES_HOME") or str(get_hermes_home().resolve())
+    working_dir = (
+        str(Path(hermes_home).resolve())
+        if preserved_values.get("HERMES_HOME") and Path(hermes_home).is_dir()
+        else _stable_service_working_dir()
+    )
+    log_dir = Path(hermes_home) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     label = get_launchd_label()
     profile_arg = _profile_arg(hermes_home)
@@ -3167,7 +3200,9 @@ def generate_launchd_plist() -> str:
     # the systemd unit), then capture the user's full shell PATH so every
     # user-installed tool (node, ffmpeg, …) is reachable.
     detected_venv = _detect_venv_dir()
-    venv_dir = str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
+    venv_dir = preserved_values.get("VIRTUAL_ENV") or (
+        str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
+    )
     # Resolve the directory containing the node binary (e.g. Homebrew, nvm)
     # so it's explicitly in PATH even if the user's shell PATH changes later.
     priority_dirs = _build_service_path_dirs()
@@ -3176,11 +3211,13 @@ def generate_launchd_plist() -> str:
         resolved_node_dir = str(Path(resolved_node).resolve().parent)
         if resolved_node_dir not in priority_dirs:
             priority_dirs.append(resolved_node_dir)
-    sane_path = ":".join(
+    sane_path = preserved_values.get("PATH") or ":".join(
         dict.fromkeys(
             priority_dirs + [p for p in os.environ.get("PATH", "").split(":") if p]
         )
     )
+    stdout_path = preserved_values.get("StandardOutPath") or f"{log_dir}/gateway.log"
+    stderr_path = preserved_values.get("StandardErrorPath") or f"{log_dir}/gateway.error.log"
 
     # Build ProgramArguments array, including --profile when using a named profile
     prog_args = [
@@ -3238,10 +3275,10 @@ def generate_launchd_plist() -> str:
     <true/>
     
     <key>StandardOutPath</key>
-    <string>{log_dir}/gateway.log</string>
+    <string>{stdout_path}</string>
     
     <key>StandardErrorPath</key>
-    <string>{log_dir}/gateway.error.log</string>
+    <string>{stderr_path}</string>
 </dict>
 </plist>
 """
@@ -3254,7 +3291,7 @@ def launchd_plist_is_current() -> bool:
         return False
 
     installed = plist_path.read_text(encoding="utf-8")
-    expected = generate_launchd_plist()
+    expected = generate_launchd_plist(_read_launchd_preserved_values(plist_path))
     return _normalize_launchd_plist_for_comparison(
         installed
     ) == _normalize_launchd_plist_for_comparison(expected)
@@ -3271,7 +3308,8 @@ def refresh_launchd_plist_if_needed() -> bool:
     if not plist_path.exists() or launchd_plist_is_current():
         return False
 
-    plist_path.write_text(generate_launchd_plist(), encoding="utf-8")
+    preserved_values = _read_launchd_preserved_values(plist_path)
+    plist_path.write_text(generate_launchd_plist(preserved_values), encoding="utf-8")
     label = get_launchd_label()
     # Bootout/bootstrap so launchd picks up the new definition
     subprocess.run(
@@ -3305,7 +3343,10 @@ def launchd_install(force: bool = False):
 
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Installing launchd service to: {plist_path}")
-    plist_path.write_text(generate_launchd_plist())
+    preserved_values = (
+        _read_launchd_preserved_values(plist_path) if plist_path.exists() else {}
+    )
+    plist_path.write_text(generate_launchd_plist(preserved_values), encoding="utf-8")
 
     try:
         subprocess.run(
