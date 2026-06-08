@@ -1012,24 +1012,34 @@ def skill_view(
             seen_md.add(key)
             candidates.append((sd, smd))
 
+        from tools.path_security import validate_within_dir
+
         for search_dir in all_dirs:
             # Strategy 1: direct path (e.g., "mlops/axolotl" or bare "axolotl"
             # at the top of the dir).
+            #
+            # Security: `name` is untrusted. A value like "../outside-skill"
+            # would resolve `direct_path` outside `search_dir` and let an
+            # attacker select a SKILL.md (and, via file_path, sibling files
+            # such as .env) from outside the trusted skills root. Reject any
+            # candidate that escapes `search_dir` before recording it.
             direct_path = search_dir / name
-            if direct_path.is_dir() and (direct_path / "SKILL.md").exists():
-                _record(direct_path, direct_path / "SKILL.md")
-            elif direct_path.with_suffix(".md").exists():
-                _record(None, direct_path.with_suffix(".md"))
+            if validate_within_dir(direct_path, search_dir) is None:
+                if direct_path.is_dir() and (direct_path / "SKILL.md").exists():
+                    _record(direct_path, direct_path / "SKILL.md")
+                elif direct_path.with_suffix(".md").exists():
+                    _record(None, direct_path.with_suffix(".md"))
 
             # Strategy 1b: categorized form for plugin namespace fall-through
             # (e.g., a "myplugin:explore" name with no plugin registered also
             # tries the on-disk path "myplugin/explore").
             if local_category_name:
                 categorized_path = search_dir / local_category_name
-                if categorized_path.is_dir() and (categorized_path / "SKILL.md").exists():
-                    _record(categorized_path, categorized_path / "SKILL.md")
-                elif categorized_path.with_suffix(".md").exists():
-                    _record(None, categorized_path.with_suffix(".md"))
+                if validate_within_dir(categorized_path, search_dir) is None:
+                    if categorized_path.is_dir() and (categorized_path / "SKILL.md").exists():
+                        _record(categorized_path, categorized_path / "SKILL.md")
+                    elif categorized_path.with_suffix(".md").exists():
+                        _record(None, categorized_path.with_suffix(".md"))
 
             # Strategy 2: recursive by directory name (catches nested skills
             # like "foundations/runtime/explore-codebase" called by bare name).
@@ -1122,6 +1132,45 @@ def skill_view(
                 _warnings.append("skill content contains patterns that may indicate prompt injection")
             logging.getLogger(__name__).warning("Skill security warning for '%s': %s", name, "; ".join(_warnings))
 
+        # Security (defense in depth): fail closed when the selected skill's
+        # *logical* path escapes every trusted root via ``..`` traversal.
+        #
+        # This is deliberately a LEXICAL check (normpath collapses ``..``
+        # without touching the filesystem) rather than reusing the symlink-
+        # resolving `_outside_skills_dir` flag above. A skill legitimately
+        # placed under SKILLS_DIR through a symlinked category dir (e.g.
+        # ``skills/linked -> /external/repo``) has its logical path INSIDE the
+        # root even though ``resolve()`` jumps outside — that case must keep
+        # working. Only a path that lexically climbs above every trusted root
+        # (the issue #38643 ``name='../...'`` traversal) is rejected here.
+        def _lexically_within(child: Path, root: Path) -> bool:
+            try:
+                c = os.path.normpath(str(child))
+                r = os.path.normpath(str(root))
+            except Exception:
+                return False
+            return c == r or c.startswith(r + os.sep)
+
+        # Trusted roots = the local skills dir plus every configured external
+        # dir. `all_dirs` already contains SKILLS_DIR when it exists; include
+        # it explicitly so the check is correct even before first install.
+        _logical_roots = [SKILLS_DIR, *all_dirs]
+        if not any(_lexically_within(skill_md, _root) for _root in _logical_roots):
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        "Skill resolves outside the trusted skills directory — "
+                        "refusing to read."
+                    ),
+                    "hint": (
+                        "Load skills by name or by a relative path within your "
+                        "skills directory; '..' traversal is not allowed."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
         parsed_frontmatter: Dict[str, Any] = {}
         try:
             parsed_frontmatter, _ = _parse_frontmatter(content)
@@ -1154,7 +1203,7 @@ def skill_view(
 
         # If a specific file path is requested, read that instead
         if file_path and skill_dir:
-            from tools.path_security import validate_within_dir, has_traversal_component
+            from tools.path_security import has_traversal_component
 
             # Security: Prevent path traversal attacks
             if has_traversal_component(file_path):
