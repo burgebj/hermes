@@ -408,6 +408,8 @@ class ResponseStore:
             )"""
         )
         self._conn.commit()
+        row = self._conn.execute("SELECT MAX(accessed_at) FROM responses").fetchone()
+        self._last_accessed_at = int(row[0] or 0)
         # response_store.db contains conversation history (tool payloads,
         # prompts, results). Tighten to owner-only after creation so other
         # local users on a shared box can't read it. Run once at __init__
@@ -434,6 +436,14 @@ class ResponseStore:
                     exc_info=True,
                 )
 
+    def _next_accessed_at(self) -> int:
+        """Return a strictly increasing timestamp value for LRU ordering."""
+        value = time.time_ns() // 1_000
+        if value <= self._last_accessed_at:
+            value = self._last_accessed_at + 1
+        self._last_accessed_at = value
+        return value
+
     def get(self, response_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a stored response by ID (updates access time for LRU)."""
         row = self._conn.execute(
@@ -443,7 +453,7 @@ class ResponseStore:
             return None
         self._conn.execute(
             "UPDATE responses SET accessed_at = ? WHERE response_id = ?",
-            (time.time(), response_id),
+            (self._next_accessed_at(), response_id),
         )
         self._conn.commit()
         try:
@@ -464,7 +474,7 @@ class ResponseStore:
         """Store a response, evicting the oldest if at capacity."""
         self._conn.execute(
             "INSERT OR REPLACE INTO responses (response_id, data, accessed_at) VALUES (?, ?, ?)",
-            (response_id, json.dumps(data, default=str), time.time()),
+            (response_id, json.dumps(data, default=str), self._next_accessed_at()),
         )
         # Evict oldest entries beyond max_size
         count = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0]
