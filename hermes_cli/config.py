@@ -5610,13 +5610,16 @@ def save_env_value(key: str, value: str):
                 os.chmod(env_path, original_mode)
             except OSError:
                 pass
+        else:
+            # New file — tighten to owner-only.
+            _secure_file(env_path)
     except BaseException:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
         raise
-    _secure_file(env_path)
+
 
     os.environ[key] = value
     invalidate_env_cache()
@@ -5666,13 +5669,14 @@ def remove_env_value(key: str) -> bool:
                     os.chmod(env_path, original_mode)
                 except OSError:
                     pass
+            else:
+                _secure_file(env_path)
         except BaseException:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
             raise
-        _secure_file(env_path)
 
     os.environ.pop(key, None)
     invalidate_env_cache()
