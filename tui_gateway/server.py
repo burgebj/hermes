@@ -376,8 +376,55 @@ def _teardown_session(session: dict | None) -> None:
         worker = session.get("slash_worker")
         if worker:
             worker.close()
+        session["slash_worker"] = None
     except Exception:
         pass
+
+
+def _close_session_slash_worker(session: dict) -> bool:
+    """Close and clear a session's slash worker, if present.
+
+    Detached dashboard/WebSocket clients do not need a hot slash-worker
+    subprocess. Keeping it alive until the full orphan reaper fires was the
+    source of stale worker buildup after dashboard refreshes. Chat state stays
+    warm; ``slash.exec`` lazily recreates the worker on the next attached
+    command.
+    """
+    worker = session.get("slash_worker")
+    if not worker:
+        session["slash_worker"] = None
+        return False
+    try:
+        worker.close()
+    except Exception:
+        logger.debug("slash_worker close failed during detach", exc_info=True)
+    session["slash_worker"] = None
+    return True
+
+
+def _detach_transport_sessions(transport, detach_ts: float | None = None) -> int:
+    """Detach sessions bound to a dead client transport and drop workers.
+
+    ``tui_gateway.ws`` calls this when the dashboard JSON-RPC websocket closes.
+    The session remains resumable/warm for the orphan grace window but its
+    slash-worker subprocess is closed immediately. That gives fast reconnects a
+    cheap in-memory session while eliminating the process leak class: each
+    browser refresh used to leave one ``tui_gateway.slash_worker`` alive for
+    the full reaper window, and repeated refreshes stacked duplicate helpers.
+    """
+    if transport is None:
+        return 0
+    if detach_ts is None:
+        detach_ts = time.time()
+    detached = 0
+    for _, sess in list(_sessions.items()):
+        if sess.get("transport") is not transport:
+            continue
+        sess["transport"] = _stdio_transport
+        sess["detached_at"] = detach_ts
+        _close_session_slash_worker(sess)
+        detached += 1
+    return detached
 
 
 def _ws_session_is_orphaned(session: dict | None) -> bool:
@@ -703,11 +750,11 @@ def _start_agent_build(sid: str, session: dict) -> None:
             # pending_title applied post-first-message (see cli.exec handler).
             current["agent"] = agent
 
-            try:
-                worker = _SlashWorker(key, getattr(agent, "model", _resolve_model()))
-                current["slash_worker"] = worker
-            except Exception:
-                pass
+            # Slash-command workers are intentionally lazy. Building one during
+            # agent startup gives every resumed/new dashboard session a hot
+            # subprocess even if no slash command is ever run. ``slash.exec``
+            # creates it on first real slash use; detach/teardown closes it.
+            current["slash_worker"] = None
 
             try:
                 from tools.approval import (
@@ -1421,11 +1468,15 @@ def _tool_progress_enabled(sid: str) -> bool:
 
 def _restart_slash_worker(session: dict):
     worker = session.get("slash_worker")
-    if worker:
-        try:
-            worker.close()
-        except Exception:
-            pass
+    if not worker:
+        # Keep the lazy invariant: model/session resets should not create an
+        # auxiliary subprocess until a real slash command needs it.
+        session["slash_worker"] = None
+        return
+    try:
+        worker.close()
+    except Exception:
+        pass
     try:
         session["slash_worker"] = _SlashWorker(
             session["session_key"],
@@ -2723,13 +2774,10 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
             except Exception:
                 logger.debug("failed to persist resumed session cwd", exc_info=True)
     _register_session_cwd(_sessions[sid])
-    try:
-        _sessions[sid]["slash_worker"] = _SlashWorker(
-            key, getattr(agent, "model", _resolve_model())
-        )
-    except Exception:
-        # Defer hard-failure to slash.exec; chat still works without slash worker.
-        _sessions[sid]["slash_worker"] = None
+    # Keep resumed sessions cheap: do not spawn a slash worker until slash.exec.
+    # Auto-resume can call _init_session on every dashboard restart, so eager
+    # worker creation here was the remaining persistent duplicate-worker path.
+    _sessions[sid]["slash_worker"] = None
     try:
         from tools.approval import register_gateway_notify, load_permanent_allowlist
 

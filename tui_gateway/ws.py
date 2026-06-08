@@ -297,10 +297,10 @@ async def handle_ws(ws: Any) -> None:
             # per browser refresh — #38591 fallout). Schedule a grace-delayed
             # reap; a quick reconnect / session.resume re-binds a live
             # transport and cancels it (see _ws_session_is_orphaned).
+            detach_ts = server.time.time()
+            detached_sessions = server._detach_transport_sessions(transport, detach_ts)
             for _sid, sess in list(server._sessions.items()):
-                if sess.get("transport") is transport:
-                    sess["transport"] = server._stdio_transport
-                    detached_sessions += 1
+                if sess.get("detached_at") == detach_ts:
                     try:
                         server._schedule_ws_orphan_reap(_sid)
                         reaped_scheduled += 1

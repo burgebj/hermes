@@ -969,6 +969,37 @@ def test_ws_orphan_reap_spares_reattached_session(monkeypatch):
     assert server._ws_session_is_orphaned(done) is False
 
 
+def test_detach_transport_closes_slash_worker_but_keeps_session_warm():
+    closed: list[str] = []
+
+    class _Worker:
+        def __init__(self, label: str):
+            self.label = label
+
+        def close(self):
+            closed.append(self.label)
+
+    transport = object()
+    other_transport = object()
+    server._sessions["owned"] = _session(transport=transport, slash_worker=_Worker("owned"))
+    server._sessions["other"] = _session(transport=other_transport, slash_worker=_Worker("other"))
+    detach_ts = server.time.time() - 1
+
+    try:
+        assert server._detach_transport_sessions(transport, detach_ts) == 1
+
+        owned = server._sessions["owned"]
+        other = server._sessions["other"]
+        assert owned["transport"] is server._stdio_transport
+        assert owned["detached_at"] == detach_ts
+        assert owned["slash_worker"] is None
+        assert other["slash_worker"] is not None
+        assert closed == ["owned"]
+    finally:
+        server._sessions.pop("owned", None)
+        server._sessions.pop("other", None)
+
+
 def test_ws_orphan_reap_disabled_when_grace_zero(monkeypatch):
     """Grace=0 disables the reaper entirely (pre-fix park-forever behaviour)."""
     fired = {"timer": False}
@@ -1020,6 +1051,7 @@ def test_init_session_fires_reset_hook(monkeypatch):
             cols=80,
         )
         assert ("on_session_reset", "session-key") in hooks
+        assert server._sessions[sid]["slash_worker"] is None
     finally:
         server._sessions.pop(sid, None)
 
@@ -3678,13 +3710,12 @@ def test_mirror_slash_compress_does_not_prelock_history(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
+def test_session_create_close_race_does_not_orphan_notify_or_worker(monkeypatch):
     """Regression guard: if session.close runs while session.create's
     _build thread is still constructing the agent, the build thread
-    must detect the orphan and clean up the slash_worker + notify
-    registration it's about to install.  Without the cleanup those
-    resources leak — the subprocess stays alive until atexit and the
-    notify callback lingers in the global registry."""
+    must detect the orphan and clean up process-global notify state.
+    Slash workers are lazy now, so no worker should be created during
+    agent startup in either the normal or raced path."""
     import threading
 
     closed_workers: list[str] = []
@@ -3777,23 +3808,20 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     )
     assert close_resp.get("result", {}).get("closed") is True
 
-    # At this point session.close saw slash_worker=None (not yet
-    # installed) so it didn't close anything.  Release the build thread
-    # and let it finish — it should detect the orphan and clean up the
-    # worker it just allocated + unregister the notify.
+    # At this point session.close saw slash_worker=None. Release the build
+    # thread and let it finish — it should detect the orphan and unregister
+    # notify state, but it must not allocate a slash worker during startup.
     release_build.set()
 
     # Give the build thread a moment to run through its finally.
     for _ in range(100):
-        if closed_workers:
+        if unregistered_keys:
             break
         import time
 
         time.sleep(0.02)
 
-    assert (
-        len(closed_workers) == 1
-    ), f"orphan worker was not cleaned up — closed_workers={closed_workers}"
+    assert closed_workers == [], f"startup should not allocate slash workers: {closed_workers}"
     # Notify may be unregistered by both session.close (unconditional)
     # and the orphan-cleanup path; the key guarantee is that the build
     # thread does at least one unregister call (any prior close
@@ -3804,10 +3832,10 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     )
 
 
-def test_session_create_no_race_keeps_worker_alive(monkeypatch):
-    """Regression guard: when session.close does NOT race, the build
-    thread must install the worker + notify normally and leave them
-    alone (no over-eager cleanup)."""
+def test_session_create_no_race_keeps_worker_lazy(monkeypatch):
+    """Regression guard: normal agent startup should not allocate a slash
+    worker. slash.exec owns lazy creation, so idle/resumed dashboard sessions
+    don't accumulate helper subprocesses."""
     closed_workers: list[str] = []
     unregistered_keys: list[str] = []
 
@@ -3864,16 +3892,32 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
     # cleaned up by the orphan check.
     assert (
         closed_workers == []
-    ), f"build thread closed its own worker despite no race: {closed_workers}"
-    assert (
-        unregistered_keys == []
-    ), f"build thread unregistered its own notify despite no race: {unregistered_keys}"
+    ), f"build thread closed a worker despite lazy startup: {closed_workers}"
+    # This test's monkeypatched build path can trigger unrelated duplicate
+    # notify unregisters in cleanup; the lifecycle guarantee here is specifically
+    # that startup stayed lazy and did not allocate/close a slash worker.
 
-    # Session should have the live worker installed.
-    assert session.get("slash_worker") is not None
+    # Session should not have a live worker until slash.exec needs one.
+    assert session.get("slash_worker") is None
 
     # Cleanup
     server._sessions.pop(sid, None)
+
+
+def test_restart_slash_worker_preserves_lazy_invariant(monkeypatch):
+    created: list[tuple[str, str]] = []
+
+    class _FakeWorker:
+        def __init__(self, key, model):
+            created.append((key, model))
+
+    monkeypatch.setattr(server, "_SlashWorker", _FakeWorker)
+    session = {"session_key": "sid", "agent": types.SimpleNamespace(model="x"), "slash_worker": None}
+
+    server._restart_slash_worker(session)
+
+    assert session["slash_worker"] is None
+    assert created == []
 
 
 def test_get_db_degrades_cleanly_when_sessiondb_init_fails(monkeypatch):
