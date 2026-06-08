@@ -681,6 +681,7 @@ const sidebars: SidebarsConfig = {
         'guides/run-hermes-with-nous-portal',
         'guides/tips',
         'guides/local-llm-on-mac',
+        'guides/full-hermes-gateway-runbook',
         'guides/daily-briefing-bot',
         'guides/team-telegram-assistant',
         'guides/python-library',
