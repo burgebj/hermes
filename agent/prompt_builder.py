@@ -478,6 +478,36 @@ STEER_CHANNEL_NOTE = (
 # message representation stays consistent ("system" everywhere).
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
+
+def _build_sticker_tag_hint() -> str:
+    """Dynamically scan sticker directories and build tag hint for prompt."""
+    import glob as _glob
+    moods: set[str] = set()
+    for _base in [os.path.expanduser('~/.hermes/stickers')]:
+        if not os.path.isdir(_base):
+            continue
+        for _entry in os.listdir(_base):
+            _subdir = os.path.join(_base, _entry)
+            if os.path.isdir(_subdir):
+                _files = []
+                for _ext in ('*.jpg', '*.jpeg', '*.gif', '*.png', '*.webp'):
+                    _files.extend(_glob.glob(os.path.join(_subdir, _ext)))
+                if _files:
+                    moods.add(_entry)
+            elif os.path.isfile(_subdir):
+                _, _ext = os.path.splitext(_entry)
+                if _ext.lower() in ('.jpg', '.jpeg', '.gif', '.png', '.webp') and '_' in _entry:
+                    _mood = _entry.rsplit('.', 1)[0].rsplit('_', 1)[0]
+                    if _mood:
+                        moods.add(_mood)
+    # Filter English directory names, prefer Chinese tags for prompt
+    cn_moods = sorted(m for m in moods if not m.isascii())
+    if cn_moods:
+        tag_str = "、".join(f"%{m}%" for m in cn_moods)
+        return f"可用标签：{tag_str}（新建分类会自动生效）\n"
+    return "可用标签：在 ~/.hermes/stickers/ 下创建目录即可自动生效\n"
+
+
 PLATFORM_HINTS = {
     "whatsapp": (
         "You are on a text messaging communication platform, WhatsApp. "
@@ -588,7 +618,15 @@ PLATFORM_HINTS = {
         "links are supported. "
         "You can send media files natively: include MEDIA:/absolute/path/to/file "
         "in your response. Images (.jpg, .png, .webp) are uploaded and displayed "
-        "inline, audio files as voice messages, and other files as attachments."
+        "inline, audio files as voice messages, and other files as attachments.\n\n"
+        "## 表情包使用规则\n"
+        "在回复中可以用 %情感% 标签来表达情绪，系统会自动发送对应的表情包。\n"
+        + _build_sticker_tag_hint() +
+        "规则：\n"
+        "- 每次回复最多用 1 个标签\n"
+        "- 标签放在句末，如\"今天心情不错 %愉快%\"\n"
+        "- 不要每次都用，自然一点\n"
+        "- 不要直接用 MEDIA: 路径"
     ),
     "weixin": (
         "You are on Weixin/WeChat. Markdown formatting is supported, so you may use it when "
@@ -596,7 +634,15 @@ PLATFORM_HINTS = {
         "include MEDIA:/absolute/path/to/file in your response. Images are sent as native "
         "photos, videos play inline when supported, and other files arrive as downloadable "
         "documents. You can also include image URLs in markdown format ![alt](url) and they "
-        "will be downloaded and sent as native media when possible."
+        "will be downloaded and sent as native media when possible.\n\n"
+        "## 表情包使用规则\n"
+        "在回复中可以用 %情感% 标签来表达情绪，系统会自动发送对应的表情包。\n"
+        + _build_sticker_tag_hint() +
+        "规则：\n"
+        "- 每次回复最多用 1 个标签\n"
+        "- 标签放在句末，如\"今天心情不错 %愉快%\"\n"
+        "- 不要每次都用，自然一点\n"
+        "- 不要直接用 MEDIA: 路径，不要调用 send_sticker 工具（已移除）"
     ),
     "wecom": (
         "You are on WeCom (企业微信 / Enterprise WeChat). Markdown formatting is supported. "

@@ -1864,6 +1864,10 @@ class WeixinAdapter(BasePlatformAdapter):
                 except Exception as exc:
                     logger.warning("[%s] local file delivery failed for %s: %s", self.name, file_path, exc)
 
+            # Scan for sticker tags (%emotion%) before text delivery.
+            from gateway.sticker_middleware import scan_sticker_tags
+            final_content, sticker_path = scan_sticker_tags(final_content, platform="weixin")
+
             # Deliver text content.
             chunks = [c for c in self._split_text(self.format_message(final_content)) if c and c.strip()]
             for idx, chunk in enumerate(chunks):
@@ -1877,6 +1881,20 @@ class WeixinAdapter(BasePlatformAdapter):
                 last_message_id = client_id
                 if idx < len(chunks) - 1 and self._send_chunk_delay_seconds > 0:
                     await asyncio.sleep(self._send_chunk_delay_seconds)
+
+            # Deliver sticker image if tag was matched.
+            if sticker_path:
+                try:
+                    from gateway.sticker_middleware import is_animated_gif
+                    if is_animated_gif(sticker_path):
+                        # Send GIF as file attachment to preserve animation
+                        # (ITEM_IMAGE renders GIFs as static in WeChat)
+                        await self.send_document(chat_id=chat_id, file_path=sticker_path)
+                    else:
+                        await self.send_image_file(chat_id=chat_id, image_path=sticker_path, metadata=metadata)
+                except Exception as exc:
+                    logger.warning("[%s] sticker delivery failed for %s: %s", self.name, sticker_path, exc)
+
             return SendResult(success=True, message_id=last_message_id)
         except Exception as exc:
             logger.error("[%s] send failed to=%s: %s", self.name, _safe_id(chat_id), exc)
