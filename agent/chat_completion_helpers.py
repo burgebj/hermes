@@ -923,6 +923,10 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
                 preserved.append(d.model_dump())
         if preserved:
             msg["reasoning_details"] = preserved
+    # Propagate interleaved order for faithful reconstruction on replay
+    interleaved_order = getattr(assistant_message, "anthropic_interleaved_order", None)
+    if interleaved_order:
+        msg["_anthropic_interleaved_order"] = interleaved_order
 
     # Codex Responses API: preserve encrypted reasoning items for
     # multi-turn continuity. These get replayed as input on the next turn.

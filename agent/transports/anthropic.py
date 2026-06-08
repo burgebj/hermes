@@ -94,6 +94,9 @@ class AnthropicTransport(ProviderTransport):
         reasoning_parts = []
         reasoning_details = []
         tool_calls = []
+        _interleaved_order = []  # [(type, index), ...] tracks original block sequence
+        _ti = 0  # thinking index
+        _ui = 0  # tool_use index
 
         for block in response.content:
             if block.type == "text":
@@ -103,6 +106,8 @@ class AnthropicTransport(ProviderTransport):
                 block_dict = _to_plain_data(block)
                 if isinstance(block_dict, dict):
                     reasoning_details.append(block_dict)
+                _interleaved_order.append(("thinking", _ti))
+                _ti += 1
             elif block.type == "tool_use":
                 name = block.name
                 if strip_tool_prefix and name.startswith(_MCP_PREFIX):
@@ -124,12 +129,17 @@ class AnthropicTransport(ProviderTransport):
                         arguments=json.dumps(block.input),
                     )
                 )
+                _interleaved_order.append(("tool_use", _ui))
+                _ui += 1
 
         finish_reason = self._STOP_REASON_MAP.get(response.stop_reason, "stop")
 
         provider_data = {}
         if reasoning_details:
             provider_data["reasoning_details"] = reasoning_details
+        # Store interleaved order only when it matters: multiple thinking + tool_use
+        if _ti > 1 and _ui > 0:
+            provider_data["_anthropic_interleaved_order"] = _interleaved_order
 
         return NormalizedResponse(
             content="\n".join(text_parts) if text_parts else None,
