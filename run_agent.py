@@ -1546,7 +1546,7 @@ class AIAgent:
                 self._ensure_db_session()
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
-            for msg in messages[flush_from:]:
+            for offset, msg in enumerate(messages[flush_from:]):
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
                 # Persist multimodal tool results as their text summary only —
@@ -1585,6 +1585,7 @@ class AIAgent:
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
                 )
+                self._last_flushed_db_idx = flush_from + offset + 1
             self._last_flushed_db_idx = len(messages)
         except Exception as e:
             logger.warning("Session DB append_message failed: %s", e)
