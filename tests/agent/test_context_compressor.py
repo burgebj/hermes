@@ -310,7 +310,9 @@ class TestNonStringContent:
         assert "Treat the conversation turns below as source material" in prompt
         assert "structured checkpoint summary" in prompt
 
-    def test_summary_call_passes_live_main_runtime(self):
+    def test_summary_call_does_not_pass_main_runtime(self):
+        """Compression should resolve its provider from config, not from
+        the current session's (potentially /model-switched) provider (#27538)."""
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "ok"
@@ -333,13 +335,7 @@ class TestNonStringContent:
         with patch("agent.context_compressor.call_llm", return_value=mock_response) as mock_call:
             c._generate_summary(messages)
 
-        assert mock_call.call_args.kwargs["main_runtime"] == {
-            "model": "gpt-5.4",
-            "provider": "openai-codex",
-            "base_url": "https://chatgpt.com/backend-api/codex",
-            "api_key": "codex-token",
-            "api_mode": "codex_responses",
-        }
+        assert "main_runtime" not in mock_call.call_args.kwargs
 
 
 class TestSummaryFailureCooldown:
