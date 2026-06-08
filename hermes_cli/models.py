@@ -212,6 +212,13 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "gpt-4o-mini",
     ],
     "openai-codex": _codex_curated_models(),
+    "cursor": [
+        "default",
+        "composer-2.5",
+        "claude-4.6-opus-high",
+        "claude-4.5-sonnet",
+        "gpt-5.4-medium",
+    ],
     "xai-oauth": _xai_curated_models(),
     "copilot-acp": [
         "copilot-acp",
@@ -912,6 +919,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("lmstudio",       "LM Studio",                "LM Studio (Local desktop app with built-in model server)"),
     ProviderEntry("anthropic",      "Anthropic",                "Anthropic (Claude models via API key or Claude Code)"),
     ProviderEntry("openai-codex",   "OpenAI Codex",             "OpenAI Codex (Codex CLI via ChatGPT subscription or API key)"),
+    ProviderEntry("cursor",         "Cursor",                   "Cursor subscription (Claude, GPT, Composer via Cursor Agent API)"),
     ProviderEntry("openai-api",     "OpenAI API",               "OpenAI API (api.openai.com, API key)"),
     ProviderEntry("alibaba",        "Qwen Cloud",               "Qwen Cloud / DashScope (Qwen + multi-provider)"),
     ProviderEntry("xai-oauth",      "xAI Grok OAuth (SuperGrok / Premium+)", "xAI Grok OAuth (SuperGrok / Premium+ subscription)"),
@@ -1101,6 +1109,8 @@ _PROVIDER_ALIASES = {
     "minimax_oauth": "minimax-oauth",
     "claude": "anthropic",
     "claude-code": "anthropic",
+    "cursor-agent": "cursor",
+    "cursor_subscription": "cursor",
     "deep-seek": "deepseek",
     "opencode": "opencode-zen",
     "zen": "opencode-zen",
@@ -2095,6 +2105,21 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         return get_codex_model_ids(access_token=access_token)
     if normalized == "xai-oauth":
         return list(_PROVIDER_MODELS.get("xai-oauth", _PROVIDER_MODELS.get("xai", [])))
+    if normalized == "cursor":
+        try:
+            from hermes_cli.auth import resolve_cursor_runtime_credentials
+            from providers import get_provider_profile
+
+            creds = resolve_cursor_runtime_credentials(refresh_if_expiring=True)
+            api_key = str(creds.get("api_key") or "").strip()
+            profile = get_provider_profile("cursor")
+            if profile and api_key:
+                live = profile.fetch_models(api_key=api_key)
+                if live:
+                    return live
+        except Exception:
+            pass
+        return list(_PROVIDER_MODELS.get("cursor", []))
     if normalized in {"copilot", "copilot-acp"}:
         try:
             live = _fetch_github_models(_resolve_copilot_catalog_api_key())
@@ -3572,7 +3597,7 @@ def validate_requested_model(
         }
 
     # Providers with non-standard catalog validation — /v1/models probing is not the right path.
-    if normalized in {"openai-codex", "xai-oauth"}:
+    if normalized in {"openai-codex", "xai-oauth", "cursor"}:
         try:
             catalog_models = provider_model_ids(normalized)
         except Exception:

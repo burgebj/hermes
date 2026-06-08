@@ -2822,6 +2822,8 @@ def select_provider_and_model(args=None):
         _model_flow_openai_codex(config, current_model)
     elif selected_provider == "xai-oauth":
         _model_flow_xai_oauth(config, current_model, args=args)
+    elif selected_provider == "cursor":
+        _model_flow_cursor(config, current_model, args=args)
     elif selected_provider == "qwen-oauth":
         _model_flow_qwen_oauth(config, current_model)
     elif selected_provider == "minimax-oauth":
@@ -3800,6 +3802,70 @@ def _model_flow_xai_oauth(_config, current_model="", *, args=None):
         _save_model_choice(selected)
         _update_config_for_provider("xai-oauth", base_url)
         print(f"Default model set to: {selected} (via xAI Grok OAuth — SuperGrok / Premium+)")
+    else:
+        print("No change.")
+
+
+def _model_flow_cursor(_config, current_model="", *, args=None):
+    """Cursor subscription provider: ensure logged in, then pick model."""
+    from hermes_cli.auth import (
+        DEFAULT_CURSOR_BASE_URL,
+        PROVIDER_REGISTRY,
+        _login_cursor,
+        _prompt_model_selection,
+        _save_model_choice,
+        _update_config_for_provider,
+        get_cursor_auth_status,
+    )
+    from hermes_cli.models import _PROVIDER_MODELS
+
+    status = get_cursor_auth_status()
+    if status.get("logged_in"):
+        print("  Cursor credentials: ✓")
+        print()
+        print("    1. Use existing credentials")
+        print("    2. Reauthenticate (new OAuth login)")
+        print("    3. Cancel")
+        print()
+        try:
+            choice = input("  Choice [1/2/3]: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            choice = "1"
+
+        if choice == "2":
+            print("Starting a fresh Cursor OAuth login...")
+            print()
+            try:
+                _login_cursor(args or argparse.Namespace(), PROVIDER_REGISTRY["cursor"], force_new_login=True)
+            except SystemExit:
+                print("Login cancelled or failed.")
+                return
+            except Exception as exc:
+                print(f"Login failed: {exc}")
+                return
+        elif choice == "3":
+            return
+    else:
+        print("Not logged into Cursor. Starting login...")
+        print()
+        try:
+            _login_cursor(args or argparse.Namespace(), PROVIDER_REGISTRY["cursor"])
+        except SystemExit:
+            print("Login cancelled or failed.")
+            return
+        except Exception as exc:
+            print(f"Login failed: {exc}")
+            return
+
+    models = list(_PROVIDER_MODELS.get("cursor") or [])
+    selected = _prompt_model_selection(
+        models,
+        current_model=current_model or (models[0] if models else "claude-4.6-opus-high"),
+    )
+    if selected:
+        _save_model_choice(selected)
+        _update_config_for_provider("cursor", DEFAULT_CURSOR_BASE_URL)
+        print(f"Default model set to: {selected} (via Cursor)")
     else:
         print("No change.")
 
@@ -13280,11 +13346,162 @@ def main():
     # =========================================================================
     # login command  (parser built in hermes_cli/subcommands/login.py)
     # =========================================================================
+    login_parser = subparsers.add_parser(
+        "login",
+        help="Authenticate with an inference provider",
+        description="Run OAuth device authorization flow for Hermes CLI",
+    )
+    login_parser.add_argument(
+        "--provider",
+        choices=["nous", "openai-codex", "xai-oauth", "cursor"],
+        default=None,
+        help="Provider to authenticate with (default: nous)",
+    )
+    login_parser.add_argument(
+        "--portal-url", help="Portal base URL (default: production portal)"
+    )
+    login_parser.add_argument(
+        "--inference-url",
+        help="Inference API base URL (default: production inference API)",
+    )
+    login_parser.add_argument(
+        "--client-id", default=None, help="OAuth client id to use (default: hermes-cli)"
+    )
+    login_parser.add_argument("--scope", default=None, help="OAuth scope to request")
+    login_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not attempt to open the browser automatically",
+    )
+    login_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=15.0,
+        help="HTTP request timeout in seconds (default: 15)",
+    )
+    login_parser.add_argument(
+        "--ca-bundle", help="Path to CA bundle PEM file for TLS verification"
+    )
+    login_parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable TLS verification (testing only)",
+    )
+    login_parser.set_defaults(func=cmd_login)
     build_login_parser(subparsers, cmd_login=cmd_login)
 
     # =========================================================================
     # logout command  (parser built in hermes_cli/subcommands/logout.py)
     # =========================================================================
+    logout_parser = subparsers.add_parser(
+        "logout",
+        help="Clear authentication for an inference provider",
+        description="Remove stored credentials and reset provider config",
+    )
+    logout_parser.add_argument(
+        "--provider",
+        choices=["nous", "openai-codex", "xai-oauth", "cursor", "spotify"],
+        default=None,
+        help="Provider to log out from (default: active provider)",
+    )
+    logout_parser.set_defaults(func=cmd_logout)
+
+    auth_parser = subparsers.add_parser(
+        "auth",
+        help="Manage pooled provider credentials",
+    )
+    auth_subparsers = auth_parser.add_subparsers(dest="auth_action")
+    auth_add = auth_subparsers.add_parser("add", help="Add a pooled credential")
+    auth_add.add_argument(
+        "provider",
+        help="Provider id (for example: anthropic, openai-codex, openrouter)",
+    )
+    auth_add.add_argument(
+        "--type",
+        dest="auth_type",
+        choices=["oauth", "api-key", "api_key"],
+        help="Credential type to add",
+    )
+    auth_add.add_argument("--label", help="Optional display label")
+    auth_add.add_argument(
+        "--api-key", help="API key value (otherwise prompted securely)"
+    )
+    auth_add.add_argument("--portal-url", help="Nous portal base URL")
+    auth_add.add_argument("--inference-url", help="Nous inference base URL")
+    auth_add.add_argument("--client-id", help="OAuth client id")
+    auth_add.add_argument("--scope", help="OAuth scope override")
+    auth_add.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not auto-open a browser for OAuth login",
+    )
+    auth_add.add_argument(
+        "--manual-paste",
+        action="store_true",
+        help=(
+            "Skip the loopback callback listener and paste the failed "
+            "callback URL from your browser instead. Use this on "
+            "browser-only remotes (GCP Cloud Shell, GitHub Codespaces, "
+            "EC2 Instance Connect, ...) where 127.0.0.1 on the remote "
+            "isn't reachable from your laptop. See #26923."
+        ),
+    )
+    auth_add.add_argument(
+        "--timeout", type=float, help="OAuth/network timeout in seconds"
+    )
+    auth_add.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable TLS verification for OAuth login",
+    )
+    auth_add.add_argument("--ca-bundle", help="Custom CA bundle for OAuth login")
+    auth_list = auth_subparsers.add_parser("list", help="List pooled credentials")
+    auth_list.add_argument("provider", nargs="?", help="Optional provider filter")
+    auth_remove = auth_subparsers.add_parser(
+        "remove", help="Remove a pooled credential by index, id, or label"
+    )
+    auth_remove.add_argument("provider", help="Provider id")
+    auth_remove.add_argument(
+        "target", help="Credential index, entry id, or exact label"
+    )
+    auth_reset = auth_subparsers.add_parser(
+        "reset", help="Clear exhaustion status for all credentials for a provider"
+    )
+    auth_reset.add_argument("provider", help="Provider id")
+    auth_status = auth_subparsers.add_parser(
+        "status", help="Show auth status for a provider"
+    )
+    auth_status.add_argument("provider", help="Provider id")
+    auth_logout = auth_subparsers.add_parser(
+        "logout", help="Log out a provider and clear stored auth state"
+    )
+    auth_logout.add_argument("provider", help="Provider id")
+    auth_spotify = auth_subparsers.add_parser(
+        "spotify", help="Authenticate Hermes with Spotify via PKCE"
+    )
+    auth_spotify.add_argument(
+        "spotify_action",
+        nargs="?",
+        choices=["login", "status", "logout"],
+        default="login",
+    )
+    auth_spotify.add_argument(
+        "--client-id", help="Spotify app client_id (or set HERMES_SPOTIFY_CLIENT_ID)"
+    )
+    auth_spotify.add_argument(
+        "--redirect-uri",
+        help="Allow-listed localhost redirect URI for your Spotify app",
+    )
+    auth_spotify.add_argument("--scope", help="Override requested Spotify scopes")
+    auth_spotify.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not attempt to open the browser automatically",
+    )
+    auth_spotify.add_argument(
+        "--timeout", type=float, help="Callback/token exchange timeout in seconds"
+    )
+    auth_parser.set_defaults(func=cmd_auth)
     build_logout_parser(subparsers, cmd_logout=cmd_logout)
 
     # =========================================================================

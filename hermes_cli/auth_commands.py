@@ -33,7 +33,7 @@ from hermes_cli.secret_prompt import masked_secret_prompt
 
 
 # Providers that support OAuth login in addition to API keys.
-_OAUTH_CAPABLE_PROVIDERS = {"anthropic", "nous", "openai-codex", "xai-oauth", "qwen-oauth", "google-gemini-cli", "minimax-oauth"}
+_OAUTH_CAPABLE_PROVIDERS = {"anthropic", "nous", "openai-codex", "xai-oauth", "cursor", "qwen-oauth", "google-gemini-cli", "minimax-oauth"}
 
 
 def _get_custom_provider_names() -> list:
@@ -341,6 +341,45 @@ def auth_add_command(args) -> None:
             creds["tokens"]["access_token"], _oauth_default_label(provider, 1)
         )
         print(f'Saved {provider} OAuth credentials: "{shown_label}"')
+        return
+
+    if provider == "cursor":
+        creds = auth_mod.login_cursor(
+            on_auth_url=lambda url: print(f"Open this URL to continue:\n  {url}"),
+            on_poll_start=lambda: print("Waiting for Cursor login approval..."),
+        )
+        auth_mod._mark_cursor_oauth_active({"base_url": auth_mod.DEFAULT_CURSOR_BASE_URL})
+        with auth_mod._auth_store_lock():
+            auth_store = auth_mod._load_auth_store()
+            state = auth_mod._load_provider_state(auth_store, "cursor") or {}
+            state.update(
+                {
+                    "access_token": creds["access_token"],
+                    "refresh_token": creds.get("refresh_token"),
+                    "expires_at": creds.get("expires_at"),
+                    "base_url": auth_mod.DEFAULT_CURSOR_BASE_URL,
+                    "auth_mode": "oauth_external",
+                }
+            )
+            auth_mod._save_provider_state(auth_store, "cursor", state)
+            auth_mod._save_auth_store(auth_store)
+        label = (getattr(args, "label", None) or "").strip() or label_from_token(
+            creds["access_token"],
+            _oauth_default_label(provider, len(pool.entries()) + 1),
+        )
+        entry = PooledCredential(
+            provider=provider,
+            id=uuid.uuid4().hex[:6],
+            label=label,
+            auth_type=AUTH_TYPE_OAUTH,
+            priority=0,
+            source=f"{SOURCE_MANUAL}:cursor_oauth",
+            access_token=creds["access_token"],
+            refresh_token=creds.get("refresh_token"),
+            base_url=auth_mod.DEFAULT_CURSOR_BASE_URL,
+        )
+        pool.add_entry(entry)
+        print(f'Added {provider} OAuth credential #{len(pool.entries())}: "{entry.label}"')
         return
 
     if provider == "google-gemini-cli":

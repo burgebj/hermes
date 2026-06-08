@@ -44,6 +44,15 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 
 from hermes_cli.config import get_hermes_home, get_config_path, read_raw_config
+from hermes_cli.cursor_oauth import (
+    CURSOR_LOGIN_URL,
+    CURSOR_POLL_URL,
+    CURSOR_REFRESH_URL,
+    get_token_expiry as _cursor_get_token_expiry,
+    is_cursor_token_expiring_soon,
+    login_cursor,
+    refresh_cursor_token,
+)
 from hermes_constants import OPENROUTER_BASE_URL, secure_parent_dir
 from agent.credential_persistence import sanitize_borrowed_credential_payload
 from utils import atomic_replace, atomic_yaml_write, is_truthy_value
@@ -79,6 +88,7 @@ NOUS_INVOKE_JWT_MIN_TTL_SECONDS = ACCESS_TOKEN_REFRESH_SKEW_SECONDS
 DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS = 1     # poll at most every 1s
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_XAI_OAUTH_BASE_URL = "https://api.x.ai/v1"
+DEFAULT_CURSOR_BASE_URL = "https://api2.cursor.sh"
 MINIMAX_OAUTH_CLIENT_ID = "78257093-7e40-4613-99e0-527b14b39113"
 MINIMAX_OAUTH_SCOPE = "group_id profile model.completion"
 MINIMAX_OAUTH_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:user_code"
@@ -193,6 +203,12 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         name="xAI Grok OAuth (SuperGrok / Premium+)",
         auth_type="oauth_external",
         inference_base_url=DEFAULT_XAI_OAUTH_BASE_URL,
+    ),
+    "cursor": ProviderConfig(
+        id="cursor",
+        name="Cursor",
+        auth_type="oauth_external",
+        inference_base_url=DEFAULT_CURSOR_BASE_URL,
     ),
     "qwen-oauth": ProviderConfig(
         id="qwen-oauth",
@@ -1486,6 +1502,7 @@ def resolve_provider(
         "x-ai": "xai", "x.ai": "xai", "grok": "xai",
         "xai-oauth": "xai-oauth", "x-ai-oauth": "xai-oauth",
         "grok-oauth": "xai-oauth", "xai-grok-oauth": "xai-oauth",
+        "cursor-agent": "cursor", "cursor_subscription": "cursor",
         "kimi": "kimi-coding", "kimi-for-coding": "kimi-coding", "moonshot": "kimi-coding",
         "kimi-cn": "kimi-coding-cn", "moonshot-cn": "kimi-coding-cn",
         "step": "stepfun", "stepfun-coding-plan": "stepfun",
@@ -1708,6 +1725,11 @@ def _decode_jwt_claims(token: Any) -> Dict[str, Any]:
     except Exception:
         return {}
     return claims if isinstance(claims, dict) else {}
+
+
+def get_token_expiry(token: Any) -> Optional[int]:
+    exp = _cursor_get_token_expiry(token if isinstance(token, str) else "")
+    return exp if isinstance(exp, int) else None
 
 
 def _scope_values(raw_scope: Any) -> set[str]:
@@ -2106,6 +2128,119 @@ def get_qwen_auth_status() -> Dict[str, Any]:
         return {
             "logged_in": False,
             "auth_file": str(auth_path),
+            "error": str(exc),
+        }
+
+
+def _mark_cursor_oauth_active(creds: Dict[str, Any]) -> None:
+    with _auth_store_lock():
+        auth_store = _load_auth_store()
+        state: Dict[str, Any] = {}
+        if creds.get("base_url"):
+            state["base_url"] = str(creds["base_url"]).rstrip("/")
+        _save_provider_state(auth_store, "cursor", state)
+        _save_auth_store(auth_store)
+
+
+def resolve_cursor_runtime_credentials(
+    *,
+    force_refresh: bool = False,
+    refresh_if_expiring: bool = True,
+) -> Dict[str, Any]:
+    env_token = os.getenv("CURSOR_ACCESS_TOKEN", "").strip()
+    if env_token:
+        return {
+            "provider": "cursor",
+            "base_url": DEFAULT_CURSOR_BASE_URL,
+            "api_key": env_token,
+            "source": "env",
+            "expires_at": get_token_expiry(env_token),
+        }
+
+    state = get_provider_auth_state("cursor")
+    if not state:
+        raise AuthError(
+            "Cursor OAuth credentials not found. Run `hermes auth add cursor`.",
+            provider="cursor",
+            code="cursor_auth_missing",
+            relogin_required=True,
+        )
+
+    access_token = str(state.get("access_token", "") or "").strip()
+    refresh_token = str(state.get("refresh_token", "") or "").strip()
+    should_refresh = bool(force_refresh)
+    if (not should_refresh) and refresh_if_expiring:
+        should_refresh = is_cursor_token_expiring_soon(access_token)
+
+    if should_refresh:
+        if not refresh_token:
+            raise AuthError(
+                "Cursor OAuth refresh token missing. Run `hermes auth add cursor` again.",
+                provider="cursor",
+                code="cursor_refresh_token_missing",
+                relogin_required=True,
+            )
+        try:
+            refreshed = refresh_cursor_token(refresh_token)
+        except Exception as exc:
+            raise AuthError(
+                f"Cursor OAuth refresh failed: {exc}",
+                provider="cursor",
+                code="cursor_refresh_failed",
+                relogin_required=True,
+            ) from exc
+        access_token = str(refreshed.get("access_token", "") or "").strip()
+        refresh_token = str(refreshed.get("refresh_token", refresh_token) or refresh_token).strip()
+        with _auth_store_lock():
+            auth_store = _load_auth_store()
+            next_state = _load_provider_state(auth_store, "cursor") or {}
+            next_state.update(
+                {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "expires_at": refreshed.get("expires_at"),
+                    "base_url": DEFAULT_CURSOR_BASE_URL,
+                    "auth_mode": "oauth_external",
+                    "login_url": CURSOR_LOGIN_URL,
+                    "poll_url": CURSOR_POLL_URL,
+                    "refresh_url": CURSOR_REFRESH_URL,
+                }
+            )
+            _store_provider_state(auth_store, "cursor", next_state, set_active=False)
+            _save_auth_store(auth_store)
+        state = next_state
+
+    if not access_token:
+        raise AuthError(
+            "Cursor OAuth access token missing. Run `hermes auth add cursor`.",
+            provider="cursor",
+            code="cursor_access_token_missing",
+            relogin_required=True,
+        )
+
+    return {
+        "provider": "cursor",
+        "base_url": str(state.get("base_url") or DEFAULT_CURSOR_BASE_URL).rstrip("/"),
+        "api_key": access_token,
+        "source": "hermes-auth-store",
+        "expires_at": state.get("expires_at") or get_token_expiry(access_token),
+    }
+
+
+def get_cursor_auth_status() -> Dict[str, Any]:
+    try:
+        creds = resolve_cursor_runtime_credentials(refresh_if_expiring=True)
+        return {
+            "logged_in": True,
+            "auth_store": str(_auth_file_path()),
+            "source": creds.get("source"),
+            "api_key": creds.get("api_key"),
+            "expires_at": creds.get("expires_at"),
+        }
+    except AuthError as exc:
+        return {
+            "logged_in": False,
+            "auth_store": str(_auth_file_path()),
             "error": str(exc),
         }
 
@@ -5752,6 +5887,8 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
         return get_codex_auth_status()
     if target == "xai-oauth":
         return get_xai_oauth_auth_status()
+    if target == "cursor":
+        return get_cursor_auth_status()
     if target == "qwen-oauth":
         return get_qwen_auth_status()
     if target == "google-gemini-cli":
@@ -6051,7 +6188,7 @@ def _logout_default_provider_from_config() -> Optional[str]:
     "No provider is currently logged in" and never reset model.provider.
     """
     provider = _get_config_provider()
-    if provider in {"nous", "openai-codex", "xai-oauth"}:
+    if provider in {"nous", "openai-codex", "xai-oauth", "cursor"}:
         return provider
     return None
 
@@ -6418,6 +6555,81 @@ def _login_xai_oauth(
     from hermes_constants import display_hermes_home as _dhh
     print(f"  Auth state: {_dhh()}/auth.json")
     print(f"  Config updated: {config_path} (model.provider=xai-oauth)")
+
+
+def _login_cursor(
+    args,
+    pconfig: ProviderConfig,
+    *,
+    force_new_login: bool = False,
+) -> None:
+    del pconfig
+
+    if not force_new_login:
+        try:
+            existing = resolve_cursor_runtime_credentials(refresh_if_expiring=True)
+            api_key = existing.get("api_key", "")
+            if isinstance(api_key, str) and api_key and not is_cursor_token_expiring_soon(api_key):
+                print("Existing Cursor OAuth credentials found in Hermes auth store.")
+                try:
+                    reuse = input("Use existing credentials? [Y/n]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    reuse = "y"
+                if reuse in {"", "y", "yes"}:
+                    config_path = _update_config_for_provider(
+                        "cursor",
+                        existing.get("base_url", DEFAULT_CURSOR_BASE_URL),
+                    )
+                    print()
+                    print("Login successful!")
+                    print(f"  Config updated: {config_path} (model.provider=cursor)")
+                    return
+        except AuthError:
+            pass
+
+    print()
+    print("Signing in to Cursor...")
+    print("(Hermes creates its own local OAuth session)")
+    print()
+
+    try:
+        creds = login_cursor(
+            on_auth_url=lambda url: print(f"Open this URL to continue:\n  {url}"),
+            on_poll_start=lambda: print("Waiting for Cursor login approval..."),
+        )
+    except Exception as exc:
+        raise AuthError(
+            f"Cursor OAuth login failed: {exc}",
+            provider="cursor",
+            code="cursor_login_failed",
+            relogin_required=True,
+        ) from exc
+
+    with _auth_store_lock():
+        auth_store = _load_auth_store()
+        state = _load_provider_state(auth_store, "cursor") or {}
+        state.update(
+            {
+                "access_token": creds["access_token"],
+                "refresh_token": creds.get("refresh_token"),
+                "expires_at": creds.get("expires_at"),
+                "base_url": DEFAULT_CURSOR_BASE_URL,
+                "auth_mode": "oauth_external",
+                "login_url": CURSOR_LOGIN_URL,
+                "poll_url": CURSOR_POLL_URL,
+                "refresh_url": CURSOR_REFRESH_URL,
+            }
+        )
+        _save_provider_state(auth_store, "cursor", state)
+        _save_auth_store(auth_store)
+
+    _mark_cursor_oauth_active({"base_url": DEFAULT_CURSOR_BASE_URL})
+    config_path = _update_config_for_provider("cursor", DEFAULT_CURSOR_BASE_URL)
+    print()
+    print("Login successful!")
+    from hermes_constants import display_hermes_home as _dhh
+    print(f"  Auth state: {_dhh()}/auth.json")
+    print(f"  Config updated: {config_path} (model.provider=cursor)")
 
 
 def _xai_oauth_build_authorize_url(

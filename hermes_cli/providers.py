@@ -70,6 +70,12 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         base_url_override="https://api.x.ai/v1",
         base_url_env_var="XAI_BASE_URL",
     ),
+    "cursor": HermesOverlay(
+        transport="cursor_agent",
+        auth_type="oauth_external",
+        base_url_override="https://api2.cursor.sh",
+        extra_env_vars=("CURSOR_ACCESS_TOKEN",),
+    ),
     "qwen-oauth": HermesOverlay(
         transport="openai_chat",
         auth_type="oauth_external",
@@ -251,6 +257,8 @@ ALIASES: Dict[str, str] = {
     "x-ai": "xai",
     "x.ai": "xai",
     "grok": "xai",
+    "cursor-agent": "cursor",
+    "cursor_subscription": "cursor",
     "grok-oauth": "xai-oauth",
     "xai-oauth": "xai-oauth",
     "x-ai-oauth": "xai-oauth",

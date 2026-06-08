@@ -227,6 +227,11 @@ DEFAULT_CONTEXT_LENGTHS = {
     "grok": 131072,             # catch-all (grok-beta, unknown grok-*)
     # Kimi
     "kimi": 262144,
+    "composer-2.5": 200000,
+    "cursor-composer": 200000,
+    "cursor-composer-2.5": 200000,
+    "claude-4.6-opus-high": 200000,
+    "claude-4.5-sonnet": 200000,
     # Tencent — Hy3 Preview (Hunyuan) with 256K context window.
     # OpenRouter live metadata reports 262144 (256 × 1024); align the
     # static fallback so cache and offline both agree (issue #22268).

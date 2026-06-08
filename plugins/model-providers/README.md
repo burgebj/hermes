@@ -61,6 +61,12 @@ Nothing else needs to change. `auth.py`, `config.py`, `models.py`,
 `doctor.py`, `model_metadata.py`, `runtime_provider.py`, and the
 chat_completions transport all auto-wire from the registry.
 
+For providers that need a non-OpenAI wire protocol, set the provider's
+native API mode in its profile/hooks rather than assuming chat
+completions. The built-in `cursor` provider is the reference example:
+it uses a native `cursor_agent` transport instead of the generic
+OpenAI-compatible path.
+
 ## Non-trivial profiles
 
 Override the `ProviderProfile` hooks in a subclass for per-provider

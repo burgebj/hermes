@@ -173,6 +173,28 @@ def test_resolve_runtime_provider_qwen_oauth(monkeypatch):
     assert resolved["requested_provider"] == "qwen-oauth"
 
 
+def test_resolve_runtime_provider_cursor(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "cursor")
+    monkeypatch.setattr(
+        rp,
+        "resolve_cursor_runtime_credentials",
+        lambda: {
+            "provider": "cursor",
+            "base_url": "https://api2.cursor.sh",
+            "api_key": "cursor-token",
+            "source": "hermes-auth-store",
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="cursor")
+
+    assert resolved["provider"] == "cursor"
+    assert resolved["api_mode"] == "cursor_agent"
+    assert resolved["base_url"] == "https://api2.cursor.sh"
+    assert resolved["api_key"] == "cursor-token"
+    assert resolved["requested_provider"] == "cursor"
+
+
 def test_resolve_runtime_provider_uses_qwen_pool_entry(monkeypatch):
     class _Entry:
         access_token = "pool-qwen-token"

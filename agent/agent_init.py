@@ -228,7 +228,8 @@ def init_agent(
         base_url (str): Base URL for the model API (optional)
         api_key (str): API key for authentication (optional, uses env var if not provided)
         provider (str): Provider identifier (optional; used for telemetry/routing hints)
-        api_mode (str): API mode override: "chat_completions" or "codex_responses"
+        api_mode (str): API mode override: "chat_completions", "codex_responses",
+            "anthropic_messages", or "cursor_agent"
         model (str): Model name to use (default: "anthropic/claude-opus-4.6")
         max_iterations (int): Maximum number of tool calling iterations (default: 90)
         tool_delay (float): Delay between tool calls in seconds (default: 1.0)
@@ -308,8 +309,10 @@ def init_agent(
     agent.provider = provider_name or ""
     agent.acp_command = acp_command or command
     agent.acp_args = list(acp_args or args or [])
-    if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server"}:
+    if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server", "cursor_agent"}:
         agent.api_mode = api_mode
+    elif agent.provider == "cursor":
+        agent.api_mode = "cursor_agent"
     elif agent.provider == "openai-codex":
         agent.api_mode = "codex_responses"
     elif agent.provider in {"xai", "xai-oauth"}:
@@ -691,6 +694,15 @@ def init_agent(
                     print("🔑 Using credentials: Microsoft Entra ID")
                 elif isinstance(effective_key, str) and len(effective_key) > 12:
                     print(f"🔑 Using token: {effective_key[:8]}...{effective_key[-4:]}")
+    elif agent.api_mode == "cursor_agent":
+        agent.api_key = api_key or ""
+        agent.client = None
+        agent._client_kwargs = {}
+        agent._cursor_blob_store = {}
+        agent._cursor_conversation_state = None
+        agent._cursor_conversation_id = (
+            session_id or str(uuid.uuid4())
+        )
     elif agent.api_mode == "bedrock_converse":
         # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
         # Region is extracted from the base_url or defaults to us-east-1.
@@ -1732,6 +1744,12 @@ def init_agent(
             "anthropic_api_key": agent._anthropic_api_key,
             "anthropic_base_url": agent._anthropic_base_url,
             "is_anthropic_oauth": agent._is_anthropic_oauth,
+        })
+    elif agent.api_mode == "cursor_agent":
+        agent._primary_runtime.update({
+            "cursor_blob_store": dict(getattr(agent, "_cursor_blob_store", {}) or {}),
+            "cursor_conversation_state": getattr(agent, "_cursor_conversation_state", None),
+            "cursor_conversation_id": getattr(agent, "_cursor_conversation_id", None),
         })
 
 

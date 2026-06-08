@@ -14,6 +14,7 @@ from agent.credential_pool import CredentialPool, PooledCredential, get_custom_p
 from hermes_cli.auth import (
     AuthError,
     DEFAULT_CODEX_BASE_URL,
+    DEFAULT_CURSOR_BASE_URL,
     DEFAULT_QWEN_BASE_URL,
     DEFAULT_XAI_OAUTH_BASE_URL,
     PROVIDER_REGISTRY,
@@ -22,6 +23,7 @@ from hermes_cli.auth import (
     resolve_provider,
     resolve_nous_runtime_credentials,
     resolve_codex_runtime_credentials,
+    resolve_cursor_runtime_credentials,
     resolve_xai_oauth_runtime_credentials,
     resolve_qwen_runtime_credentials,
     resolve_gemini_oauth_runtime_credentials,
@@ -309,6 +311,9 @@ def _resolve_runtime_from_pool_entry(
     if provider == "openai-codex":
         api_mode = "codex_responses"
         base_url = base_url or DEFAULT_CODEX_BASE_URL
+    elif provider == "cursor":
+        api_mode = "cursor_agent"
+        base_url = base_url or DEFAULT_CURSOR_BASE_URL
     elif provider == "xai-oauth":
         api_mode = "codex_responses"
         base_url = base_url or DEFAULT_XAI_OAUTH_BASE_URL
@@ -1421,6 +1426,22 @@ def resolve_runtime_provider(
                 raise
             logger.info("Auto-detected xAI OAuth provider but credentials failed; "
                         "falling through to next provider.")
+
+    if provider == "cursor":
+        try:
+            creds = resolve_cursor_runtime_credentials()
+            return {
+                "provider": "cursor",
+                "api_mode": "cursor_agent",
+                "base_url": creds.get("base_url", "").rstrip("/") or DEFAULT_CURSOR_BASE_URL,
+                "api_key": creds.get("api_key", ""),
+                "source": creds.get("source", "hermes-auth-store"),
+                "requested_provider": requested_provider,
+            }
+        except AuthError:
+            if requested_provider != "auto":
+                raise
+            logger.info("Cursor OAuth credentials failed; falling through to next provider.")
 
     if provider == "qwen-oauth":
         try:

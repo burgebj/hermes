@@ -27,6 +27,7 @@ from typing import Any, Dict, Optional
 
 from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
 from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
+from agent.cursor_adapter import run_cursor_turn
 from agent.error_classifier import FailoverReason
 from agent.model_metadata import is_local_endpoint
 from agent.message_sanitization import (
@@ -202,6 +203,12 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 result["response"] = agent._run_codex_stream(
                     api_kwargs,
                     client=request_client,
+                    on_first_delta=getattr(agent, "_codex_on_first_delta", None),
+                )
+            elif agent.api_mode == "cursor_agent":
+                result["response"] = run_cursor_turn(
+                    agent,
+                    api_kwargs,
                     on_first_delta=getattr(agent, "_codex_on_first_delta", None),
                 )
             elif agent.api_mode == "anthropic_messages":
@@ -657,6 +664,15 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             replay_encrypted_reasoning=bool(
                 getattr(agent, "_codex_reasoning_replay_enabled", True)
             ),
+        )
+
+    if agent.api_mode == "cursor_agent":
+        _ct = agent._get_transport()
+        _msgs_for_cursor = agent._prepare_messages_for_non_vision_model(api_messages)
+        return _ct.build_kwargs(
+            model=agent.model,
+            messages=_msgs_for_cursor,
+            tools=tools_for_api,
         )
 
     # ── chat_completions (default) ─────────────────────────────────────
@@ -1133,6 +1149,8 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         _fb_is_azure = agent._is_azure_openai_url(fb_base_url)
         if fb_provider == "openai-codex":
             fb_api_mode = "codex_responses"
+        elif fb_provider == "cursor":
+            fb_api_mode = "cursor_agent"
         elif fb_provider == "anthropic" or fb_base_url.rstrip("/").lower().endswith("/anthropic"):
             fb_api_mode = "anthropic_messages"
         elif _fb_is_azure:
@@ -1204,6 +1222,10 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 effective_key, agent._anthropic_base_url, timeout=_fb_timeout,
             )
             agent._is_anthropic_oauth = _is_oauth_token(effective_key) if fb_provider == "anthropic" else False
+            agent.client = None
+            agent._client_kwargs = {}
+        elif fb_api_mode == "cursor_agent":
+            agent.api_key = fb_client.api_key
             agent.client = None
             agent._client_kwargs = {}
         else:
@@ -1581,6 +1603,14 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             return agent._interruptible_api_call(api_kwargs)
         finally:
             agent._codex_on_first_delta = None
+
+    if agent.api_mode == "cursor_agent":
+        return run_cursor_turn(
+            agent,
+            api_kwargs,
+            on_first_delta=on_first_delta,
+            on_text_delta=agent._fire_stream_delta if agent._has_stream_consumers() else None,
+        )
 
     # Bedrock Converse uses boto3's converse_stream() with real-time delta
     # callbacks — same UX as Anthropic and chat_completions streaming.

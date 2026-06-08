@@ -16,6 +16,7 @@ You need at least one way to connect to an LLM. Use `hermes model` to switch pro
 |----------|-------|
 | **Nous Portal** | `hermes model` (OAuth, subscription-based) |
 | **OpenAI Codex** | `hermes model` (ChatGPT OAuth, uses Codex models) |
+| **Cursor** | Cursor subscription required. Use `hermes auth add cursor` (OAuth) or set `CURSOR_ACCESS_TOKEN` |
 | **GitHub Copilot** | `hermes model` (OAuth device code flow, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, or `gh auth token`) |
 | **GitHub Copilot ACP** | `hermes model` (spawns local `copilot --acp --stdio`) |
 | **Anthropic** | `hermes model` (Claude Max + extra usage credits via OAuth; also supports Anthropic API key or manual setup-token — see note below) |
@@ -102,6 +103,27 @@ Hermes has **two** model commands that serve different purposes:
 | **`/model`** | Inside a Hermes chat session | Quick switch between **already-configured** providers and models |
 
 If you're trying to switch to a provider you haven't set up yet (e.g. you only have OpenRouter configured and want to use Anthropic), you need `hermes model`, not `/model`. Exit your session first (`Ctrl+C` or `/quit`), run `hermes model`, complete the provider setup, then start a new session.
+
+
+### Cursor
+
+Hermes supports Cursor as a first-class provider using Cursor's native agent transport.
+
+```bash
+# Browser OAuth flow
+hermes auth add cursor
+
+# Direct token override
+export CURSOR_ACCESS_TOKEN=...
+
+# Example
+hermes chat --provider cursor --model claude-4.6-opus-high
+```
+
+- Requires an active Cursor subscription.
+- `hermes auth add cursor` launches Cursor's browser OAuth flow and stores the resulting credentials in Hermes' auth store.
+- Model IDs are fetched live from Cursor's `GetUsableModels` API (typically 100+ models per account). Use `/model` in chat or `hermes model` to browse them.
+- `CURSOR_ACCESS_TOKEN` is supported as a direct override for environments where you want to inject the token manually.
 
 
 ### Anthropic (Native)
