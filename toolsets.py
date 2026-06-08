@@ -70,6 +70,9 @@ _HERMES_CORE_TOOLS = [
     "kanban_unblock",
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
+    # Microsoft OneDrive read-only access (gated on MICROSOFT_CLIENT_ID + msal)
+    "list_onedrive_root", "list_onedrive_folder",
+    "read_onedrive_text_file", "download_onedrive_file",
 ]
 
 # Webhook events may originate from untrusted third-party content (for example,
@@ -146,6 +149,15 @@ TOOLSETS = {
             "or keyboard focus. Works with any tool-capable model."
         ),
         "tools": ["computer_use"],
+        "includes": []
+    },
+
+    "onedrive": {
+        "description": "Read-only Microsoft OneDrive tools via Microsoft Graph API",
+        "tools": [
+            "list_onedrive_root", "list_onedrive_folder",
+            "read_onedrive_text_file", "download_onedrive_file",
+        ],
         "includes": []
     },
 
