@@ -3621,6 +3621,69 @@ def _is_official_docker_checkout() -> bool:
     )
 
 
+def _running_under_gateway_supervisor() -> bool:
+    """Return True when this process IS the gateway a service manager launched.
+
+    The conflict guard below must never fire on the service's own startup, or
+    it would wedge the unit into a respawn/refuse loop. Each supervisor exports
+    a reliable marker into the child's environment:
+
+      - systemd sets ``INVOCATION_ID`` for every unit it launches (the same
+        marker ``gateway/run.py`` already uses to pick the restart path).
+      - launchd sets ``XPC_SERVICE_NAME`` to the job label for jobs it spawns;
+        interactive shells inherit the sentinel ``"0"`` instead.
+      - the s6-overlay container longrun exports ``HERMES_S6_SUPERVISED_CHILD``.
+    """
+    if os.environ.get("INVOCATION_ID"):
+        return True
+    if os.environ.get("HERMES_S6_SUPERVISED_CHILD"):
+        return True
+    xpc_service = os.environ.get("XPC_SERVICE_NAME", "")
+    if xpc_service and xpc_service != "0":
+        return True
+    return False
+
+
+def _guard_supervised_gateway_conflict(force: bool = False) -> None:
+    """Refuse a foreground gateway when a service manager already supervises one.
+
+    Running ``hermes gateway run [--replace]`` (or the manual-restart fallback)
+    from a shell on a systemd/launchd host spawns a second, long-lived
+    dispatcher that escapes the service cgroup, survives
+    ``systemctl restart``, and becomes a silent concurrent writer on the shared
+    kanban DB — the documented root cause of multi-writer SQLite WAL corruption
+    (issue #35240). Pass ``--force`` to start anyway.
+    """
+    if force or _running_under_gateway_supervisor():
+        return
+    try:
+        snapshot = get_gateway_runtime_snapshot()
+    except Exception:
+        # Best-effort guard: a probe failure must never block a real startup.
+        logger.debug("Supervised-gateway conflict probe failed", exc_info=True)
+        return
+    if not (snapshot.service_installed and snapshot.service_running):
+        return
+
+    print_error(
+        f"A gateway is already running under {snapshot.manager} for this profile."
+    )
+    print(
+        "  Starting another one from a shell leaves an orphan dispatcher that\n"
+        "  escapes the service, survives restarts, and writes to the same kanban\n"
+        "  DB concurrently — which can corrupt it. Restart the supervised gateway\n"
+        "  instead:"
+    )
+    print()
+    print("    hermes gateway restart")
+    print()
+    print(
+        "  Pass --force to start a foreground gateway anyway (not recommended\n"
+        "  while the service is running)."
+    )
+    sys.exit(1)
+
+
 def _guard_official_docker_root_gateway() -> None:
     """Refuse gateway startup when the official Docker privilege drop was bypassed."""
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
@@ -3648,7 +3711,7 @@ def _guard_official_docker_root_gateway() -> None:
     sys.exit(1)
 
 
-def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
+def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, force: bool = False):
     """Run the gateway in foreground.
 
     Args:
@@ -3657,8 +3720,11 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
         replace: If True, kill any existing gateway instance before starting.
                  This prevents systemd restart loops when the old process
                  hasn't fully exited yet.
+        force: Skip the supervised-gateway conflict guard and start even when a
+               systemd/launchd service is already supervising this profile.
     """
     _guard_official_docker_root_gateway()
+    _guard_supervised_gateway_conflict(force=force)
     sys.path.insert(0, str(PROJECT_ROOT))
 
     # Detached Windows gateway runs must ignore console-control broadcasts
@@ -6204,7 +6270,8 @@ def _gateway_command_inner(args):
         verbose = getattr(args, "verbose", 0)
         quiet = getattr(args, "quiet", False)
         replace = getattr(args, "replace", False)
-        run_gateway(verbose, quiet=quiet, replace=replace)
+        force = getattr(args, "force", False)
+        run_gateway(verbose, quiet=quiet, replace=replace, force=force)
         return
 
     if subcmd == "setup":

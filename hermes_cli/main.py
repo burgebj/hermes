@@ -319,6 +319,38 @@ def _require_tty(command_name: str) -> None:
         sys.exit(1)
 
 
+def _add_gateway_run_force_flag(subparsers) -> None:
+    """Re-apply gateway-run-only flags after parser extraction refactors."""
+    gateway_parser = subparsers.choices.get("gateway")
+    if gateway_parser is None:
+        return
+    gateway_subparsers = next(
+        (
+            action
+            for action in gateway_parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        ),
+        None,
+    )
+    if gateway_subparsers is None:
+        return
+    gateway_run = gateway_subparsers.choices.get("run")
+    if gateway_run is None:
+        return
+    if any("--force" in action.option_strings for action in gateway_run._actions):
+        return
+    gateway_run.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Start a foreground gateway even when a systemd/launchd service is "
+            "already supervising this profile. Without --force, the command "
+            "refuses, because a second dispatcher escapes the service and can "
+            "corrupt the shared kanban DB."
+        ),
+    )
+
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -13239,6 +13271,7 @@ def main():
     # gateway + proxy commands  (parsers built in hermes_cli/subcommands/gateway.py)
     # =========================================================================
     build_gateway_parser(subparsers, cmd_gateway=cmd_gateway, cmd_proxy=cmd_proxy)
+    _add_gateway_run_force_flag(subparsers)
 
     # =========================================================================
     # lsp command
