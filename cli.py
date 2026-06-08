@@ -967,6 +967,14 @@ def _run_cleanup():
         _cleanup_all_terminals()
     except Exception:
         pass
+    # Kill background processes started via terminal(background=True) so they
+    # don't survive CLI exit and hold ports (#40343).  ``/stop`` already calls
+    # ``process_registry.kill_all()`` but the atexit handler did not.
+    try:
+        from tools.process_registry import process_registry
+        process_registry.kill_all()
+    except Exception:
+        pass
     try:
         _cleanup_all_browsers()
     except Exception:
