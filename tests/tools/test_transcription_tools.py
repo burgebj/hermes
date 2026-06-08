@@ -53,6 +53,14 @@ def sample_ogg(tmp_path):
     ogg_path.write_bytes(b"fake audio data")
     return str(ogg_path)
 
+@pytest.fixture
+def sample_silk(tmp_path):
+    """Create a fake WeChat .silk file for preprocessing tests."""
+    silk_path = tmp_path / "voice.silk"
+    silk_path.write_bytes(b"\x02#!SILK_V3fake")
+    return str(silk_path)
+
+
 
 pytestmark = pytest.mark.usefixtures("disable_lazy_stt_install")
 
@@ -908,6 +916,24 @@ class TestTranscribeAudioDispatch:
             transcribe_audio(sample_ogg, model="large-v3")
 
         assert mock_local.call_args[0][1] == "large-v3"
+
+    def test_converts_silk_before_dispatch(self, sample_silk):
+        with patch("tools.transcription_tools._prepare_audio_for_transcription",
+                   return_value=("/tmp/converted.wav", "/tmp/hermes-silk-123", None),
+                   create=True) as mock_prepare, \
+             patch("tools.transcription_tools._validate_audio_file", return_value=None), \
+             patch("tools.transcription_tools._load_stt_config", return_value={}), \
+             patch("tools.transcription_tools._get_provider", return_value="local"), \
+             patch("tools.transcription_tools._transcribe_local",
+                   return_value={"success": True, "transcript": "hi"}) as mock_local, \
+             patch("tools.transcription_tools.shutil.rmtree") as mock_rmtree:
+            from tools.transcription_tools import transcribe_audio
+            result = transcribe_audio(sample_silk)
+
+        assert result["success"] is True
+        mock_prepare.assert_called_once_with(sample_silk)
+        mock_local.assert_called_once_with("/tmp/converted.wav", "base")
+        mock_rmtree.assert_called_once_with("/tmp/hermes-silk-123", ignore_errors=True)
 
     def test_default_model_used_when_none(self, sample_ogg):
         with patch("tools.transcription_tools._load_stt_config", return_value={}), \

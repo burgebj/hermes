@@ -78,6 +78,7 @@ def _safe_find_spec(module_name: str) -> bool:
 _HAS_FASTER_WHISPER = _safe_find_spec("faster_whisper")
 _HAS_OPENAI = _safe_find_spec("openai")
 _HAS_MISTRAL = _safe_find_spec("mistralai")
+_HAS_PILK = _safe_find_spec("pilk")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1046,6 +1047,39 @@ def _validate_audio_file(file_path: str) -> Optional[Dict[str, Any]]:
 
     return None
 
+
+def _prepare_audio_for_transcription(file_path: str) -> tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
+    """Convert pre-processable inputs (for example WeChat .silk) into a supported audio file."""
+    audio_path = Path(file_path)
+    if audio_path.suffix.lower() != ".silk":
+        return file_path, None, None
+
+    if not _HAS_PILK:
+        return None, None, {
+            "success": False,
+            "transcript": "",
+            "error": "Unsupported format: .silk. Install the optional 'pilk' dependency to enable WeChat voice transcription.",
+        }
+
+    temp_dir = tempfile.mkdtemp(prefix="hermes-silk-")
+    converted_path = os.path.join(temp_dir, f"{audio_path.stem}.wav")
+
+    try:
+        import pilk
+
+        pilk.silk_to_wav(file_path, converted_path)
+        if not Path(converted_path).is_file() or Path(converted_path).stat().st_size == 0:
+            raise RuntimeError("pilk did not produce a readable WAV file")
+        return converted_path, temp_dir, None
+    except Exception as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        logger.error("Failed to convert .silk audio %s: %s", file_path, e, exc_info=True)
+        return None, None, {
+            "success": False,
+            "transcript": "",
+            "error": f"Failed to convert .silk audio for transcription: {e}",
+        }
+
 # ---------------------------------------------------------------------------
 # Provider: local (faster-whisper)
 # ---------------------------------------------------------------------------
@@ -1638,115 +1672,133 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
           - "error" (str, optional): Error message if success is False
           - "provider" (str, optional): Which provider was used
     """
-    # Validate input
-    error = _validate_audio_file(file_path)
-    if error:
-        return error
+    prepared_path = file_path
+    cleanup_dir = None
 
-    # Load config and determine provider
-    stt_config = _load_stt_config()
-    if not is_stt_enabled(stt_config):
+    try:
+        prepared_path, cleanup_dir, prep_error = _prepare_audio_for_transcription(file_path)
+        if prep_error:
+            return prep_error
+        if prepared_path is None:
+            return {
+                "success": False,
+                "transcript": "",
+                "error": "Audio preprocessing did not produce a file for transcription.",
+            }
+
+        # Validate input after format-specific preprocessing so .silk can be
+        # converted to a supported temporary .wav before normal extension checks.
+        error = _validate_audio_file(prepared_path)
+        if error:
+            return error
+
+        # Load config and determine provider
+        stt_config = _load_stt_config()
+        if not is_stt_enabled(stt_config):
+            return {
+                "success": False,
+                "transcript": "",
+                "error": "STT is disabled in config.yaml (stt.enabled: false).",
+            }
+
+        provider = _get_provider(stt_config)
+
+        if provider == "local":
+            local_cfg = stt_config.get("local", {})
+            model_name = _normalize_local_model(
+                model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
+            )
+            return _transcribe_local(prepared_path, model_name)
+
+        if provider == "local_command":
+            local_cfg = stt_config.get("local", {})
+            model_name = _normalize_local_command_model(
+                model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
+            )
+            return _transcribe_local_command(prepared_path, model_name)
+
+        if provider == "groq":
+            model_name = model or DEFAULT_GROQ_STT_MODEL
+            return _transcribe_groq(prepared_path, model_name)
+
+        if provider == "openai":
+            openai_cfg = stt_config.get("openai", {})
+            model_name = model or openai_cfg.get("model", DEFAULT_STT_MODEL)
+            return _transcribe_openai(prepared_path, model_name)
+
+        if provider == "mistral":
+            mistral_cfg = stt_config.get("mistral", {})
+            model_name = model or mistral_cfg.get("model", DEFAULT_MISTRAL_STT_MODEL)
+            return _transcribe_mistral(prepared_path, model_name)
+
+        if provider == "xai":
+            # xAI Grok STT doesn't use a model parameter - pass through for logging
+            model_name = model or "grok-stt"
+            return _transcribe_xai(prepared_path, model_name)
+
+        if provider == "elevenlabs":
+            elevenlabs_cfg = stt_config.get("elevenlabs", {})
+            model_name = model or elevenlabs_cfg.get("model_id", DEFAULT_ELEVENLABS_STT_MODEL)
+            return _transcribe_elevenlabs(prepared_path, model_name)
+
+        # User-declared command-type provider
+        # (``stt.providers.<name>: type: command``). Fires after the built-in
+        # elif chain - built-in names short-circuit upstream so a user's
+        # ``stt.providers.openai.command`` can't override the real OpenAI
+        # handler - and BEFORE the plugin dispatcher, because config is more
+        # local than a plugin install (same precedence rule as TTS PR #17843).
+        command_provider_config = _resolve_command_stt_provider_config(provider, stt_config)
+        if command_provider_config is not None:
+            return _transcribe_command_stt(
+                prepared_path,
+                provider,
+                command_provider_config,
+                stt_config,
+                model_override=model,
+            )
+
+        # Plugin-registered STT backend (e.g. OpenRouter, SenseAudio,
+        # Gemini-STT). Fires only when ``provider`` is neither a built-in
+        # nor ``"none"`` AND there is no same-name command provider. The
+        # dispatcher enforces built-ins-always-win + command-wins-over-plugin
+        # defensively. Returns None when no plugin is registered for the
+        # configured name, falling through to the legacy "No STT provider"
+        # error message below.
+        #
+        # Plugin-scoped config namespace mirrors the built-in pattern
+        # (``stt.openai.model``, ``stt.mistral.model``): plugins read their
+        # per-provider config under ``stt.<provider>`` and the dispatcher
+        # forwards ``language`` from there. Top-level ``model`` argument
+        # overrides any config-set model.
+        plugin_cfg = stt_config.get(provider, {}) if isinstance(stt_config.get(provider), dict) else {}
+        plugin_language = plugin_cfg.get("language")
+        plugin_model = model or plugin_cfg.get("model")
+        plugin_result = _dispatch_to_plugin_provider(
+            prepared_path,
+            provider,
+            stt_config,
+            model=plugin_model,
+            language=plugin_language,
+        )
+        if plugin_result is not None:
+            return plugin_result
+
+        # No provider available
         return {
             "success": False,
             "transcript": "",
-            "error": "STT is disabled in config.yaml (stt.enabled: false).",
+            "error": (
+                "No STT provider available. Install faster-whisper for free local "
+                f"transcription, configure {LOCAL_STT_COMMAND_ENV} or install a local whisper CLI, "
+                "set GROQ_API_KEY for free Groq Whisper, set MISTRAL_API_KEY for Mistral "
+                "Voxtral Transcribe, configure xAI OAuth or set XAI_API_KEY for xAI Grok STT, "
+                "set ELEVENLABS_API_KEY for ElevenLabs Scribe, or set VOICE_TOOLS_OPENAI_KEY "
+                "or OPENAI_API_KEY for the OpenAI Whisper API."
+            ),
         }
-
-    provider = _get_provider(stt_config)
-
-    if provider == "local":
-        local_cfg = stt_config.get("local", {})
-        model_name = _normalize_local_model(
-            model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
-        )
-        return _transcribe_local(file_path, model_name)
-
-    if provider == "local_command":
-        local_cfg = stt_config.get("local", {})
-        model_name = _normalize_local_command_model(
-            model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
-        )
-        return _transcribe_local_command(file_path, model_name)
-
-    if provider == "groq":
-        model_name = model or DEFAULT_GROQ_STT_MODEL
-        return _transcribe_groq(file_path, model_name)
-
-    if provider == "openai":
-        openai_cfg = stt_config.get("openai", {})
-        model_name = model or openai_cfg.get("model", DEFAULT_STT_MODEL)
-        return _transcribe_openai(file_path, model_name)
-
-    if provider == "mistral":
-        mistral_cfg = stt_config.get("mistral", {})
-        model_name = model or mistral_cfg.get("model", DEFAULT_MISTRAL_STT_MODEL)
-        return _transcribe_mistral(file_path, model_name)
-
-    if provider == "xai":
-        # xAI Grok STT doesn't use a model parameter — pass through for logging
-        model_name = model or "grok-stt"
-        return _transcribe_xai(file_path, model_name)
-
-    if provider == "elevenlabs":
-        elevenlabs_cfg = stt_config.get("elevenlabs", {})
-        model_name = model or elevenlabs_cfg.get("model_id", DEFAULT_ELEVENLABS_STT_MODEL)
-        return _transcribe_elevenlabs(file_path, model_name)
-
-    # User-declared command-type provider
-    # (``stt.providers.<name>: type: command``). Fires after the built-in
-    # elif chain — built-in names short-circuit upstream so a user's
-    # ``stt.providers.openai.command`` can't override the real OpenAI
-    # handler — and BEFORE the plugin dispatcher, because config is more
-    # local than a plugin install (same precedence rule as TTS PR #17843).
-    command_provider_config = _resolve_command_stt_provider_config(provider, stt_config)
-    if command_provider_config is not None:
-        return _transcribe_command_stt(
-            file_path,
-            provider,
-            command_provider_config,
-            stt_config,
-            model_override=model,
-        )
-
-    # Plugin-registered STT backend (e.g. OpenRouter, SenseAudio,
-    # Gemini-STT). Fires only when ``provider`` is neither a built-in
-    # nor ``"none"`` AND there is no same-name command provider. The
-    # dispatcher enforces built-ins-always-win + command-wins-over-plugin
-    # defensively. Returns None when no plugin is registered for the
-    # configured name, falling through to the legacy "No STT provider"
-    # error message below.
-    #
-    # Plugin-scoped config namespace mirrors the built-in pattern
-    # (``stt.openai.model``, ``stt.mistral.model``): plugins read their
-    # per-provider config under ``stt.<provider>`` and the dispatcher
-    # forwards ``language`` from there. Top-level ``model`` argument
-    # overrides any config-set model.
-    plugin_cfg = stt_config.get(provider, {}) if isinstance(stt_config.get(provider), dict) else {}
-    plugin_language = plugin_cfg.get("language")
-    plugin_model = model or plugin_cfg.get("model")
-    plugin_result = _dispatch_to_plugin_provider(
-        file_path,
-        provider,
-        stt_config,
-        model=plugin_model,
-        language=plugin_language,
-    )
-    if plugin_result is not None:
-        return plugin_result
-
-    # No provider available
-    return {
-        "success": False,
-        "transcript": "",
-        "error": (
-            "No STT provider available. Install faster-whisper for free local "
-            f"transcription, configure {LOCAL_STT_COMMAND_ENV} or install a local whisper CLI, "
-            "set GROQ_API_KEY for free Groq Whisper, set MISTRAL_API_KEY for Mistral "
-            "Voxtral Transcribe, configure xAI OAuth or set XAI_API_KEY for xAI Grok STT, "
-            "set ELEVENLABS_API_KEY for ElevenLabs Scribe, or set VOICE_TOOLS_OPENAI_KEY "
-            "or OPENAI_API_KEY for the OpenAI Whisper API."
-        ),
-    }
+    finally:
+        if cleanup_dir:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
 
 
 def _resolve_openai_audio_client_config() -> tuple[str, str]:
