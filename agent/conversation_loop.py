@@ -3471,6 +3471,36 @@ def run_conversation(
             elif hasattr(agent, "_codex_incomplete_retries"):
                 agent._codex_incomplete_retries = 0
             
+            # ── DeepSeek R1 tool-call scavenge ────────────────────────
+            # R1 reasoning models sometimes write well-formed tool call JSON
+            # inside reasoning_content but forget to emit them as actual
+            # tool_calls.  Scan reasoning text for these lost calls before
+            # deciding there are no tool calls.  Opt-in via config key
+            # ``agent.deepseek_scavenge`` (default: false).
+            try:
+                if (not assistant_message.tool_calls
+                    and getattr(assistant_message, 'reasoning_content', None)
+                ):
+                    from agent.deepseek_scavenge import (
+                        scavenge_tool_calls_from_reasoning,
+                        deepseek_scavenge_enabled,
+                    )
+                    if deepseek_scavenge_enabled(agent):
+                        _scavenged, _msg = scavenge_tool_calls_from_reasoning(
+                            assistant_message.reasoning_content,
+                            agent.valid_tool_names,
+                        )
+                        if _scavenged is not None:
+                            assistant_message.tool_calls = _scavenged
+                            logger.info("DeepSeek R1 scavenge: %s", _msg)
+                            if not agent.quiet_mode:
+                                agent._vprint(
+                                    f"{agent.log_prefix}🔍 {_msg}"
+                                )
+            except Exception:
+                # Scavenge is best-effort — failures must not abort the turn.
+                logger.debug("DeepSeek scavenge failed", exc_info=True)
+            
             # Check for tool calls
             if assistant_message.tool_calls:
                 if not agent.quiet_mode:

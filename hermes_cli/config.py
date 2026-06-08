@@ -906,6 +906,12 @@ DEFAULT_CONFIG = {
         # only controls how inbound user images are presented.
         "image_input_mode": "auto",
         "disabled_toolsets": [],
+        # DeepSeek R1 tool-call scavenge (experimental): when the R1 thinking
+        # model writes well-formed tool call JSON inside its reasoning_content
+        # but forgets to emit them as actual tool_calls, automatically extract
+        # and execute them.  Based on the Reasonix scavenge pass.
+        # Default: false (opt-in; safe for all providers).
+        "deepseek_scavenge": False,
     },
     
     "terminal": {
