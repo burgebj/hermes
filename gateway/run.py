@@ -1884,6 +1884,7 @@ class GatewayRunner:
     _stop_task: Optional[asyncio.Task] = None
     _session_model_overrides: Dict[str, Dict[str, str]] = {}
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
+    _interrupted_by_user_msg: set = set()
 
     def __init__(self, config: Optional[GatewayConfig] = None):
         global _gateway_runner_ref
@@ -3527,6 +3528,7 @@ class GatewayRunner:
         if effective_mode == "interrupt" and running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             try:
                 running_agent.interrupt(event.text)
+                self._interrupted_by_user_msg.add(session_key)
             except Exception:
                 pass  # don't let interrupt failure block the ack
 
@@ -8100,6 +8102,7 @@ class GatewayRunner:
                 return None
             logger.debug("PRIORITY interrupt for session %s", _quick_key)
             running_agent.interrupt(event.text)
+            self._interrupted_by_user_msg.add(_quick_key)
             # NOTE: self._pending_messages was write-only (never consumed).
             # The actual interrupt message is delivered via adapter._pending_messages
             # which is read by _run_agent. Removed to prevent unbounded growth.
@@ -18445,7 +18448,7 @@ class GatewayRunner:
                 and _interruption_is_fresh
             )
 
-            if _is_resume_pending:
+            if _is_resume_pending and session_key not in self._interrupted_by_user_msg:
                 _reason = getattr(_resume_entry, "resume_reason", None) or "restart_timeout"
                 _reason_phrase = (
                     "a gateway restart"
@@ -18462,7 +18465,7 @@ class GatewayRunner:
                     f"message below.]\n\n"
                     + message
                 )
-            elif _has_fresh_tool_tail:
+            elif _has_fresh_tool_tail and session_key not in self._interrupted_by_user_msg:
                 message = (
                     "[System note: Your previous turn was interrupted before you could "
                     "process the last tool result(s). The conversation history contains "
@@ -18471,6 +18474,10 @@ class GatewayRunner:
                     "user's new message below.]\n\n"
                     + message
                 )
+
+            # Clean up per-session interrupt flag after use to prevent unbounded
+            # set growth (#39813 review feedback).
+            self._interrupted_by_user_msg.discard(session_key)
 
             # Consume one-shot /reload-skills note (if the user ran
             # /reload-skills since their last turn in this session). Same
