@@ -54,6 +54,15 @@ from gateway.platforms.base import (
 
 logger = logging.getLogger(__name__)
 
+# Explicit "leave the thread untouched" sentinel. When the agent returns this
+# exact string (after trimming surrounding whitespace), the Slack adapter
+# treats the turn as intentional silence and skips the final ``chat_postMessage``
+# instead of posting the literal sentinel into the channel. Mirrors the pattern
+# in ``gateway/platforms/feishu_comment.py`` (``_NO_REPLY_SENTINEL``), but uses
+# an exact post-strip equality so ordinary messages that mention NO_REPLY in
+# longer prose ("I would not use NO_REPLY here") still post normally.
+_NO_REPLY_SENTINEL = "NO_REPLY"
+
 # ContextVar carrying the user_id of the slash-command invoker.
 # Set in _handle_slash_command, read in send() to match the correct
 # stashed response_url when multiple users issue commands on the same
@@ -726,6 +735,34 @@ class SlackAdapter(BasePlatformAdapter):
         # Non-fatal — the user saw the initial ack already.
         return SendResult(success=True, message_id=None)
 
+    async def _delete_slash_ephemeral(self, ctx: Dict[str, Any]) -> None:
+        """Remove a slash-command ephemeral ack via ``response_url``.
+
+        Called when the agent returns NO_REPLY for a turn that began with a
+        native slash command — leaving the "Running /cmd…" placeholder up
+        forever would be a confusing UX.  Failures are non-fatal: the
+        ephemeral message is user-private and will expire client-side.
+        """
+        payload = {"delete_original": True}
+        try:
+            async with aiohttp.ClientSession(trust_env=True) as session:
+                async with session.post(
+                    ctx["response_url"],
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        logger.debug(
+                            "[Slack] response_url delete returned %s: %s",
+                            resp.status,
+                            body[:200],
+                        )
+        except Exception as e:
+            logger.debug(
+                "[Slack] response_url delete failed: %s", e,
+            )
+
     async def connect(self) -> bool:
         """Connect to Slack via Socket Mode."""
         if not SLACK_AVAILABLE:
@@ -1066,13 +1103,36 @@ class SlackAdapter(BasePlatformAdapter):
         if not self._app:
             return SendResult(success=False, error="Not connected")
 
+        suppress = isinstance(content, str) and content.strip() == _NO_REPLY_SENTINEL
+
         try:
             # Check for a pending slash-command context.  When the user ran a
             # native slash command (e.g. /q, /stop, /model), the initial ack
             # already showed an ephemeral "Running /cmd…" message.  If we have
             # a stashed response_url for this channel, replace that ack with
             # the actual command reply ephemerally instead of posting publicly.
+            #
+            # NO_REPLY must consume the slash context even when suppressing,
+            # otherwise a later unrelated send() to the same channel/user
+            # would inherit the stale response_url and be misrouted as an
+            # ephemeral reply to a long-completed command.
             slash_ctx = self._pop_slash_context(chat_id)
+            if suppress:
+                logger.debug(
+                    "[Slack] Suppressed explicit NO_REPLY sentinel for channel %s",
+                    chat_id,
+                )
+                if slash_ctx:
+                    # Remove the dangling "Running /cmd…" ephemeral ack so the
+                    # user is not left staring at it; failures are non-fatal.
+                    await self._delete_slash_ephemeral(slash_ctx)
+                # Clear any pending assistant typing indicator left by the turn.
+                await self.stop_typing(chat_id)
+                return SendResult(
+                    success=True,
+                    message_id=None,
+                    raw_response={"suppressed": _NO_REPLY_SENTINEL},
+                )
             if slash_ctx:
                 return await self._send_slash_ephemeral(
                     slash_ctx,
