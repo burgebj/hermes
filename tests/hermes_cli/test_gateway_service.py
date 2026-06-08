@@ -397,6 +397,43 @@ class TestGeneratedSystemdUnits:
 
 
 class TestGatewayStopCleanup:
+    def test_stop_from_gateway_child_refuses_launchd_bootout_without_profile_fallback(self, tmp_path, monkeypatch, capsys):
+        """Default stop must fail closed instead of killing its gateway parent."""
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        plist_path.write_text("plist\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_cli, "supports_systemd_services", lambda: False)
+        monkeypatch.setattr(gateway_cli, "is_macos", lambda: True)
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(gateway_cli, "_is_invoked_from_gateway_child", lambda: True)
+        monkeypatch.setattr(gateway_cli, "stop_profile_gateway", lambda: pytest.fail("fallback must not self-kill"))
+
+        with pytest.raises(SystemExit) as exc:
+            gateway_cli.gateway_command(SimpleNamespace(gateway_command="stop"))
+
+        assert exc.value.code == 2
+        assert "Refusing to stop" in capsys.readouterr().out
+
+    def test_restart_all_from_gateway_child_refuses_launchd_bootout_without_recovery(self, tmp_path, monkeypatch, capsys):
+        """restart --all must not run a misleading start sequence after refusing bootout."""
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        plist_path.write_text("plist\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_cli, "supports_systemd_services", lambda: False)
+        monkeypatch.setattr(gateway_cli, "is_macos", lambda: True)
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(gateway_cli, "_is_invoked_from_gateway_child", lambda: True)
+        monkeypatch.setattr(gateway_cli, "kill_gateway_processes", lambda **kw: pytest.fail("must not self-kill"))
+        monkeypatch.setattr(gateway_cli, "launchd_start", lambda: pytest.fail("must not start after refused stop"))
+
+        with pytest.raises(SystemExit) as exc:
+            gateway_cli.gateway_command(SimpleNamespace(gateway_command="restart", **{"all": True}))
+
+        assert exc.value.code == 2
+        output = capsys.readouterr().out
+        assert "Refusing to stop" in output
+        assert "without --all" in output
+
     def test_stop_only_kills_current_profile_by_default(self, tmp_path, monkeypatch):
         """Without --all, stop uses systemd (if available) and does NOT call
         the global kill_gateway_processes()."""
@@ -618,10 +655,39 @@ class TestLaunchdServiceRecovery:
 
         monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
         monkeypatch.setattr(gateway_cli, "_wait_for_gateway_exit", lambda **kw: None)
+        monkeypatch.setattr(gateway_cli, "_is_invoked_from_gateway_child", lambda: False)
 
         gateway_cli.launchd_stop()
 
         assert calls == [["launchctl", "bootout", target]]
+
+    def test_launchd_stop_refuses_from_gateway_child(self, monkeypatch, capsys):
+        """A gateway-child terminal must not bootout its own launchd parent."""
+        calls = []
+        monkeypatch.setattr(gateway_cli, "_is_invoked_from_gateway_child", lambda: True)
+        monkeypatch.setattr(gateway_cli.subprocess, "run", lambda *a, **kw: calls.append(a))
+
+        with pytest.raises(SystemExit) as exc:
+            gateway_cli.launchd_stop()
+
+        assert exc.value.code == 2
+        assert calls == []
+        output = capsys.readouterr().out
+        assert "Refusing to stop" in output
+        assert "without --all" in output
+
+    def test_launchd_uninstall_refuses_from_gateway_child(self, monkeypatch, capsys):
+        """Uninstall also uses launchctl bootout, so it must share the guard."""
+        calls = []
+        monkeypatch.setattr(gateway_cli, "_is_invoked_from_gateway_child", lambda: True)
+        monkeypatch.setattr(gateway_cli.subprocess, "run", lambda *a, **kw: calls.append(a))
+
+        with pytest.raises(SystemExit) as exc:
+            gateway_cli.launchd_uninstall()
+
+        assert exc.value.code == 2
+        assert calls == []
+        assert "Refusing to uninstall" in capsys.readouterr().out
 
     def test_launchd_stop_tolerates_already_unloaded(self, monkeypatch, capsys):
         """launchd_stop silently handles exit codes 3/113 (job not loaded)."""
@@ -636,6 +702,7 @@ class TestLaunchdServiceRecovery:
 
         monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
         monkeypatch.setattr(gateway_cli, "_wait_for_gateway_exit", lambda **kw: None)
+        monkeypatch.setattr(gateway_cli, "_is_invoked_from_gateway_child", lambda: False)
 
         # Should not raise — exit code 3 means already unloaded
         gateway_cli.launchd_stop()
@@ -655,6 +722,7 @@ class TestLaunchdServiceRecovery:
 
         monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
         monkeypatch.setattr(gateway_cli, "_wait_for_gateway_exit", fake_wait)
+        monkeypatch.setattr(gateway_cli, "_is_invoked_from_gateway_child", lambda: False)
 
         gateway_cli.launchd_stop()
 

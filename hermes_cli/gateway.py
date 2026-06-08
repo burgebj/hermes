@@ -209,6 +209,34 @@ def _is_pid_ancestor_of_current_process(target_pid: int) -> bool:
     return False
 
 
+def _is_invoked_from_gateway_child() -> bool:
+    """Return True when this CLI process is running under the active gateway.
+
+    Gateway terminal tools are child processes of the gateway. Destructive
+    service-manager commands such as ``launchctl bootout`` can kill the parent
+    before the child shell gets to run any follow-up recovery command.
+    """
+    try:
+        from gateway.status import get_running_pid
+
+        pid = get_running_pid()
+    except Exception:
+        pid = None
+    return bool(pid and _is_pid_ancestor_of_current_process(pid))
+
+
+def _refuse_launchd_bootout_from_gateway_child(action: str) -> None:
+    """Abort launchd bootout commands issued from a gateway child process."""
+    if not _is_invoked_from_gateway_child():
+        return
+    print(
+        f"✗ Refusing to {action} the launchd gateway from inside a gateway-run terminal tool.\n"
+        "  Use `hermes gateway restart` (without --all) for in-gateway restarts, "
+        "or run stop/start from an external terminal."
+    )
+    raise SystemExit(2)
+
+
 def _request_gateway_self_restart(pid: int) -> bool:
     """Ask a running gateway ancestor to restart itself asynchronously."""
     if not hasattr(signal, "SIGUSR1"):
@@ -3356,6 +3384,8 @@ def launchd_install(force: bool = False):
 
 
 def launchd_uninstall():
+    _refuse_launchd_bootout_from_gateway_child("uninstall")
+
     plist_path = get_launchd_plist_path()
     label = get_launchd_label()
     subprocess.run(
@@ -3433,6 +3463,8 @@ def launchd_start():
 
 
 def launchd_stop():
+    _refuse_launchd_bootout_from_gateway_child("stop")
+
     label = get_launchd_label()
     target = f"{_launchd_domain()}/{label}"
     try:
