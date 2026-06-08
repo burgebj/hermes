@@ -1836,6 +1836,49 @@ The user has requested that this compaction PRIORITISE preserving all informatio
 
         return max(cut_idx, head_end + 1)
 
+    def _find_active_tail_cut(
+        self, messages: List[Dict[str, Any]], head_end: int,
+    ) -> int:
+        """Return the smallest safe raw tail that preserves the active turn.
+
+        The token-budget tail can keep a large slice of stale history raw.  In
+        topic-switch sessions that stale slice may sit between a recent
+        assistant question and the user's terse answer after compaction.  The
+        active-tail boundary instead anchors on the most recent user message:
+
+        * If the transcript ends with that user message, also keep the
+          immediately preceding assistant/tool group so short replies retain
+          the question they answer.
+          Orphan tool results are summarized instead of protected raw, because
+          the sanitizer would otherwise remove them after compression.
+        * If assistant/tool messages follow the most recent user message, keep
+          that whole in-progress exchange.
+        * Always align backward so assistant tool_calls and tool results are
+          not split across the summary/tail boundary.
+        """
+        n = len(messages)
+        last_user_idx = self._find_last_user_message_idx(messages, head_end)
+        if last_user_idx < 0:
+            return self._find_tail_cut_by_tokens(messages, head_end)
+
+        cut_idx = last_user_idx
+        if last_user_idx == n - 1:
+            prev_idx = last_user_idx - 1
+            prev_role = messages[prev_idx].get("role") if prev_idx >= 0 else None
+            if (
+                prev_idx > head_end
+                and prev_role in {"assistant", "tool"}
+                and _content_length_for_budget(messages[prev_idx].get("content")) <= _FALLBACK_SUMMARY_MAX_CHARS
+            ):
+                # For a tool result, let boundary alignment inspect the whole
+                # tool run before the user.  If no parent assistant tool_call is
+                # found, the cut stays at the user so the orphan result is
+                # summarized rather than later stripped by _sanitize_tool_pairs.
+                cut_idx = last_user_idx if prev_role == "tool" else prev_idx
+
+        cut_idx = self._align_boundary_backward(messages, cut_idx)
+        return max(cut_idx, head_end + 1)
+
     # ------------------------------------------------------------------
     # ContextEngine: manual /compress preflight
     # ------------------------------------------------------------------
@@ -1848,7 +1891,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         the protected head/tail.
         """
         compress_start = self._align_boundary_forward(messages, self._protect_head_size(messages))
-        compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
+        compress_end = self._find_active_tail_cut(messages, compress_start)
         return compress_start < compress_end
 
     # ------------------------------------------------------------------
@@ -1916,8 +1959,10 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         compress_start = self._protect_head_size(messages)
         compress_start = self._align_boundary_forward(messages, compress_start)
 
-        # Use token-budget tail protection instead of fixed message count
-        compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
+        # Keep only the current active exchange as raw tail.  Older turns,
+        # including previously token-protected history, are summarized so stale
+        # topic context cannot appear between a recent question and answer.
+        compress_end = self._find_active_tail_cut(messages, compress_start)
 
         if compress_start >= compress_end:
             return messages
