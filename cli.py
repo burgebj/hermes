@@ -5528,6 +5528,9 @@ class HermesCLI:
                 f"{len(restored)} total messages)[/]"
             )
             self._restore_session_cwd(session_meta)
+            # Sync resume title to tmux
+            if session_meta.get("title"):
+                self._fire_title_hook(session_meta["title"])
         else:
             accent_color = _accent_hex()
             self._console_print(
@@ -6790,6 +6793,7 @@ class HermesCLI:
                             self._session_db.set_session_title(self.session_id, sanitized)
                             self._pending_title = None
                             title = sanitized
+                            self._fire_title_hook(sanitized)
                         except ValueError as e:
                             _cprint(f"  {e} — session started untitled.")
                             title = None
@@ -6822,6 +6826,15 @@ class HermesCLI:
                 print(f"(^_^)v New session started: {title}")
             else:
                 print("(^_^)v New session started!")
+
+    def _fire_title_hook(self, title: str) -> None:
+        """Fire on_session_title hook so plugins (e.g. tmux-title) can react."""
+        from hermes_cli.plugins import invoke_hook as _invoke_hook
+        _invoke_hook(
+            "on_session_title",
+            title=title,
+            session_id=self.session_id,
+        )
 
     def _handle_handoff_command(self, cmd_original: str) -> bool:
         """Handle ``/handoff <platform>`` — transfer this CLI session to a gateway platform.
@@ -7276,6 +7289,7 @@ class HermesCLI:
         # Set title on the branch
         try:
             self._session_db.set_session_title(new_session_id, branch_title)
+            self._fire_title_hook(branch_title)
         except Exception:
             pass
 
@@ -8938,6 +8952,7 @@ class HermesCLI:
                             try:
                                 if self._session_db.set_session_title(self.session_id, new_title):
                                     _cprint(f"  Session title set: {new_title}")
+                                    self._fire_title_hook(new_title)
                                 else:
                                     _cprint("  Session not found in database.")
                             except ValueError as e:
@@ -8951,6 +8966,7 @@ class HermesCLI:
                             else:
                                 self._pending_title = new_title
                                 _cprint(f"  Session title queued: {new_title} (will be saved on first message)")
+                                self._fire_title_hook(new_title)
                     else:
                         from hermes_state import format_session_db_unavailable
                         _cprint(f"  {format_session_db_unavailable()}")
@@ -12675,6 +12691,7 @@ class HermesCLI:
                         response,
                         self.conversation_history,
                         failure_callback=_title_failure_cb,
+                        title_callback=self._fire_title_hook,
                         main_runtime={
                             "model": self.model,
                             "provider": self.provider,
@@ -13198,6 +13215,11 @@ class HermesCLI:
         if self._resumed:
             if self._preload_resumed_session():
                 self._display_resumed_history()
+        else:
+            # Give fresh sessions a default title immediately (tmux-title
+            # plugin picks this up via on_session_title).  Auto-title or
+            # /title will override it later.
+            self._fire_title_hook("Hermes")
 
         try:
             from hermes_cli.skin_engine import get_active_skin

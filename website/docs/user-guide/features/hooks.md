@@ -805,6 +805,44 @@ def my_callback(session_id: str, platform: str, **kwargs):
 
 ---
 
+### `on_session_title`
+
+Fires whenever a session title is **set or changed** — manually via `/title`, automatically by the LLM title generator after the first exchange, on `/new` or `/branch` with a title, or when resuming a session that already has a title.
+
+**Callback signature:**
+
+```python
+def my_callback(title: str, session_id: str, **kwargs):
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `title` | `str` | The session title. |
+| `session_id` | `str` | Unique session identifier. |
+
+**Fires:** In `cli.py`, after `set_session_title` succeeds (or when a pending title is queued), in the `maybe_auto_title` flow via `title_callback`, and during session resume. Fires on the main thread (or background auto-title thread for auto-generated titles).
+
+**Return value:** Ignored.
+
+**Use cases:** Sync title to tmux window name, terminal title bar, push notification, dashboard label.
+
+**Example — sync to tmux window:**
+
+```python
+import os, subprocess
+
+def sync_tmux(title, session_id, **kwargs):
+    pane = os.getenv("TMUX_PANE")
+    if pane:
+        subprocess.run(["tmux", "rename-window", "-t", pane, title],
+                       timeout=3, capture_output=True)
+
+def register(ctx):
+    ctx.register_hook("on_session_title", sync_tmux)
+```
+
+---
+
 See the **[Build a Plugin guide](/guides/build-a-hermes-plugin)** for the full walkthrough including tool schemas, handlers, and advanced hook patterns.
 
 ---

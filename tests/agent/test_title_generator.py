@@ -236,3 +236,32 @@ class TestMaybeAutoTitle:
 
     def test_skips_if_no_session_db(self):
         maybe_auto_title(None, "sess-1", "hello", "response", [])  # no db
+
+    def test_forwards_title_callback_to_worker(self):
+        """maybe_auto_title must forward title_callback to auto_title_session."""
+        db = MagicMock()
+        db.get_session_title.return_value = None
+        history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+        ]
+
+        def _title_cb(title):
+            pass
+
+        with patch("agent.title_generator.auto_title_session") as mock_auto:
+            maybe_auto_title(
+                db, "sess-1", "hello", "hi there", history,
+                title_callback=_title_cb,
+            )
+            import time
+            time.sleep(0.3)
+            mock_auto.assert_called_once_with(
+                db,
+                "sess-1",
+                "hello",
+                "hi there",
+                failure_callback=None,
+                main_runtime=None,
+                title_callback=_title_cb,
+            )
