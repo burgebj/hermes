@@ -2705,3 +2705,109 @@ def test_host_derived_key_helper_basic_cases():
     for k in ("DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
               "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         _os.environ.pop(k, None)
+
+
+def test_copilot_api_mode_recomputes_from_target_model_even_with_matching_config(monkeypatch):
+    """A Copilot /model switch must not let stale persisted api_mode win.
+
+    Repro shape: config/default is GPT-5.x with codex_responses, active target
+    is Claude via Copilot. The active target model must drive endpoint mode.
+    """
+    model_cfg = {
+        "provider": "copilot",
+        "api_mode": "codex_responses",
+        "default": "gpt-5.5",
+    }
+
+    def fake_copilot_model_api_mode(model_name, api_key=None):
+        return "chat_completions" if "claude" in model_name else "codex_responses"
+
+    monkeypatch.setattr("hermes_cli.models.copilot_model_api_mode", fake_copilot_model_api_mode)
+
+    assert (
+        rp._copilot_runtime_api_mode(
+            model_cfg,
+            api_key="gho_fake",
+            target_model="claude-opus-4.7-1m-internal",
+        )
+        == "chat_completions"
+    )
+
+
+def test_resolve_runtime_provider_threads_target_model_to_copilot_explicit_path(monkeypatch):
+    """The non-pool Copilot resolver path must also use target_model."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "copilot")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "copilot",
+            "api_mode": "codex_responses",
+            "default": "gpt-5.5",
+        },
+    )
+    monkeypatch.setattr(
+        rp,
+        "resolve_api_key_provider_credentials",
+        lambda provider: {
+            "api_key": "gho_fake",
+            "base_url": "https://api.githubcopilot.com",
+            "source": "env:COPILOT_GITHUB_TOKEN",
+        },
+    )
+
+    def fake_copilot_model_api_mode(model_name, api_key=None):
+        return "chat_completions" if "claude" in model_name else "codex_responses"
+
+    monkeypatch.setattr("hermes_cli.models.copilot_model_api_mode", fake_copilot_model_api_mode)
+
+    resolved = rp.resolve_runtime_provider(
+        requested="copilot",
+        target_model="claude-opus-4.7-1m-internal",
+    )
+
+    assert resolved["provider"] == "copilot"
+    assert resolved["api_mode"] == "chat_completions"
+
+
+def test_resolve_runtime_provider_threads_target_model_to_copilot_pool_path(monkeypatch):
+    """The credential-pool Copilot resolver path must use target_model too."""
+    class _Entry:
+        runtime_api_key = "gho_fake"
+        access_token = "gho_fake"
+        source = "env:COPILOT_GITHUB_TOKEN"
+        base_url = "https://api.githubcopilot.com"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "copilot")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "copilot",
+            "api_mode": "codex_responses",
+            "default": "gpt-5.5",
+        },
+    )
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+    # Force pool path instead of the explicit api-key provider path.
+    monkeypatch.setattr(rp, "_resolve_explicit_runtime", lambda **kwargs: None)
+
+    def fake_copilot_model_api_mode(model_name, api_key=None):
+        return "chat_completions" if "claude" in model_name else "codex_responses"
+
+    monkeypatch.setattr("hermes_cli.models.copilot_model_api_mode", fake_copilot_model_api_mode)
+
+    resolved = rp.resolve_runtime_provider(
+        requested="copilot",
+        target_model="claude-opus-4.7-1m-internal",
+    )
+
+    assert resolved["provider"] == "copilot"
+    assert resolved["api_mode"] == "chat_completions"
