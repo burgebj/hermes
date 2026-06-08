@@ -2110,6 +2110,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 last_activity = await _emit(delta)
 
             # Get usage from completed agent
+            result = {}
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
             try:
                 result, agent_usage = await agent_task
@@ -2117,11 +2118,22 @@ class APIServerAdapter(BasePlatformAdapter):
             except Exception as exc:
                 logger.warning("Agent task %s failed, usage data lost: %s", completion_id, exc)
 
+            # Mirror _handle_chat_completions finish_reason logic: report
+            # "length" for truncation and "error" for failures so streaming
+            # clients get the same signal as non-streaming ones (PR #22775).
+            err_msg = result.get("error")
+            if result.get("partial") and err_msg and "truncat" in err_msg.lower():
+                finish_reason = "length"
+            elif result.get("failed") or (not result.get("completed", True) and err_msg):
+                finish_reason = "error"
+            else:
+                finish_reason = "stop"
+
             # Finish chunk
             finish_chunk = {
                 "id": completion_id, "object": "chat.completion.chunk",
                 "created": created, "model": model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
                 "usage": {
                     "prompt_tokens": usage.get("input_tokens", 0),
                     "completion_tokens": usage.get("output_tokens", 0),

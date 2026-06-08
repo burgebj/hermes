@@ -2916,6 +2916,113 @@ class TestChatCompletionsAgentIncomplete:
             assert "X-Hermes-Completed" not in resp.headers
 
 
+class TestChatCompletionsStreamingFinishReason:
+    """Streaming endpoint must emit the same finish_reason semantics as the
+    non-streaming endpoint (fixed by PR #22775).  Regression for the parity
+    gap where _write_sse_chat_completion always sent finish_reason='stop'."""
+
+    def _parse_sse_finish_reason(self, body: str) -> str:
+        """Return the finish_reason from the last non-[DONE] data chunk."""
+        import json as _json
+        reason = None
+        for line in body.splitlines():
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            try:
+                chunk = _json.loads(line[6:])
+                fr = chunk.get("choices", [{}])[0].get("finish_reason")
+                if fr is not None:
+                    reason = fr
+            except Exception:
+                pass
+        return reason
+
+    @pytest.mark.asyncio
+    async def test_stream_truncation_emits_length_finish_reason(self, adapter):
+        """Truncated run with partial=True must emit finish_reason='length'."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            async def _mock_run_agent(**kwargs):
+                cb = kwargs.get("stream_delta_callback")
+                if cb:
+                    cb("Partial answer")
+                    cb(None)
+                return (
+                    {
+                        "final_response": "Partial answer",
+                        "completed": False,
+                        "partial": True,
+                        "error": "Response truncated due to output length limit",
+                        "messages": [],
+                        "api_calls": 1,
+                    },
+                    {"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                )
+            assert resp.status == 200
+            body = await resp.text()
+            assert self._parse_sse_finish_reason(body) == "length"
+
+    @pytest.mark.asyncio
+    async def test_stream_failed_run_emits_error_finish_reason(self, adapter):
+        """Failed run must emit finish_reason='error', not 'stop'."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            async def _mock_run_agent(**kwargs):
+                cb = kwargs.get("stream_delta_callback")
+                if cb:
+                    cb(None)
+                return (
+                    {
+                        "final_response": "",
+                        "completed": False,
+                        "failed": True,
+                        "error": "Agent encountered an unrecoverable error",
+                        "messages": [],
+                        "api_calls": 1,
+                    },
+                    {"input_tokens": 5, "output_tokens": 0, "total_tokens": 5},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                )
+            assert resp.status == 200
+            body = await resp.text()
+            assert self._parse_sse_finish_reason(body) == "error"
+
+    @pytest.mark.asyncio
+    async def test_stream_normal_completion_still_emits_stop(self, adapter):
+        """Happy path must still emit finish_reason='stop'."""
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            async def _mock_run_agent(**kwargs):
+                cb = kwargs.get("stream_delta_callback")
+                if cb:
+                    cb("Done!")
+                    cb(None)
+                return (
+                    {"final_response": "Done!", "completed": True, "messages": [], "api_calls": 1},
+                    {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7},
+                )
+
+            with patch.object(adapter, "_run_agent", side_effect=_mock_run_agent):
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+                )
+            assert resp.status == 200
+            body = await resp.text()
+            assert self._parse_sse_finish_reason(body) == "stop"
+
+
 # ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------
