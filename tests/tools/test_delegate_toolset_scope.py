@@ -39,7 +39,7 @@ class TestToolsetIntersection:
         assert sorted(scoped) == ["terminal", "web"]
 
     def test_no_toolsets_requested_inherits_parent(self):
-        """When toolsets is None/empty, child inherits parent's set."""
+        """When toolsets is omitted (None), child inherits parent's set."""
         parent_toolsets = ["terminal", "file", "web"]
         child = _strip_blocked_tools(parent_toolsets)
         assert "terminal" in child
