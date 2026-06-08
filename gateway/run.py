@@ -1961,6 +1961,12 @@ class GatewayRunner:
         self._session_sources: "OrderedDict[str, SessionSource]" = OrderedDict()
         self._session_sources_max = 512
 
+        # Crash-recovery checkpoint — records in-flight agent runs to disk
+        # so that a gateway restart can detect interrupted sessions.
+        from gateway.session import SessionCrashCheckpoint
+        _checkpoint_path = os.path.join(str(_hermes_home), "agent_checkpoints.json")
+        self._crash_checkpoint = SessionCrashCheckpoint(path=_checkpoint_path)
+
         # Cache AIAgent instances per session to preserve prompt caching.
         # Without this, a new AIAgent is created per message, rebuilding the
         # system prompt (including memory) every turn — breaking prefix cache
@@ -4537,6 +4543,22 @@ class GatewayRunner:
             except Exception:
                 pass
         else:
+            # Primary: use the crash checkpoint for precise detection of sessions
+            # that were in-flight when the gateway crashed.
+            try:
+                interrupted = self._crash_checkpoint.get_active_sessions()
+                if interrupted:
+                    for session_key in interrupted:
+                        self.session_store.suspend_session(session_key)
+                    logger.info(
+                        "Suspended %d interrupted session(s) from crash checkpoint",
+                        len(interrupted),
+                    )
+                    self._crash_checkpoint.clear()
+            except Exception as e:
+                logger.warning("Crash checkpoint recovery failed: %s", e)
+
+            # Fallback: time-window heuristic for sessions not tracked by checkpoint.
             try:
                 suspended = self.session_store.suspend_recently_active()
                 if suspended:
@@ -6764,6 +6786,13 @@ class GatewayRunner:
                     (_hermes_home / ".clean_shutdown").touch()
                 except Exception:
                     pass
+                # Clear the crash checkpoint on clean shutdown so that stale
+                # entries left by /stop or stale-eviction paths do not cause
+                # false-positive session suspensions if a crash occurs later.
+                try:
+                    self._crash_checkpoint.clear()
+                except Exception as _e:
+                    logger.debug("Failed to clear crash checkpoint on clean shutdown: %s", _e)
             else:
                 logger.info(
                     "Skipping .clean_shutdown marker — drain timed out with "
@@ -7763,6 +7792,12 @@ class GatewayRunner:
                     reason="stale_running_agent_eviction",
                 )
                 self._release_running_agent_state(_quick_key)
+                # The generation was just invalidated, so the agent's finally
+                # block will see released=False and skip mark_completed.  Do
+                # it here so the checkpoint entry is not left as a stale
+                # false-positive that would cause an unwarranted suspension on
+                # the next crash restart.
+                self._crash_checkpoint.mark_completed(_quick_key)
 
         if _quick_key in self._running_agents:
             if event.get_command() == "status":
@@ -8039,6 +8074,7 @@ class GatewayRunner:
                 if event.get_command() == "stop":
                     # Force-clean the sentinel so the session is unlocked.
                     self._release_running_agent_state(_quick_key)
+                    self._crash_checkpoint.mark_completed(_quick_key)
                     logger.info("HARD STOP (pending) for session %s — sentinel cleared", _quick_key)
                     return EphemeralReply("⚡ Force-stopped. The agent was still starting — session unlocked.")
                 # Queue the message so it will be picked up after the
@@ -16616,6 +16652,11 @@ class GatewayRunner:
         self._pending_messages.pop(session_key, None)
         if release_running_state:
             self._release_running_agent_state(session_key)
+            # The generation was invalidated above, so the interrupted agent's
+            # finally block will see released=False and skip mark_completed.
+            # Remove the checkpoint entry here to avoid a stale false-positive
+            # that would cause an unwarranted suspension on the next crash restart.
+            self._crash_checkpoint.mark_completed(session_key)
 
     def _evict_cached_agent(self, session_key: str) -> None:
         """Remove a cached agent for a session (called on /new, /model, etc)."""
@@ -18782,6 +18823,7 @@ class GatewayRunner:
                 )
                 return
             self._running_agents[session_key] = agent_holder[0]
+            self._crash_checkpoint.mark_running(session_key, session_id=session_id)
             if self._draining:
                 self._update_runtime_status("draining")
         
@@ -19379,9 +19421,11 @@ class GatewayRunner:
                 # were unwinding has already installed its own state; this
                 # guard prevents an old run from clobbering it on the way
                 # out.
-                self._release_running_agent_state(
+                released = self._release_running_agent_state(
                     session_key, run_generation=run_generation
                 )
+                if released:
+                    self._crash_checkpoint.mark_completed(session_key)
             if self._draining:
                 self._update_runtime_status("draining")
             
