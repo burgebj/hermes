@@ -371,5 +371,84 @@ class TestStaleToolMediaLeak:
         )
 
 
+def collect_history_media_paths(agent_history):
+    """Mirror of the _history_media_paths collection in gateway/run.py.
+
+    Scans history messages for MEDIA: tags across tool, function, AND
+    assistant roles.  Assistant messages are included because context
+    compression preserves MEDIA: tags from prior assistant turns in the
+    compressed summary — without scanning assistant messages, those paths
+    are missed and the files get re-delivered.  (Regression test for #37358)
+    """
+    paths = set()
+    for msg in agent_history:
+        if msg.get("role") in {"tool", "function", "assistant"}:
+            content = msg.get("content", "") or ""
+            if "MEDIA:" in content:
+                for match in re.finditer(r'MEDIA:(\S+)', content):
+                    p = match.group(1).strip().rstrip('\",}')
+                    if p:
+                        paths.add(p)
+    return paths
+
+
+class TestHistoryMediaPathCollection:
+    """Tests for _history_media_paths collection from agent history."""
+
+    def test_tool_media_paths_collected(self):
+        """Baseline: MEDIA paths from tool messages are collected."""
+        history = [
+            {"role": "user", "content": "send me the report"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "1", "function": {"name": "execute_code"}}]},
+            {"role": "tool", "tool_call_id": "1",
+             "content": "MEDIA:/tmp/report.pdf\nDone."},
+            {"role": "assistant", "content": "Here is your report."},
+        ]
+        paths = collect_history_media_paths(history)
+        assert "/tmp/report.pdf" in paths
+
+    def test_assistant_media_paths_collected_after_compression(self):
+        """After context compression, MEDIA tags in assistant messages
+        must be captured so they are not re-delivered. (#37358)"""
+        # Simulates a compressed history where the assistant's prior
+        # response (containing a MEDIA tag) is preserved in the summary.
+        history = [
+            {"role": "user", "content": "compressed session summary..."},
+            {"role": "assistant",
+             "content": "Here is the document: MEDIA:/tmp/doc.pdf"},
+        ]
+        paths = collect_history_media_paths(history)
+        assert "/tmp/doc.pdf" in paths, (
+            "Assistant MEDIA paths must be captured for dedup after "
+            f"compression, got {paths}"
+        )
+
+    def test_assistant_none_content_no_crash(self):
+        """Assistant messages with content=None (tool_calls) must not crash."""
+        history = [
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "1", "function": {"name": "execute_code"}}]},
+        ]
+        paths = collect_history_media_paths(history)
+        assert paths == set()
+
+    def test_mixed_roles_all_collected(self):
+        """MEDIA paths from all three roles are collected."""
+        history = [
+            {"role": "tool", "tool_call_id": "1",
+             "content": "MEDIA:/tmp/from_tool.png"},
+            {"role": "assistant",
+             "content": "MEDIA:/tmp/from_assistant.pdf"},
+            {"role": "function", "name": "fn",
+             "content": "MEDIA:/tmp/from_function.zip"},
+        ]
+        paths = collect_history_media_paths(history)
+        assert len(paths) == 3
+        assert "/tmp/from_tool.png" in paths
+        assert "/tmp/from_assistant.pdf" in paths
+        assert "/tmp/from_function.zip" in paths
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

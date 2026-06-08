@@ -18290,8 +18290,8 @@ class GatewayRunner:
             # even if the message list shrinks, we know which paths are old.
             _history_media_paths: set = set()
             for _hm in agent_history:
-                if _hm.get("role") in {"tool", "function"}:
-                    _hc = _hm.get("content", "")
+                if _hm.get("role") in {"tool", "function", "assistant"}:
+                    _hc = _hm.get("content", "") or ""
                     if "MEDIA:" in _hc:
                         _TOOL_MEDIA_RE = re.compile(
                             r'MEDIA:((?:[A-Za-z]:[/\\]|/|~\/)\S+\.(?:png|jpe?g|gif|webp|'
