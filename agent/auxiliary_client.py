@@ -4626,7 +4626,7 @@ def _get_cached_client(
                 _client_cache[cache_key] = (client, default_model, bound_loop)
             else:
                 client, default_model, _ = _client_cache[cache_key]
-    return client, model or default_model
+    return client, _compat_model(client, model, default_model)
 
 
 # Aliases that target direct REST APIs not modeled as first-class providers
