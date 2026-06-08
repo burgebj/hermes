@@ -494,6 +494,91 @@ class TestWsHostOriginGuardOrigins:
         assert web_server._ws_host_origin_is_allowed(ws) is True
 
 
+class TestWsRequestAllowedWithValidToken:
+    """When the credential gate has already accepted the request, the
+    Host/Origin and peer-IP guards should be bypassed (``token_ok=True``).
+
+    This fixes the remote-gateway scenario (GH #38412, #40391) where a
+    packaged Electron client on a different machine can't satisfy both
+    guards simultaneously: loopback binds reject non-loopback peers, and
+    non-loopback binds reject ``file://`` / ``null`` origins.  A valid
+    session token (32-byte random, constant-time compared) already proves
+    identity; the network-layer checks are redundant for authenticated
+    connections.
+    """
+
+    def test_non_loopback_peer_allowed_with_token_on_loopback_bind(self, loopback_app):
+        """Remote client (e.g. via SSH tunnel) with valid token connects to
+        loopback-bound server — peer-IP check is bypassed."""
+        ws = _fake_ws(
+            query={"token": web_server._SESSION_TOKEN},
+            client_host="192.168.1.42",
+        )
+        ws.headers = {"host": "127.0.0.1:8080"}
+        assert web_server._ws_request_is_allowed(ws, token_ok=True) is True
+
+    def test_non_loopback_peer_rejected_without_token_ok(self, loopback_app):
+        """Without token_ok, the existing peer-IP guard still rejects
+        non-loopback clients on loopback binds (backward compat)."""
+        ws = _fake_ws(query={}, client_host="192.168.1.42")
+        ws.headers = {"host": "127.0.0.1:8080"}
+        assert web_server._ws_request_is_allowed(ws) is False
+
+    def test_file_origin_allowed_with_token_on_non_loopback_bind(
+        self, insecure_explicit_host_app
+    ):
+        """Packaged Electron (file:// origin) with valid token connects to
+        non-loopback-bound server — Host/Origin check is bypassed."""
+        ws = _fake_ws(query={}, client_host="100.64.0.99")
+        ws.headers = {
+            "host": "100.64.0.10:9119",
+            "origin": "file://",
+        }
+        # Without token_ok, file:// origin passes on non-loopback bind
+        # (non-web origins are accepted), but the peer-IP check also
+        # passes for explicit non-loopback binds — so this already works.
+        # The critical case is when BOTH checks would fail simultaneously.
+        assert web_server._ws_request_is_allowed(ws, token_ok=True) is True
+
+    def test_gated_mode_with_token_ok(self, gated_app):
+        """In gated mode, token_ok bypass still works (though gated mode
+        already allows non-loopback peers — this verifies no regression)."""
+        ws = _fake_ws(query={}, client_host="203.0.113.7")
+        ws.headers = {"host": "fly-app.fly.dev"}
+        assert web_server._ws_request_is_allowed(ws, token_ok=True) is True
+
+
+class TestSessionTokenInStatus:
+    """The ``/api/status`` response should include ``session_token`` when
+    the OAuth gate is NOT active, so remote Desktop clients can
+    auto-discover the token (GH #40391)."""
+
+    def test_session_token_present_in_loopback_mode(self, loopback_app):
+        client = TestClient(web_server.app, base_url="http://127.0.0.1:8080")
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "session_token" in data
+        assert data["session_token"] == web_server._SESSION_TOKEN
+
+    def test_session_token_absent_in_gated_mode(self, gated_app):
+        client = TestClient(web_server.app, base_url="https://fly-app.fly.dev")
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "session_token" not in data
+
+    def test_session_token_present_in_insecure_mode(self, insecure_public_app):
+        client = TestClient(
+            web_server.app, base_url="http://192.168.0.222:9120"
+        )
+        resp = client.get("/api/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "session_token" in data
+        assert data["session_token"] == web_server._SESSION_TOKEN
+
+
 class TestSidecarUrl:
     def test_loopback_uses_session_token(self, loopback_app):
         url = web_server._build_sidecar_url("ch-1")

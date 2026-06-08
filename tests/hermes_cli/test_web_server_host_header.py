@@ -151,7 +151,38 @@ class TestHostHeaderMiddleware:
 class TestWebSocketHostOriginGuard:
     """WebSocket upgrades must enforce the same dashboard boundary as HTTP."""
 
-    def test_rebinding_websocket_host_is_rejected(self, monkeypatch):
+    def test_rebinding_websocket_host_allowed_with_valid_token(self, monkeypatch):
+        """A valid session token bypasses the Host/Origin guard (GH #38412).
+
+        The token proves identity; the Host/Origin guard defends against DNS
+        rebinding *stealing* the token, but a 32-byte random token is already
+        unguessable.  Without a token, rebinding is still rejected.
+        """
+        from fastapi.testclient import TestClient
+
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws.app.state, "bound_host", "127.0.0.1", raising=False)
+        monkeypatch.setattr(ws, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+
+        client = TestClient(ws.app)
+        url = f"/api/events?token={ws._SESSION_TOKEN}&channel=security-test"
+        # Valid token + rebinding Host → accepted (token_ok bypasses guard)
+        with client.websocket_connect(
+            url,
+            headers={
+                "Host": "evil.example",
+                "Origin": "http://evil.example",
+            },
+        ) as ws_conn:
+            # Connection established — the guard is bypassed.
+            pass
+
+    def test_rebinding_websocket_host_rejected_without_valid_token(
+        self, monkeypatch
+    ):
+        """Without a valid token, the Host/Origin guard still rejects
+        rebinding requests (backward compat for unauthenticated path)."""
         from fastapi.testclient import TestClient
         from starlette.websockets import WebSocketDisconnect
 
@@ -161,7 +192,7 @@ class TestWebSocketHostOriginGuard:
         monkeypatch.setattr(ws, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
 
         client = TestClient(ws.app)
-        url = f"/api/events?token={ws._SESSION_TOKEN}&channel=security-test"
+        url = "/api/events?channel=security-test"  # no token
         with pytest.raises(WebSocketDisconnect) as exc:
             with client.websocket_connect(
                 url,
@@ -172,11 +203,10 @@ class TestWebSocketHostOriginGuard:
             ):
                 pass
 
-        assert exc.value.code == 4403
+        assert exc.value.code == 4401  # auth rejected first
 
-    def test_rebinding_websocket_origin_is_rejected(self, monkeypatch):
+    def test_rebinding_websocket_origin_allowed_with_valid_token(self, monkeypatch):
         from fastapi.testclient import TestClient
-        from starlette.websockets import WebSocketDisconnect
 
         import hermes_cli.web_server as ws
 
@@ -185,17 +215,14 @@ class TestWebSocketHostOriginGuard:
 
         client = TestClient(ws.app)
         url = f"/api/events?token={ws._SESSION_TOKEN}&channel=security-test"
-        with pytest.raises(WebSocketDisconnect) as exc:
-            with client.websocket_connect(
-                url,
-                headers={
-                    "Host": "localhost:9119",
-                    "Origin": "http://evil.example",
-                },
-            ):
-                pass
-
-        assert exc.value.code == 4403
+        with client.websocket_connect(
+            url,
+            headers={
+                "Host": "localhost:9119",
+                "Origin": "http://evil.example",
+            },
+        ) as ws_conn:
+            pass
 
     def test_loopback_websocket_host_and_origin_are_accepted(self, monkeypatch):
         from fastapi.testclient import TestClient
