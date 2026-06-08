@@ -2889,13 +2889,35 @@ class TestCompressionChainProjection:
         # root1's tip must be tip1 (via mid1), not delegate1.
         assert db.get_compression_tip("root1") == "tip1"
 
+    def test_list_reconciles_stale_zero_message_count_from_messages_table(self, db):
+        """Regression for #39734: list/browse must not expose a persisted
+        prompt as a zero-message session when the cached sessions.message_count
+        is stale.
+        """
+        db.create_session("stale_count", "cli")
+        db.append_message("stale_count", "user", "recover this prompt")
+        db._conn.execute(
+            "UPDATE sessions SET message_count = 0 WHERE id = ?",
+            ("stale_count",),
+        )
+        db._conn.commit()
+
+        row = next(
+            s for s in db.list_sessions_rich(source="cli", limit=20)
+            if s["id"] == "stale_count"
+        )
+
+        assert row["message_count"] == 1
+        assert row["preview"].startswith("recover this prompt")
+
     def test_list_surfaces_tip_for_compressed_root(self, db):
         """The list must show the tip's id/message_count/preview in place of
         the root row, so users can see and resume the live conversation.
         """
         import time as _time
+
         self._build_compression_chain(db, _time.time() - 3600)
-        # Add an uncompressed root for comparison.
+
         db.create_session("solo", "cli")
         db.append_message("solo", "user", "standalone")
         db._conn.commit()
