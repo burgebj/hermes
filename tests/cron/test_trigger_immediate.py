@@ -541,6 +541,31 @@ class TestRunJobImmediate:
 
         sched._shutdown_parallel_pool()
 
+    def test_run_job_immediate_releases_claim_if_pool_creation_fails(self, monkeypatch):
+        """Pool-construction failures must not strand the per-job running lock."""
+        import cron.scheduler as sched
+        from cron.jobs import create_job
+
+        sched._parallel_pool = None
+        sched._parallel_pool_max_workers = None
+        sched._running_job_ids.clear()
+
+        job = create_job(
+            prompt="test prompt",
+            schedule="every 5m",
+            name="pool-create-failure-cleanup"
+        )
+        job_id = job["id"]
+
+        monkeypatch.setattr(sched, "_get_parallel_pool", lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("pool boom")))
+
+        with pytest.raises(RuntimeError, match="pool boom"):
+            sched.run_job_immediate(job_id)
+
+        assert job_id not in sched._running_job_ids
+
+        sched._shutdown_parallel_pool()
+
     def test_tick_skips_job_claimed_in_other_process(self, tmp_path, monkeypatch):
         """tick() must share the same cross-process running claim as manual runs."""
         import cron.scheduler as sched

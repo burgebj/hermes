@@ -1474,11 +1474,16 @@ def run_job_immediate(job_id: str, schedule_snapshot: Optional[dict] = None) -> 
         _restore_manual_run_schedule(job["id"], schedule_snapshot)
         return False, f"Job '{job_id}' is already running; this manual run was not queued"
 
-    pool = (
-        _get_sequential_pool()
-        if _job_requires_sequential_pool(job)
-        else _get_parallel_pool(_resolve_max_parallel_workers())
-    )
+    try:
+        pool = (
+            _get_sequential_pool()
+            if _job_requires_sequential_pool(job)
+            else _get_parallel_pool(_resolve_max_parallel_workers())
+        )
+    except Exception:
+        _release_running_job(job["id"], run_lock)
+        _restore_manual_run_schedule(job["id"], schedule_snapshot)
+        raise
     _ctx = contextvars.copy_context()
     adapters = _live_delivery_adapters
     loop = _live_delivery_loop
