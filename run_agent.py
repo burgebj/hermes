@@ -931,6 +931,65 @@ class AIAgent:
         self._codex_reasoning_replay_enabled = False
         return {"messages": stripped_messages, "items": stripped_items}
 
+    def _strip_provider_specific_reasoning_state(
+        self,
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, int]:
+        """Strip provider-specific encrypted reasoning state from messages.
+
+        Called from ``switch_model`` when the provider changes mid-session
+        (e.g. openai-codex → xai-oauth, anthropic → openrouter). Reasoning
+        blobs are opaque to providers other than the one that issued them,
+        so replaying them after a switch causes HTTP 400 ``invalid_encrypted_content``
+        on every subsequent turn until the session is manually cleared.
+        See #34205.
+
+        Strips three classes of provider-specific replay state:
+          * ``codex_reasoning_items``     — OpenAI Codex Responses encrypted blobs.
+          * ``codex_message_items``       — OpenAI Codex Responses message-item
+                                            metadata (``phase`` field). Safe to
+                                            drop — only meaningful to Codex.
+          * ``reasoning_details``         — OpenRouter/Anthropic structured
+                                            reasoning array containing
+                                            ``encrypted_content`` signatures.
+                                            Other providers (xAI/Grok, Gemini,
+                                            OpenAI direct) reject these.
+
+        ``reasoning`` and ``reasoning_content`` strings are intentionally
+        left intact — they are plain text and safe to replay across
+        providers; the new provider can ignore them harmlessly.
+
+        Also disables ``_codex_reasoning_replay_enabled`` so transports that
+        still see ``codex_reasoning_items`` (e.g. stale snapshots reloaded
+        from disk) don't try to replay them either.
+
+        Returns ``{"messages": <count>, "items": <count>}`` diagnostic stats.
+        """
+        stripped_messages = 0
+        stripped_items = 0
+        target_messages = messages if isinstance(messages, list) else []
+
+        for msg in target_messages:
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            removed_any = False
+            for key in ("codex_reasoning_items", "codex_message_items", "reasoning_details"):
+                value = msg.pop(key, None)
+                if isinstance(value, list) and value:
+                    stripped_items += len(value)
+                    removed_any = True
+                elif value is not None:
+                    # Non-list truthy value (dict, etc.) — still counts as one.
+                    stripped_items += 1
+                    removed_any = True
+            if removed_any:
+                stripped_messages += 1
+
+        # Future codex_responses turns must not re-attach encrypted_content
+        # to outbound requests until a fresh session establishes new state.
+        self._codex_reasoning_replay_enabled = False
+        return {"messages": stripped_messages, "items": stripped_items}
+
     # Stream-diagnostic class header preserved for backward compat —
     # actual list lives in ``agent.stream_diag.STREAM_DIAG_HEADERS``.
     from agent.stream_diag import STREAM_DIAG_HEADERS as _STREAM_DIAG_HEADERS  # noqa: E402

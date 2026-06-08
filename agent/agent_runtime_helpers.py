@@ -1563,6 +1563,43 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
     # ── Invalidate cached system prompt so it rebuilds next turn ──
     agent._cached_system_prompt = None
 
+    # ── Strip stale provider-specific reasoning state on provider switch ──
+    # #34205: encrypted_content blobs from one provider are opaque to
+    # another. After openai-codex → xai-oauth (or any cross-provider
+    # switch), the next request replays the OLD provider's encrypted
+    # reasoning items / reasoning_details and the NEW provider rejects
+    # the request with HTTP 400 invalid_encrypted_content. The session
+    # is poisoned until manually cleared.
+    #
+    # Strip codex_reasoning_items, codex_message_items, and
+    # reasoning_details from the live message history when the provider
+    # changes. Plain reasoning / reasoning_content strings are left
+    # intact — they're not provider-specific and harmless to replay.
+    if old_provider and new_provider and old_provider != new_provider:
+        _session_messages = getattr(agent, "_session_messages", None)
+        if isinstance(_session_messages, list) and _session_messages:
+            try:
+                stats = agent._strip_provider_specific_reasoning_state(_session_messages)
+                if stats.get("messages", 0):
+                    import logging as _logging
+                    _logging.getLogger(__name__).info(
+                        "Provider switch %s -> %s: stripped %d reasoning item(s) "
+                        "from %d assistant message(s) to prevent stale-blob 400s (#34205)",
+                        old_provider,
+                        new_provider,
+                        stats["items"],
+                        stats["messages"],
+                    )
+            except Exception as _strip_exc:  # noqa: BLE001
+                # Best-effort — if the stripper fails for any reason, fall
+                # back to the existing invalid_encrypted_content retry path.
+                import logging as _logging
+                _logging.getLogger(__name__).debug(
+                    "#34205 strip: best-effort stripping failed (%s); "
+                    "existing 400-retry path will still recover.",
+                    _strip_exc,
+                )
+
     # ── Update _primary_runtime so the change persists across turns ──
     _cc = agent.context_compressor if hasattr(agent, "context_compressor") and agent.context_compressor else None
     agent._primary_runtime = {
