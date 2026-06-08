@@ -97,3 +97,76 @@ class TestPluginDispatch:
         assert payload["success"] is True
         assert payload["provider"] == "codex"
         assert payload["aspect_ratio"] == "portrait"
+
+
+class _CapturingProvider(ImageGenProvider):
+    def __init__(self):
+        self.seen = {}
+
+    @property
+    def name(self) -> str:
+        return "codex"
+
+    def generate(self, prompt, aspect_ratio="landscape", **kwargs):
+        self.seen = {"prompt": prompt, "aspect_ratio": aspect_ratio, **kwargs}
+        return {
+            "success": True,
+            "image": "/tmp/codex-test.png",
+            "model": "gpt-image-2-medium",
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "provider": "codex",
+        }
+
+
+class TestReferenceImageForwarding:
+    def test_reference_images_forwarded_to_provider(self, monkeypatch, tmp_path):
+        from tools import image_generation_tool
+        from agent import image_gen_registry as registry_module
+        from hermes_cli import plugins as plugins_module
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text("image_gen:\n  provider: codex\n")
+
+        capturing = _CapturingProvider()
+        monkeypatch.setattr(image_generation_tool, "_read_configured_image_provider", lambda: "codex")
+        monkeypatch.setattr(plugins_module, "_ensure_plugins_discovered", lambda *a, **k: None)
+        monkeypatch.setattr(registry_module, "get_provider", lambda name: capturing)
+
+        refs = ["https://mojapteczka.pl/brand/mascot.jpeg"]
+        dispatched = image_generation_tool._dispatch_to_plugin_provider(
+            "draw mascot", "square", reference_images=refs
+        )
+        payload = json.loads(dispatched)
+
+        assert payload["success"] is True
+        assert capturing.seen.get("reference_images") == refs
+
+    def test_no_reference_images_omits_kwarg(self, monkeypatch, tmp_path):
+        from tools import image_generation_tool
+        from agent import image_gen_registry as registry_module
+        from hermes_cli import plugins as plugins_module
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text("image_gen:\n  provider: codex\n")
+
+        capturing = _CapturingProvider()
+        monkeypatch.setattr(image_generation_tool, "_read_configured_image_provider", lambda: "codex")
+        monkeypatch.setattr(plugins_module, "_ensure_plugins_discovered", lambda *a, **k: None)
+        monkeypatch.setattr(registry_module, "get_provider", lambda name: capturing)
+
+        image_generation_tool._dispatch_to_plugin_provider("draw mascot", "square")
+
+        assert "reference_images" not in capturing.seen
+
+
+class TestSchema:
+    def test_schema_exposes_optional_reference_images(self):
+        from tools.image_generation_tool import IMAGE_GENERATE_SCHEMA
+
+        props = IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
+        assert "reference_images" in props
+        assert props["reference_images"]["type"] == "array"
+        assert props["reference_images"]["items"]["type"] == "string"
+        # Optional — must not be in required.
+        assert "reference_images" not in IMAGE_GENERATE_SCHEMA["parameters"]["required"]

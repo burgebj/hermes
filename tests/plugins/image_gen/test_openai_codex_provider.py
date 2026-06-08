@@ -234,3 +234,132 @@ class TestRegistration:
         codex_plugin.register(_Ctx())
         assert len(registered) == 1
         assert registered[0].name == "openai-codex"
+
+
+# ── Reference images (input_image) ───────────────────────────────────────────
+
+
+class TestToInputImagePart:
+    def test_http_url_passthrough(self):
+        part = codex_plugin._to_input_image_part("https://example.com/m.png")
+        assert part == {"type": "input_image", "image_url": "https://example.com/m.png"}
+
+    def test_data_image_url_passthrough(self):
+        ref = "data:image/png;base64," + _b64_png()
+        part = codex_plugin._to_input_image_part(ref)
+        assert part == {"type": "input_image", "image_url": ref}
+
+    def test_absolute_path_becomes_data_url(self, tmp_path):
+        img = tmp_path / "mascot.png"
+        img.write_bytes(bytes.fromhex(_PNG_HEX))
+        part = codex_plugin._to_input_image_part(str(img))
+        assert part["type"] == "input_image"
+        assert part["image_url"].startswith("data:image/png;base64,")
+
+    def test_jpg_extension_maps_to_jpeg_mime(self, tmp_path):
+        img = tmp_path / "mascot.jpg"
+        img.write_bytes(bytes.fromhex(_PNG_HEX))  # content bytes irrelevant for mime mapping
+        part = codex_plugin._to_input_image_part(str(img))
+        assert part["image_url"].startswith("data:image/jpeg;base64,")
+
+    def test_relative_path_rejected(self):
+        with pytest.raises(ValueError, match="absolute"):
+            codex_plugin._to_input_image_part("mascot.png")
+
+    def test_missing_file_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="not found"):
+            codex_plugin._to_input_image_part(str(tmp_path / "nope.png"))
+
+    def test_unsupported_extension_rejected(self, tmp_path):
+        bad = tmp_path / "mascot.bmp"
+        bad.write_bytes(bytes.fromhex(_PNG_HEX))
+        with pytest.raises(ValueError, match="unsupported"):
+            codex_plugin._to_input_image_part(str(bad))
+
+    def test_oversize_file_rejected(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(codex_plugin, "MAX_REFERENCE_IMAGE_BYTES", 4)
+        img = tmp_path / "big.png"
+        img.write_bytes(bytes.fromhex(_PNG_HEX))  # > 4 bytes
+        with pytest.raises(ValueError, match="exceeds"):
+            codex_plugin._to_input_image_part(str(img))
+
+    def test_non_image_data_url_rejected(self):
+        with pytest.raises(ValueError, match="data:image"):
+            codex_plugin._to_input_image_part("data:text/plain;base64,QQ==")
+
+    def test_empty_rejected(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            codex_plugin._to_input_image_part("   ")
+
+
+class TestPayloadReferenceImages:
+    def test_text_only_when_no_parts(self):
+        payload = codex_plugin._build_responses_payload(
+            prompt="a cat", size="1024x1024", quality="medium"
+        )
+        content = payload["input"][0]["content"]
+        assert content == [{"type": "input_text", "text": "a cat"}]
+
+    def test_parts_appended_after_text(self):
+        parts = [{"type": "input_image", "image_url": "https://x/y.png"}]
+        payload = codex_plugin._build_responses_payload(
+            prompt="a cat", size="1024x1024", quality="medium", image_parts=parts
+        )
+        content = payload["input"][0]["content"]
+        assert content[0] == {"type": "input_text", "text": "a cat"}
+        assert content[1:] == parts
+
+
+class TestGenerateReferenceImages:
+    def test_generate_forwards_reference_images_into_payload(self, provider, monkeypatch):
+        monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: "codex-token")
+        captured = {}
+
+        def _collect(token, *, prompt, size, quality, image_parts=None):
+            captured["payload"] = codex_plugin._build_responses_payload(
+                prompt=prompt, size=size, quality=quality, image_parts=image_parts
+            )
+            return _b64_png()
+
+        monkeypatch.setattr(codex_plugin, "_collect_image_b64", _collect)
+
+        result = provider.generate(
+            "hamster mascot on a bike",
+            aspect_ratio="square",
+            reference_images=["https://mojapteczka.pl/brand/mascot.jpeg"],
+        )
+
+        assert result["success"] is True
+        content = captured["payload"]["input"][0]["content"]
+        assert content[0]["type"] == "input_text"
+        assert {
+            "type": "input_image",
+            "image_url": "https://mojapteczka.pl/brand/mascot.jpeg",
+        } in content[1:]
+
+    def test_generate_rejects_too_many_references(self, provider, monkeypatch):
+        monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: "codex-token")
+
+        def _boom(*a, **kw):
+            raise AssertionError("network call must not happen for invalid refs")
+
+        monkeypatch.setattr(codex_plugin, "_collect_image_b64", _boom)
+
+        refs = [f"https://x/{i}.png" for i in range(codex_plugin.MAX_REFERENCE_IMAGES + 1)]
+        result = provider.generate("a cat", reference_images=refs)
+
+        assert result["success"] is False
+        assert result["error_type"] == "invalid_reference_image"
+
+    def test_generate_rejects_bad_reference(self, provider, monkeypatch):
+        monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: "codex-token")
+
+        def _boom(*a, **kw):
+            raise AssertionError("network call must not happen for invalid refs")
+
+        monkeypatch.setattr(codex_plugin, "_collect_image_b64", _boom)
+
+        result = provider.generate("a cat", reference_images=["relative/mascot.png"])
+
+        assert result["success"] is False
+        assert result["error_type"] == "invalid_reference_image"

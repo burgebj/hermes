@@ -15,12 +15,19 @@ Selection precedence for the tier (first hit wins):
 4. :data:`DEFAULT_MODEL` — ``gpt-image-2-medium``
 
 Output is saved as PNG under ``$HERMES_HOME/cache/images/``.
+
+Supports optional ``reference_images`` (http(s) URLs, ``data:image/...`` URLs,
+or absolute file paths) that are forwarded to the Responses ``image_generation``
+tool as ``input_image`` parts — letting a caller preserve the identity of, say,
+a brand mascot in the generated image.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.image_gen_provider import (
@@ -70,6 +77,19 @@ _SIZES = {
     "portrait": "1024x1536",
 }
 
+# Reference-image (input_image) limits. gpt-image-2 processes image inputs at
+# high fidelity, so a few references are enough to lock identity (e.g. a brand
+# mascot); the caps bound request size and memory for file-path inputs.
+MAX_REFERENCE_IMAGES = 4
+MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MiB per image
+_REFERENCE_IMAGE_MIME_BY_EXT = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
 # Codex Responses surface used for the request. The chat model itself is only
 # the host that calls the ``image_generation`` tool; the actual image work is
 # done by ``API_MODEL``.
@@ -101,8 +121,6 @@ def _load_image_gen_config() -> Dict[str, Any]:
 
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     """Decide which tier to use and return ``(model_id, meta)``."""
-    import os
-
     env_override = os.environ.get("OPENAI_IMAGE_MODEL")
     if env_override and env_override in _MODELS:
         return env_override, _MODELS[env_override]
@@ -143,8 +161,66 @@ def _read_codex_access_token() -> Optional[str]:
         return None
 
 
-def _build_responses_payload(*, prompt: str, size: str, quality: str) -> Dict[str, Any]:
-    """Build the Codex Responses request body for an image_generation call."""
+def _to_input_image_part(ref: str) -> Dict[str, str]:
+    """Normalize one reference image into a Responses ``input_image`` part.
+
+    Accepts an ``http(s)`` URL or a ``data:image/...`` URL (both passed through
+    verbatim), or an absolute file path (read as bytes and inlined as a base64
+    data URL). Raises :class:`ValueError` on anything else so the caller can
+    surface a clean ``invalid_reference_image`` error before any network call.
+    """
+    if not isinstance(ref, str) or not ref.strip():
+        raise ValueError("reference image must be a non-empty string")
+    value = ref.strip()
+    lowered = value.lower()
+
+    if lowered.startswith(("http://", "https://")):
+        return {"type": "input_image", "image_url": value}
+    if lowered.startswith("data:image/"):
+        if len(value) > MAX_REFERENCE_IMAGE_BYTES * 2:
+            raise ValueError("reference image data URL exceeds the size cap")
+        return {"type": "input_image", "image_url": value}
+    if lowered.startswith("data:"):
+        raise ValueError("only data:image/... data URLs are supported")
+
+    # Otherwise treat it as a filesystem path. Require absolute (the agent's CWD
+    # is not meaningful to this provider) and resolve symlinks before access.
+    if not os.path.isabs(value):
+        raise ValueError(f"reference image path must be absolute: {value}")
+    real = os.path.realpath(value)
+    if not os.path.isfile(real):
+        raise ValueError(f"reference image not found: {value}")
+    size_bytes = os.path.getsize(real)
+    if size_bytes > MAX_REFERENCE_IMAGE_BYTES:
+        raise ValueError(
+            f"reference image exceeds {MAX_REFERENCE_IMAGE_BYTES // (1024 * 1024)}MB: {value}"
+        )
+    ext = os.path.splitext(real)[1].lower()
+    mime = _REFERENCE_IMAGE_MIME_BY_EXT.get(ext)
+    if mime is None:
+        raise ValueError(
+            f"unsupported reference image type '{ext or '<none>'}': {value}"
+        )
+    with open(real, "rb") as handle:
+        encoded = base64.b64encode(handle.read()).decode("ascii")
+    return {"type": "input_image", "image_url": f"data:{mime};base64,{encoded}"}
+
+
+def _build_responses_payload(
+    *,
+    prompt: str,
+    size: str,
+    quality: str,
+    image_parts: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    """Build the Codex Responses request body for an image_generation call.
+
+    ``image_parts`` are pre-normalized ``input_image`` content parts (reference
+    images). When omitted the payload is identical to a text-only request.
+    """
+    content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+    if image_parts:
+        content.extend(image_parts)
     return {
         "model": _CODEX_CHAT_MODEL,
         "store": False,
@@ -152,7 +228,7 @@ def _build_responses_payload(*, prompt: str, size: str, quality: str) -> Dict[st
         "input": [{
             "type": "message",
             "role": "user",
-            "content": [{"type": "input_text", "text": prompt}],
+            "content": content,
         }],
         "tools": [{
             "type": "image_generation",
@@ -242,7 +318,14 @@ def _iter_sse_json(response: Any):
         yield payload
 
 
-def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> Optional[str]:
+def _collect_image_b64(
+    token: str,
+    *,
+    prompt: str,
+    size: str,
+    quality: str,
+    image_parts: Optional[List[Dict[str, str]]] = None,
+) -> Optional[str]:
     """Stream a Codex Responses image_generation call and return the b64 image."""
     import httpx
     from agent.auxiliary_client import _codex_cloudflare_headers
@@ -253,7 +336,9 @@ def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> O
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     })
-    payload = _build_responses_payload(prompt=prompt, size=size, quality=quality)
+    payload = _build_responses_payload(
+        prompt=prompt, size=size, quality=quality, image_parts=image_parts
+    )
     timeout = httpx.Timeout(300.0, connect=30.0, read=300.0, write=30.0, pool=30.0)
 
     image_b64: Optional[str] = None
@@ -368,6 +453,45 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
         tier_id, meta = _resolve_model()
         size = _SIZES.get(aspect, _SIZES["square"])
 
+        # Optional reference images (e.g. a brand mascot) to guide/edit the
+        # generation. Validated up front so a bad input fails before any
+        # network call.
+        image_parts: Optional[List[Dict[str, str]]] = None
+        reference_images = kwargs.get("reference_images") or []
+        if reference_images:
+            if not isinstance(reference_images, (list, tuple)):
+                return error_response(
+                    error="reference_images must be a list of image URLs or absolute file paths",
+                    error_type="invalid_reference_image",
+                    provider="openai-codex",
+                    model=tier_id,
+                    prompt=prompt,
+                    aspect_ratio=aspect,
+                )
+            if len(reference_images) > MAX_REFERENCE_IMAGES:
+                return error_response(
+                    error=(
+                        f"At most {MAX_REFERENCE_IMAGES} reference images are supported "
+                        f"(got {len(reference_images)})"
+                    ),
+                    error_type="invalid_reference_image",
+                    provider="openai-codex",
+                    model=tier_id,
+                    prompt=prompt,
+                    aspect_ratio=aspect,
+                )
+            try:
+                image_parts = [_to_input_image_part(ref) for ref in reference_images]
+            except ValueError as exc:
+                return error_response(
+                    error=f"Invalid reference image: {exc}",
+                    error_type="invalid_reference_image",
+                    provider="openai-codex",
+                    model=tier_id,
+                    prompt=prompt,
+                    aspect_ratio=aspect,
+                )
+
         token = _read_codex_access_token()
         if not token:
             return error_response(
@@ -382,13 +506,15 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
+        collect_kwargs: Dict[str, Any] = {
+            "prompt": prompt,
+            "size": size,
+            "quality": meta["quality"],
+        }
+        if image_parts:
+            collect_kwargs["image_parts"] = image_parts
         try:
-            b64 = _collect_image_b64(
-                token,
-                prompt=prompt,
-                size=size,
-                quality=meta["quality"],
-            )
+            b64 = _collect_image_b64(token, **collect_kwargs)
         except Exception as exc:
             logger.debug("Codex image generation failed", exc_info=True)
             return error_response(
