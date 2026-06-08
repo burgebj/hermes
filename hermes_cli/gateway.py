@@ -5636,7 +5636,9 @@ def _builtin_setup_fn(key: str):
         # mattermost moved into the plugin: setup_fn is registered by
         # plugins/platforms/mattermost/adapter.py::register() and dispatched
         # via the plugin path in _configure_platform().
-        "bluebubbles": _s._setup_bluebubbles,
+        # bluebubbles moved into the plugin: setup_fn is registered by
+        # plugins/platforms/bluebubbles/adapter.py::register() and dispatched
+        # via the plugin path in _configure_platform().
         "webhooks": _s._setup_webhooks,
         "signal": _setup_signal,
         "whatsapp": _setup_whatsapp,
