@@ -452,3 +452,18 @@ class TestUnifiedCronjobTool:
         assert updated["success"] is True
         stored = get_job(created["job_id"])
         assert stored["deliver"] == "telegram"
+
+    def test_normalize_deliver_drops_none_entries(self):
+        """List entries that are None must be dropped, not stringified to 'None'.
+
+        JSON-deserialized payloads from MCP/web clients can include nulls
+        (``[null, "telegram"]``).  Before the fix, ``str(None).strip()`` was
+        ``"None"`` (truthy) and produced a malformed ``"None,telegram"`` value
+        that the scheduler then tried to dispatch as a delivery platform.
+        """
+        from tools.cronjob_tools import _normalize_deliver_param
+
+        assert _normalize_deliver_param([None, "telegram"]) == "telegram"
+        assert _normalize_deliver_param(["telegram", None, "discord"]) == "telegram,discord"
+        assert _normalize_deliver_param([None, None]) is None
+        assert _normalize_deliver_param([None]) is None

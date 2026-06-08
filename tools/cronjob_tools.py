@@ -372,7 +372,7 @@ def _normalize_deliver_param(value: Any) -> Optional[str]:
     if value is None:
         return None
     if isinstance(value, (list, tuple)):
-        parts = [str(p).strip() for p in value if str(p).strip()]
+        parts = [str(p).strip() for p in value if p is not None and str(p).strip()]
         return ",".join(parts) if parts else None
     text = str(value).strip()
     return text or None
