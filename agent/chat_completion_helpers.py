@@ -1898,6 +1898,18 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             if hasattr(chunk, "usage") and chunk.usage:
                 usage_obj = chunk.usage
 
+
+        # Guard: detect empty stream (zero usable chunks).
+        # When a provider returns HTTP 200 but the SSE body yields no
+        # content, reasoning, or tool calls and no finish_reason, we
+        # must raise instead of fabricating a successful "stop" turn.
+        # Without this guard the agent silently loops on empty turns.
+        if finish_reason is None and not content_parts and not reasoning_parts and not tool_calls_acc:
+            raise RuntimeError(
+                "Provider returned an empty stream with no finish_reason "
+                "(possible upstream error or malformed SSE)."
+            )
+
         # Build mock response matching non-streaming shape
         full_content = "".join(content_parts) or None
         mock_tool_calls = None

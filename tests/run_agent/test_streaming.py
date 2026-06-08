@@ -270,6 +270,35 @@ class TestStreamingAccumulator:
         assert len(response.choices[0].message.tool_calls) == 1
 
 
+    @patch("run_agent.AIAgent._create_request_openai_client")
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_empty_stream_raises_runtime_error(self, mock_close, mock_create):
+        """Empty stream (zero chunks, no finish_reason) raises RuntimeError."""
+        from run_agent import AIAgent
+
+        # Stream that yields zero usable chunks — simulates HTTP 200 with
+        # empty SSE body or a non-standard error frame the SDK drops.
+        chunks = []
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_create.return_value = mock_client
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        with pytest.raises(RuntimeError, match="empty stream"):
+            agent._interruptible_streaming_api_call({})
+
+
 # ── Test: Streaming Callbacks ────────────────────────────────────────────
 
 
