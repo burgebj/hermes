@@ -2,8 +2,8 @@ import type { AppendMessage, ThreadMessage } from '@assistant-ui/react'
 import { type MutableRefObject, useCallback } from 'react'
 
 import { getProfiles, transcribeAudio } from '@/hermes'
-import { type Translations, translateNow, useI18n } from '@/i18n'
-import { appendTextPart, branchGroupForUser, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
+import { translateNow, type Translations, useI18n } from '@/i18n'
+import { branchGroupForUser, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
 import {
   attachmentDisplayText,
   parseCommandDispatch,
@@ -15,7 +15,8 @@ import {
   type CommandsCatalogLike,
   desktopSlashUnavailableMessage,
   filterDesktopCommandsCatalog,
-  isDesktopSlashCommand
+  isDesktopSlashCommand,
+  isModelPickerCommand
 } from '@/lib/desktop-slash-commands'
 import { triggerHaptic } from '@/lib/haptics'
 import { setMutableRef } from '@/lib/mutable-ref'
@@ -33,11 +34,13 @@ import { requestDesktopOnboarding } from '@/store/onboarding'
 import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import {
   $busy,
+  $connection,
   $messages,
   $yoloActive,
   setAwaitingResponse,
   setBusy,
   setMessages,
+  setModelPickerOpen,
   setSessions,
   setYoloActive
 } from '@/store/session'
@@ -76,6 +79,28 @@ function inlineErrorMessage(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : typeof error === 'string' ? error : fallback
 
   return (raw.match(/Error invoking remote method '[^']+': Error: (.+)$/)?.[1] ?? raw).replace(/^Error:\s*/, '').trim()
+}
+
+function base64FromDataUrl(dataUrl: string): string {
+  const comma = dataUrl.indexOf(',')
+
+  return comma >= 0 ? dataUrl.slice(comma + 1) : ''
+}
+
+function imageFilenameFromPath(filePath: string): string {
+  return filePath.split(/[\\/]/).filter(Boolean).pop() || 'image.png'
+}
+
+// Remote gateway: the local composer-image file lives on THIS machine's disk,
+// not the gateway's, so read the bytes here and upload them via
+// image.attach_bytes. Returns null when the file can't be read.
+async function readImageForRemoteAttach(
+  filePath: string
+): Promise<{ contentBase64: string; filename: string } | null> {
+  const dataUrl = await window.hermesDesktop?.readFileDataUrl(filePath)
+  const contentBase64 = dataUrl ? base64FromDataUrl(dataUrl) : ''
+
+  return contentBase64 ? { contentBase64, filename: imageFilenameFromPath(filePath) } : null
 }
 
 interface PromptActionsOptions {
@@ -159,6 +184,7 @@ export function usePromptActions({
 }: PromptActionsOptions) {
   const { t } = useI18n()
   const copy = t.desktop
+
   const appendSessionTextMessage = useCallback(
     (sessionId: string, role: ChatMessage['role'], text: string) => {
       const body = text.trim()
@@ -194,16 +220,36 @@ export function usePromptActions({
     ) => {
       const updateComposerAttachments = options.updateComposerAttachments ?? true
       const images = attachments.filter(attachment => attachment.kind === 'image' && attachment.path)
+      const remote = $connection.get()?.mode === 'remote'
 
       for (const attachment of images) {
         if (attachment.attachedSessionId === sessionId) {
           continue
         }
 
-        const result = await requestGateway<ImageAttachResponse>('image.attach', {
-          session_id: sessionId,
-          path: attachment.path
-        })
+        let result: ImageAttachResponse
+
+        if (remote) {
+          // The gateway is on another machine — it can't read attachment.path
+          // (a path on THIS disk). Upload the bytes via image.attach_bytes.
+          const payload = attachment.path ? await readImageForRemoteAttach(attachment.path) : null
+
+          if (!payload) {
+            const label = attachment.label || (attachment.path ? pathLabel(attachment.path) : 'image')
+            throw new Error(`Could not read ${label}`)
+          }
+
+          result = await requestGateway<ImageAttachResponse>('image.attach_bytes', {
+            session_id: sessionId,
+            content_base64: payload.contentBase64,
+            filename: payload.filename
+          })
+        } else {
+          result = await requestGateway<ImageAttachResponse>('image.attach', {
+            session_id: sessionId,
+            path: attachment.path
+          })
+        }
 
         if (!result.attached) {
           const label = attachment.label || (attachment.path ? pathLabel(attachment.path) : 'image')
@@ -454,6 +500,49 @@ export function usePromptActions({
           return
         }
 
+        // /model opens the desktop model picker overlay — the same full
+        // provider+model picker reachable from the status-bar model button —
+        // instead of the headless prompt_toolkit modal the slash worker can't
+        // render. With explicit args (`/model <name> [--provider ...]`) run the
+        // switch directly through slash.exec so power users can still type it.
+        if (isModelPickerCommand(`/${normalizedName}`)) {
+          if (!arg.trim()) {
+            setModelPickerOpen(true)
+
+            return
+          }
+
+          const sid = sessionHint || activeSessionIdRef.current || (await createBackendSessionForSend())
+
+          if (!sid) {
+            notify({ kind: 'error', title: 'Session unavailable', message: 'Could not create a new session' })
+
+            return
+          }
+
+          try {
+            const result = await requestGateway<SlashExecResponse>('slash.exec', {
+              session_id: sid,
+              command: command.replace(/^\/+/, '')
+            })
+
+            const body = result?.output || `/${name}: model switched`
+            appendSessionTextMessage(
+              sid,
+              'system',
+              recordInput ? slashStatusText(command, body) : body
+            )
+          } catch (err) {
+            appendSessionTextMessage(
+              sid,
+              'system',
+              `error: ${err instanceof Error ? err.message : String(err)}`
+            )
+          }
+
+          return
+        }
+
         if (normalizedName === 'skin' && !sessionHint && !activeSessionIdRef.current) {
           notify({ kind: 'success', message: handleSkinCommand(arg) })
 
@@ -547,6 +636,7 @@ export function usePromptActions({
               session_id: sessionId,
               title: arg
             })
+
             const finalTitle = (result?.title || arg).trim()
             const queued = result?.pending === true
 

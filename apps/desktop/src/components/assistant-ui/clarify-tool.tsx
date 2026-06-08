@@ -163,14 +163,14 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
 
   return (
     <div
-      className="relative mb-3 mt-2 grid gap-2 rounded-[0.5rem] border border-border/70 bg-card/40 px-3 py-2.5 text-sm shadow-[inset_0_1px_0_color-mix(in_srgb,var(--foreground)_3%,transparent)]"
+      className="relative mb-3 mt-2 grid gap-6 rounded-[0.5rem] border border-border/70 bg-card/40 px-3 py-2.5 text-sm shadow-[inset_0_1px_0_color-mix(in_srgb,var(--foreground)_3%,transparent)]"
       data-slot="clarify-inline"
     >
       <span aria-hidden className="arc-border" />
-      <div className="flex items-center gap-2.5">
+      <div className="flex items-start gap-2.5">
         <span
           aria-hidden
-          className="grid size-6 shrink-0 place-items-center rounded-md bg-[color-mix(in_srgb,var(--dt-primary)_14%,transparent)] text-primary ring-1 ring-inset ring-primary/15"
+          className="mt-px grid size-6 shrink-0 place-items-center rounded-md bg-[color-mix(in_srgb,var(--dt-primary)_14%,transparent)] text-primary ring-1 ring-inset ring-primary/15"
         >
           <HelpCircle className="size-3.5" />
         </span>
@@ -264,14 +264,16 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
 
       {!typing && hasChoices && (
         <div className="flex justify-end">
-          <button
-            className="bg-transparent text-[0.6875rem] text-muted-foreground/70 underline-offset-4 hover:text-foreground hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+          <Button
+            className="-mr-2"
             disabled={!ready || submitting}
             onClick={() => void respond('')}
+            size="xs"
             type="button"
+            variant="text"
           >
-            Skip
-          </button>
+            {copy.skip}
+          </Button>
         </div>
       )}
     </div>
