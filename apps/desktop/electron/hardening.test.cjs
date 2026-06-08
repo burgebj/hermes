@@ -8,6 +8,7 @@ const { pathToFileURL } = require('node:url')
 const {
   DEFAULT_FETCH_TIMEOUT_MS,
   encryptDesktopSecret,
+  readBrowserWindowTitle,
   resolveReadableFileForIpc,
   resolveTimeoutMs,
   sensitiveFileBlockReason
@@ -18,6 +19,70 @@ test('resolveTimeoutMs falls back to defaults and accepts overrides', () => {
   assert.equal(resolveTimeoutMs(0), DEFAULT_FETCH_TIMEOUT_MS)
   assert.equal(resolveTimeoutMs(-25), DEFAULT_FETCH_TIMEOUT_MS)
   assert.equal(resolveTimeoutMs('2750'), 2750)
+})
+
+test('readBrowserWindowTitle returns a live window title', () => {
+  assert.equal(
+    readBrowserWindowTitle({
+      isDestroyed: () => false,
+      webContents: {
+        isDestroyed: () => false,
+        getTitle: () => 'Hermes Agent'
+      }
+    }),
+    'Hermes Agent'
+  )
+})
+
+test('readBrowserWindowTitle tolerates destroyed Electron objects', () => {
+  let titleReads = 0
+  assert.equal(
+    readBrowserWindowTitle({
+      isDestroyed: () => true,
+      webContents: {
+        getTitle: () => {
+          titleReads += 1
+          return 'stale'
+        }
+      }
+    }),
+    ''
+  )
+  assert.equal(titleReads, 0)
+
+  const destroyedWindow = {
+    isDestroyed: () => false,
+    get webContents() {
+      throw new TypeError('Object has been destroyed')
+    }
+  }
+  assert.equal(readBrowserWindowTitle(destroyedWindow), '')
+
+  assert.equal(
+    readBrowserWindowTitle({
+      isDestroyed: () => false,
+      webContents: {
+        isDestroyed: () => true,
+        getTitle: () => {
+          throw new TypeError('Object has been destroyed')
+        }
+      }
+    }),
+    ''
+  )
+
+  assert.equal(
+    readBrowserWindowTitle({
+      isDestroyed: () => false,
+      webContents: {
+        isDestroyed: () => false,
+        getTitle: () => {
+          throw new TypeError('Object has been destroyed')
+        }
+      }
+    }),
+    ''
+  )
 })
 
 test('encryptDesktopSecret requires available secure storage', () => {

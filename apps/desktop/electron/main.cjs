@@ -57,6 +57,7 @@ const {
   DEFAULT_FETCH_TIMEOUT_MS,
   TEXT_PREVIEW_SOURCE_MAX_BYTES,
   encryptDesktopSecret: encryptDesktopSecretStrict,
+  readBrowserWindowTitle,
   resolveReadableFileForIpc,
   resolveTimeoutMs
 } = require('./hardening.cjs')
@@ -2673,7 +2674,7 @@ function runRenderTitleJob(rawUrl) {
       return finish('')
     }
 
-    const readTitle = () => window?.webContents?.getTitle?.() || ''
+    const readTitle = () => readBrowserWindowTitle(window)
     const scheduleGrace = () => {
       if (graceTimer) clearTimeout(graceTimer)
       graceTimer = setTimeout(() => finish(readTitle()), RENDER_TITLE_GRACE_MS)
@@ -2681,6 +2682,7 @@ function runRenderTitleJob(rawUrl) {
 
     hardTimer = setTimeout(() => finish(readTitle()), RENDER_TITLE_TIMEOUT_MS)
 
+    window.once('closed', () => finish(''))
     window.webContents.setUserAgent(TITLE_USER_AGENT)
     window.webContents.on('page-title-updated', scheduleGrace)
     window.webContents.on('did-finish-load', scheduleGrace)

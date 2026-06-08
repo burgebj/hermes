@@ -21,6 +21,25 @@ function resolveTimeoutMs(timeoutMs, fallbackMs = DEFAULT_FETCH_TIMEOUT_MS) {
   return fallback
 }
 
+function readBrowserWindowTitle(window) {
+  try {
+    if (!window || window.isDestroyed?.()) {
+      return ''
+    }
+
+    const webContents = window.webContents
+    if (!webContents || webContents.isDestroyed?.()) {
+      return ''
+    }
+
+    return String(webContents.getTitle?.() || '')
+  } catch {
+    // Electron throws "Object has been destroyed" when teardown races a
+    // delayed title read. Treat the title as unavailable instead of crashing.
+    return ''
+  }
+}
+
 function encryptDesktopSecret(value, safeStorageApi) {
   const raw = String(value || '')
 
@@ -178,6 +197,7 @@ module.exports = {
   DEFAULT_FETCH_TIMEOUT_MS,
   TEXT_PREVIEW_SOURCE_MAX_BYTES,
   encryptDesktopSecret,
+  readBrowserWindowTitle,
   resolveReadableFileForIpc,
   resolveTimeoutMs,
   sensitiveFileBlockReason
