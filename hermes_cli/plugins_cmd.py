@@ -335,6 +335,72 @@ def _display_after_install(plugin_dir: Path, identifier: str) -> None:
         console.print()
 
 
+def _format_onboarding_command(command: str, plugin_dir: Path) -> str:
+    """Expand safe convenience placeholders in plugin onboarding commands."""
+    return (
+        command.replace("{plugin_dir}", str(plugin_dir))
+        .replace("{plugin_name}", plugin_dir.name)
+    )
+
+
+def _display_onboarding(manifest: dict, plugin_dir: Path, console) -> None:
+    """Print manifest-declared onboarding steps after plugin install.
+
+    The installer deliberately only displays commands. It does not execute
+    plugin-provided setup commands implicitly; install-time arbitrary command
+    execution is a nasty footgun, even for plugins the user chose to clone.
+    """
+    onboarding = manifest.get("onboarding") or {}
+    if not isinstance(onboarding, dict):
+        return
+
+    setup_command = onboarding.get("setup_command")
+    status_command = onboarding.get("status_command")
+    recommended_env = onboarding.get("recommended_env") or []
+    note = onboarding.get("note")
+
+    if not any([setup_command, status_command, recommended_env, note]):
+        return
+
+    from rich.panel import Panel
+
+    lines: list[str] = []
+    if note:
+        lines.append(str(note))
+        lines.append("")
+    if setup_command:
+        lines.append("Next setup command:")
+        lines.append(f"  {_format_onboarding_command(str(setup_command), plugin_dir)}")
+    if status_command:
+        if lines:
+            lines.append("")
+        lines.append("Check setup status:")
+        lines.append(f"  {_format_onboarding_command(str(status_command), plugin_dir)}")
+    if recommended_env:
+        if lines:
+            lines.append("")
+        lines.append("Recommended environment variables:")
+        for item in recommended_env:
+            if isinstance(item, str):
+                lines.append(f"  - {item}")
+                continue
+            if not isinstance(item, dict) or not item.get("name"):
+                continue
+            desc = f" — {item['description']}" if item.get("description") else ""
+            url = f" ({item['url']})" if item.get("url") else ""
+            lines.append(f"  - {item['name']}{desc}{url}")
+
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title="Plugin onboarding",
+            border_style="cyan",
+            expand=False,
+        )
+    )
+    console.print()
+
+
 def _display_removed(name: str, plugins_dir: Path) -> None:
     """Show confirmation after removing a plugin."""
     from rich.console import Console
@@ -504,6 +570,7 @@ def cmd_install(
     _prompt_plugin_env_vars(installed_manifest, console)
 
     _display_after_install(target, identifier)
+    _display_onboarding(installed_manifest, target, console)
 
     should_enable = enable
     if should_enable is None:

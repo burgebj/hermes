@@ -12,6 +12,8 @@ import yaml
 from hermes_cli.plugins_cmd import (
     PluginOperationError,
     _copy_example_files,
+    _display_onboarding,
+    _format_onboarding_command,
     _read_manifest,
     _repo_name_from_url,
     _resolve_git_executable,
@@ -246,6 +248,58 @@ class TestReadManifest:
         (tmp_path / "plugin.yaml").write_text("")
         result = _read_manifest(tmp_path)
         assert result == {}
+
+
+# ── cmd_install tests ─────────────────────────────────────────────────────────
+
+
+class TestPluginOnboarding:
+    def test_format_onboarding_command_expands_placeholders(self, tmp_path):
+        plugin_dir = tmp_path / "my-plugin"
+        assert _format_onboarding_command(
+            "python {plugin_dir}/setup.py setup --name {plugin_name}",
+            plugin_dir,
+        ) == f"python {plugin_dir}/setup.py setup --name my-plugin"
+
+    def test_display_onboarding_prints_setup_status_and_env(self, tmp_path):
+        from rich.console import Console
+
+        plugin_dir = tmp_path / "web-search-plus"
+        manifest = {
+            "name": "web-search-plus",
+            "onboarding": {
+                "setup_command": "python {plugin_dir}/setup.py setup",
+                "status_command": "python {plugin_dir}/setup.py status",
+                "note": "At least one provider key is required.",
+                "recommended_env": [
+                    {
+                        "name": "TAVILY_API_KEY",
+                        "description": "Tavily search",
+                        "url": "https://tavily.com",
+                    },
+                    "BRAVE_API_KEY",
+                ],
+            },
+        }
+        console = Console(record=True, force_terminal=False, width=120)
+
+        _display_onboarding(manifest, plugin_dir, console)
+
+        out = console.export_text()
+        assert "Plugin onboarding" in out
+        assert f"python {plugin_dir}/setup.py setup" in out
+        assert f"python {plugin_dir}/setup.py status" in out
+        assert "TAVILY_API_KEY" in out
+        assert "BRAVE_API_KEY" in out
+
+    def test_display_onboarding_ignores_missing_or_malformed_metadata(self, tmp_path):
+        from rich.console import Console
+
+        console = Console(record=True, force_terminal=False)
+        _display_onboarding({}, tmp_path / "plugin", console)
+        _display_onboarding({"onboarding": "not-a-dict"}, tmp_path / "plugin", console)
+
+        assert console.export_text() == ""
 
 
 # ── cmd_install tests ─────────────────────────────────────────────────────────
