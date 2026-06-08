@@ -1621,6 +1621,34 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     return ""
 
 
+def _resolve_gateway_max_iterations(config: dict | None = None) -> int:
+    """Resolve the agent loop limit for gateway-created agents.
+
+    ``config.yaml`` is the documented source of truth for ``agent.max_turns``.
+    ``HERMES_MAX_ITERATIONS`` remains supported for legacy setups, but a stale
+    ``~/.hermes/.env`` value must not override the config value after the
+    long-lived gateway reloads dotenv between turns.
+    """
+    cfg = config if config is not None else _load_gateway_config()
+    candidates: list[Any] = [
+        cfg_get(cfg, "agent", "max_turns"),
+        cfg_get(cfg, "max_turns"),
+        os.getenv("HERMES_MAX_ITERATIONS"),
+    ]
+
+    for raw in candidates:
+        if raw in (None, ""):
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            logger.debug("Ignoring invalid max iterations value: %r", raw)
+            continue
+        if value > 0:
+            return value
+    return 90
+
+
 def _resolve_hermes_bin() -> Optional[list[str]]:
     """Resolve the Hermes update command as argv parts.
 
@@ -12784,7 +12812,7 @@ class GatewayRunner:
             disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
 
             pr = self._provider_routing
-            max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
+            max_iterations = _resolve_gateway_max_iterations(user_config)
             reasoning_config = self._resolve_session_reasoning_config(source=source)
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
@@ -17905,8 +17933,8 @@ class GatewayRunner:
             # (concurrency-safe). Keep os.environ as fallback for CLI/cron.
             os.environ["HERMES_SESSION_KEY"] = session_key or ""
 
-            # Read from env var or use default (same as CLI)
-            max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
+            # Resolve agent loop limit from config first, env fallback for legacy setups.
+            max_iterations = _resolve_gateway_max_iterations(user_config)
             
             # Map platform enum to the platform hint key the agent understands.
             # Platform.LOCAL ("local") maps to "cli"; others pass through as-is.
