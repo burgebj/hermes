@@ -18680,7 +18680,20 @@ class GatewayRunner:
             _effective_history_offset = 0 if _session_was_split else len(agent_history)
 
             # Auto-generate session title after first exchange (non-blocking)
-            if final_response and self._session_db:
+            # Respect auxiliary.title_generation.enabled config (#41744)
+            _title_gen_enabled = True
+            try:
+                from hermes_cli.config import load_config as _load_full_cfg
+                _aux = _load_full_cfg().get("auxiliary", {})
+                if isinstance(_aux, dict):
+                    for _key in ("title", "title_generation"):
+                        _sub = _aux.get(_key, {})
+                        if isinstance(_sub, dict) and "enabled" in _sub:
+                            _title_gen_enabled = bool(_sub["enabled"])
+                            break
+            except Exception:
+                pass
+            if _title_gen_enabled and final_response and self._session_db:
                 try:
                     from agent.title_generator import maybe_auto_title
                     all_msgs = result_holder[0].get("messages", []) if result_holder[0] else []

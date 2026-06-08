@@ -4882,8 +4882,22 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                         # Transient DB failure — keep pending_title for retry.
                         pass
 
+            # Respect auxiliary.title_generation.enabled config (#41744)
+            _title_gen_enabled = True
+            try:
+                from hermes_cli.config import load_config as _load_full_cfg
+                _aux = _load_full_cfg().get("auxiliary", {})
+                if isinstance(_aux, dict):
+                    for _key in ("title", "title_generation"):
+                        _sub = _aux.get(_key, {})
+                        if isinstance(_sub, dict) and "enabled" in _sub:
+                            _title_gen_enabled = bool(_sub["enabled"])
+                            break
+            except Exception:
+                pass
             if (
-                status == "complete"
+                _title_gen_enabled
+                and status == "complete"
                 and isinstance(raw, str)
                 and raw.strip()
                 and isinstance(text, str)
