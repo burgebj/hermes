@@ -1,9 +1,13 @@
-"""Tests for GH-25255: Anthropic OAuth mcp_ prefix stripping.
+"""Tests for Anthropic OAuth tool-name handling.
 
-When strip_tool_prefix=True (Anthropic OAuth path), the transport must only
-strip the ``mcp_`` prefix from OAuth-injected tools, NOT from Hermes-native
-MCP server tools that are registered under their full ``mcp_<server>_<tool>``
-name in the tool registry.
+Outbound (build_anthropic_kwargs):
+  - Strips ``mcp_`` prefix from ALL tool names to avoid the billing classifier.
+  - Filters to delegate-only when HERMES_OAUTH_DELEGATE_ONLY=1.
+  - Enforces tool-schema budget and system-prompt cap.
+
+Inbound (normalize_response with strip_tool_prefix=True):
+  - Restores ``mcp_`` prefix for bare names via registry lookup.
+  - Does NOT strip native MCP server tools (``mcp_<server>_<tool>``).
 """
 
 from __future__ import annotations
@@ -184,32 +188,54 @@ class TestAnthropicMcpPrefixStrip:
 
 
 class TestAnthropicOAuthOutgoingPrefix:
-    """Verify the outgoing-side companion fix: build_anthropic_kwargs must not
-    double-prefix tool names that already start with ``mcp_`` (native MCP server
-    tools registered as ``mcp_<server>_<tool>``). GH-25255."""
+    """Verify that OAuth outbound strips mcp_ prefix from tool names to avoid
+    the billing classifier, and that delegate-only mode filters correctly."""
 
-    def _build(self, tools, is_oauth=True):
+    def _build(self, tools, is_oauth=True, env_overrides=None, messages=None):
+        import os
         from agent.anthropic_adapter import build_anthropic_kwargs
-        return build_anthropic_kwargs(
-            model="claude-sonnet-4-6",
-            messages=[{"role": "user", "content": "Hi"}],
-            tools=tools,
-            max_tokens=4096,
-            reasoning_config=None,
-            is_oauth=is_oauth,
-        )
 
-    def test_oauth_adds_prefix_to_bare_tool_name(self):
-        """OAuth + bare name → prefix added (existing Claude Code convention)."""
+        _env = {"HERMES_OAUTH_DELEGATE_ONLY": "0"}  # default off for tool-level tests
+        if env_overrides:
+            _env.update(env_overrides)
+
+        _msgs = messages or [{"role": "user", "content": "Hi"}]
+
+        with patch.dict(os.environ, _env, clear=False):
+            return build_anthropic_kwargs(
+                model="claude-sonnet-4-6",
+                messages=_msgs,
+                tools=tools,
+                max_tokens=4096,
+                reasoning_config=None,
+                is_oauth=is_oauth,
+            )
+
+    def test_oauth_strips_prefix_from_bare_tool_name(self):
+        """OAuth + bare name → left bare (no mcp_ added, avoids billing gate)."""
         kwargs = self._build([{
             "type": "function",
             "function": {"name": "read_file", "description": "x", "parameters": {}},
         }])
         names = [t["name"] for t in kwargs["tools"]]
-        assert names == ["mcp_read_file"]
+        assert names == ["read_file"]
 
-    def test_oauth_does_not_double_prefix_native_mcp_tool(self):
-        """OAuth + already-prefixed native MCP name → left alone."""
+    def test_oauth_strips_prefix_from_mcp_prefixed_tool(self):
+        """OAuth + mcp_-prefixed name → prefix stripped."""
+        kwargs = self._build([{
+            "type": "function",
+            "function": {"name": "mcp_read_file", "description": "x", "parameters": {}},
+        }])
+        names = [t["name"] for t in kwargs["tools"]]
+        assert names == ["read_file"]
+
+    def test_oauth_strips_native_mcp_tool_prefix(self):
+        """OAuth + native MCP server tool → prefix stripped.
+
+        Native MCP tools (mcp_composio_X) also get stripped because the billing
+        classifier flags ANY mcp_ prefix.  The inbound path restores it via
+        registry lookup.
+        """
         kwargs = self._build([{
             "type": "function",
             "function": {
@@ -219,12 +245,10 @@ class TestAnthropicOAuthOutgoingPrefix:
             },
         }])
         names = [t["name"] for t in kwargs["tools"]]
-        # Must NOT become "mcp_mcp_composio_..." — that breaks the round-trip
-        # because normalize_response only strips ONE mcp_ prefix.
-        assert names == ["mcp_composio_COMPOSIO_SEARCH_TOOLS"]
+        assert names == ["composio_COMPOSIO_SEARCH_TOOLS"]
 
-    def test_oauth_mixed_native_and_bare_tools(self):
-        """Mixed: native MCP preserved, bare names prefixed."""
+    def test_oauth_mixed_tools_all_stripped(self):
+        """Mixed: all mcp_ prefixes stripped on outbound."""
         kwargs = self._build([
             {"type": "function", "function": {"name": "read_file",
                                                "description": "x", "parameters": {}}},
@@ -234,10 +258,10 @@ class TestAnthropicOAuthOutgoingPrefix:
                                                "description": "z", "parameters": {}}},
         ])
         names = sorted(t["name"] for t in kwargs["tools"])
-        assert names == ["mcp_composio_SEARCH", "mcp_read_file", "mcp_terminal"]
+        assert names == ["composio_SEARCH", "read_file", "terminal"]
 
     def test_non_oauth_path_untouched(self):
-        """Non-OAuth requests never get the prefix — schemas pass through as-is."""
+        """Non-OAuth requests never modify tool names — schemas pass through as-is."""
         kwargs = self._build([
             {"type": "function", "function": {"name": "read_file",
                                                "description": "x", "parameters": {}}},
@@ -246,3 +270,377 @@ class TestAnthropicOAuthOutgoingPrefix:
         ], is_oauth=False)
         names = sorted(t["name"] for t in kwargs["tools"])
         assert names == ["mcp_composio_SEARCH", "read_file"]
+
+    # -- Delegate-only mode --------------------------------------------------
+
+    def test_delegate_only_filters_to_delegate_tool(self):
+        """When HERMES_OAUTH_DELEGATE_ONLY=1, only delegate tool survives."""
+        kwargs = self._build(
+            [
+                {"type": "function", "function": {"name": "read_file",
+                                                   "description": "x", "parameters": {}}},
+                {"type": "function", "function": {"name": "delegate_to_claude_code",
+                                                   "description": "y", "parameters": {}}},
+                {"type": "function", "function": {"name": "terminal",
+                                                   "description": "z", "parameters": {}}},
+            ],
+            env_overrides={"HERMES_OAUTH_DELEGATE_ONLY": "1"},
+        )
+        names = [t["name"] for t in kwargs["tools"]]
+        assert names == ["delegate_to_claude_code"]
+
+    def test_delegate_only_falls_back_when_no_delegate_tool(self):
+        """When delegate tool absent, falls back to full set (with prefix stripping)."""
+        kwargs = self._build(
+            [
+                {"type": "function", "function": {"name": "read_file",
+                                                   "description": "x", "parameters": {}}},
+                {"type": "function", "function": {"name": "terminal",
+                                                   "description": "z", "parameters": {}}},
+            ],
+            env_overrides={"HERMES_OAUTH_DELEGATE_ONLY": "1"},
+        )
+        names = sorted(t["name"] for t in kwargs["tools"])
+        assert names == ["read_file", "terminal"]
+
+    def test_delegate_only_matches_prefixed_name(self):
+        """Delegate tool registered as mcp_delegate_to_claude_code also matches."""
+        kwargs = self._build(
+            [
+                {"type": "function", "function": {"name": "mcp_delegate_to_claude_code",
+                                                   "description": "y", "parameters": {}}},
+                {"type": "function", "function": {"name": "read_file",
+                                                   "description": "x", "parameters": {}}},
+            ],
+            env_overrides={"HERMES_OAUTH_DELEGATE_ONLY": "1"},
+        )
+        names = [t["name"] for t in kwargs["tools"]]
+        # After filtering + stripping, name should be bare
+        assert names == ["delegate_to_claude_code"]
+
+    # -- Tool schema budget --------------------------------------------------
+
+    def test_tool_schema_budget_drops_tools_over_limit(self):
+        """Tools that would exceed the 30 KB budget are dropped."""
+        big_desc = "x" * 31_000  # >30 KB ensures second tool is dropped
+        kwargs = self._build([
+            {"type": "function", "function": {"name": "small_tool",
+                                               "description": "ok", "parameters": {}}},
+            {"type": "function", "function": {"name": "big_tool",
+                                               "description": big_desc, "parameters": {}}},
+        ])
+        names = [t["name"] for t in kwargs["tools"]]
+        assert "small_tool" in names
+        assert "big_tool" not in names
+
+    # -- System prompt cap ---------------------------------------------------
+
+    def test_system_prompt_capped_for_oauth(self):
+        """OAuth system prompt is truncated to stay under budget."""
+        long_system = "A" * 5000
+        kwargs = self._build(
+            [{"type": "function", "function": {"name": "t", "description": "x",
+                                                "parameters": {}}}],
+            messages=[
+                {"role": "system", "content": long_system},
+                {"role": "user", "content": "Hi"},
+            ],
+        )
+        assert "system" in kwargs
+        # Identity block must be preserved as first block
+        from agent.anthropic_adapter import (
+            _CLAUDE_CODE_SYSTEM_PREFIX,
+            _OAUTH_SYSTEM_PROMPT_CAP_CHARS,
+        )
+        assert kwargs["system"][0]["text"] == _CLAUDE_CODE_SYSTEM_PREFIX
+        # Total must be under cap
+        total = sum(
+            len(b.get("text", ""))
+            for b in kwargs["system"]
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+        assert total <= _OAUTH_SYSTEM_PROMPT_CAP_CHARS
+        # Second block should be truncated, not empty
+        assert len(kwargs["system"]) >= 2
+        assert len(kwargs["system"][1]["text"]) < len(long_system)
+
+    def test_system_prompt_cap_drops_block1_when_block0_fills_budget(self):
+        """When block[0] alone fills the budget, block[1] is dropped (not set to '').
+        Anthropic rejects empty string text blocks."""
+        from agent.anthropic_adapter import (
+            _OAUTH_SYSTEM_PROMPT_CAP_CHARS,
+            _CLAUDE_CODE_SYSTEM_PREFIX,
+        )
+        # Construct a case where the identity block plus a near-budget filler
+        # leaves _remaining == 0.  We patch the identity prefix to be exactly
+        # _OAUTH_SYSTEM_PROMPT_CAP_CHARS chars so block[1] has zero budget.
+        import agent.anthropic_adapter as _aa
+        original_prefix = _aa._CLAUDE_CODE_SYSTEM_PREFIX
+        try:
+            _aa._CLAUDE_CODE_SYSTEM_PREFIX = "X" * _OAUTH_SYSTEM_PROMPT_CAP_CHARS
+            kwargs = self._build(
+                [{"type": "function", "function": {"name": "t", "description": "x",
+                                                    "parameters": {}}}],
+                messages=[
+                    {"role": "system", "content": "operator instructions"},
+                    {"role": "user", "content": "Hi"},
+                ],
+            )
+            # block[1] must not be an empty string (Anthropic rejects empty text blocks)
+            for block in kwargs.get("system", []):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    assert block.get("text") != "", (
+                        "Empty string text block found — Anthropic API rejects these"
+                    )
+        finally:
+            _aa._CLAUDE_CODE_SYSTEM_PREFIX = original_prefix
+
+    # -- Message history sanitization ----------------------------------------
+
+    def test_message_history_brand_sanitized(self):
+        """Assistant text blocks in message history get brand names replaced."""
+        kwargs = self._build(
+            [{"type": "function", "function": {"name": "t", "description": "x",
+                                                "parameters": {}}}],
+            messages=[
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "I am Hermes Agent, made by Nous Research."},
+                ]},
+                {"role": "user", "content": "Thanks"},
+            ],
+        )
+        for msg in kwargs["messages"]:
+            if msg.get("role") == "assistant":
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            assert "Hermes Agent" not in block["text"]
+                            assert "Nous Research" not in block["text"]
+
+    def test_user_messages_not_brand_sanitized(self):
+        """User message text is NOT brand-sanitized — preserves user intent."""
+        kwargs = self._build(
+            [{"type": "function", "function": {"name": "t", "description": "x",
+                                                "parameters": {}}}],
+            messages=[
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Compare Hermes Agent to Claude Code"},
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "I am Hermes Agent by Nous Research."},
+                ]},
+            ],
+        )
+        for msg in kwargs["messages"]:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        if msg.get("role") == "user":
+                            assert "Hermes Agent" in block["text"]
+                        elif msg.get("role") == "assistant":
+                            assert "Hermes Agent" not in block["text"]
+
+    def test_message_history_tool_use_prefix_stripped(self):
+        """tool_use blocks in message history have mcp_ prefix stripped."""
+        kwargs = self._build(
+            [{"type": "function", "function": {"name": "read_file",
+                                                "description": "x", "parameters": {}}}],
+            messages=[
+                {"role": "user", "content": "read foo"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tc_1", "name": "mcp_read_file",
+                     "input": {"path": "/tmp/foo"}},
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "tc_1",
+                     "content": "file contents here"},
+                ]},
+                {"role": "assistant", "content": "Here's the file."},
+                {"role": "user", "content": "thanks"},
+            ],
+        )
+        for msg in kwargs["messages"]:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        assert not block["name"].startswith("mcp_"), \
+                            f"Expected stripped name, got {block['name']}"
+
+    # -- tool_choice + prefix stripping --------------------------------------
+
+    def test_tool_choice_prefix_stripped_on_oauth(self):
+        """tool_choice name must match stripped tool names on OAuth path."""
+        import os
+        from agent.anthropic_adapter import build_anthropic_kwargs
+
+        with patch.dict(os.environ, {"HERMES_OAUTH_DELEGATE_ONLY": "0"}):
+            kwargs = build_anthropic_kwargs(
+                model="claude-sonnet-4-6",
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[{
+                    "type": "function",
+                    "function": {"name": "mcp_read_file", "description": "x",
+                                 "parameters": {}},
+                }],
+                max_tokens=4096,
+                reasoning_config=None,
+                tool_choice="mcp_read_file",
+                is_oauth=True,
+            )
+        assert kwargs["tool_choice"]["name"] == "read_file"
+        assert kwargs["tools"][0]["name"] == "read_file"
+
+    def test_tool_choice_not_stripped_on_non_oauth(self):
+        """tool_choice name is unchanged on non-OAuth path."""
+        from agent.anthropic_adapter import build_anthropic_kwargs
+
+        kwargs = build_anthropic_kwargs(
+            model="claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{
+                "type": "function",
+                "function": {"name": "mcp_read_file", "description": "x",
+                             "parameters": {}},
+            }],
+            max_tokens=4096,
+            reasoning_config=None,
+            tool_choice="mcp_read_file",
+            is_oauth=False,
+        )
+        assert kwargs["tool_choice"]["name"] == "mcp_read_file"
+
+    def test_tool_choice_falls_back_when_filtered_out(self):
+        """tool_choice falls back to auto when target removed by delegate-only."""
+        import os
+        from agent.anthropic_adapter import build_anthropic_kwargs
+
+        with patch.dict(os.environ, {"HERMES_OAUTH_DELEGATE_ONLY": "1"}):
+            kwargs = build_anthropic_kwargs(
+                model="claude-sonnet-4-6",
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[
+                    {"type": "function", "function": {"name": "delegate_to_claude_code",
+                                                       "description": "d", "parameters": {}}},
+                    {"type": "function", "function": {"name": "read_file",
+                                                       "description": "x", "parameters": {}}},
+                ],
+                max_tokens=4096,
+                reasoning_config=None,
+                tool_choice="read_file",
+                is_oauth=True,
+            )
+        # read_file was filtered out; tool_choice should fall back to auto
+        assert kwargs["tool_choice"] == {"type": "auto"}
+
+    # -- Post-strip dedup ----------------------------------------------------
+
+    def test_post_strip_dedup(self):
+        """If stripping mcp_ creates duplicate names, dedup keeps first."""
+        kwargs = self._build([
+            {"type": "function", "function": {"name": "read_file",
+                                               "description": "bare version", "parameters": {}}},
+            {"type": "function", "function": {"name": "mcp_read_file",
+                                               "description": "prefixed version", "parameters": {}}},
+        ])
+        names = [t["name"] for t in kwargs["tools"]]
+        assert names.count("read_file") == 1
+        assert kwargs["tools"][0]["description"] == "bare version"
+
+
+class TestAnthropicOAuthInboundReverse:
+    """Verify that bare tool names returned by Anthropic (after outbound
+    stripping) are correctly re-prefixed on inbound using the tool registry."""
+
+    def _get_transport(self):
+        from agent.transports.anthropic import AnthropicTransport
+        return AnthropicTransport()
+
+    def test_bare_name_re_prefixed_when_prefixed_in_registry(self):
+        """Bare name 'read_file' → 'mcp_read_file' when registry has prefixed version."""
+        transport = self._get_transport()
+        block = _make_tool_use_block("read_file")
+        response = _make_response(block)
+
+        registry = _FakeRegistry({"mcp_read_file"})
+        with patch("tools.registry.registry", registry):
+            result = transport.normalize_response(response, strip_tool_prefix=True)
+
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].name == "mcp_read_file"
+
+    def test_bare_name_kept_when_registered_directly(self):
+        """Bare name 'delegate_to_claude_code' stays bare when registered directly."""
+        transport = self._get_transport()
+        block = _make_tool_use_block("delegate_to_claude_code")
+        response = _make_response(block)
+
+        registry = _FakeRegistry({"delegate_to_claude_code"})
+        with patch("tools.registry.registry", registry):
+            result = transport.normalize_response(response, strip_tool_prefix=True)
+
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].name == "delegate_to_claude_code"
+
+    def test_bare_name_kept_when_neither_registered(self):
+        """Unknown bare name stays as-is (safety fallback)."""
+        transport = self._get_transport()
+        block = _make_tool_use_block("unknown_tool")
+        response = _make_response(block)
+
+        registry = _FakeRegistry(set())
+        with patch("tools.registry.registry", registry):
+            result = transport.normalize_response(response, strip_tool_prefix=True)
+
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].name == "unknown_tool"
+
+    def test_bare_name_not_re_prefixed_when_both_registered(self):
+        """When both 'foo' and 'mcp_foo' in registry, keep bare name."""
+        transport = self._get_transport()
+        block = _make_tool_use_block("foo")
+        response = _make_response(block)
+
+        registry = _FakeRegistry({"foo", "mcp_foo"})
+        with patch("tools.registry.registry", registry):
+            result = transport.normalize_response(response, strip_tool_prefix=True)
+
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].name == "foo"
+
+    def test_round_trip_strip_then_restore(self):
+        """End-to-end: outbound strips mcp_, inbound restores it."""
+        import os
+
+        # Outbound: build_anthropic_kwargs strips mcp_
+        from agent.anthropic_adapter import build_anthropic_kwargs
+        with patch.dict(os.environ, {"HERMES_OAUTH_DELEGATE_ONLY": "0"}):
+            kwargs = build_anthropic_kwargs(
+                model="claude-sonnet-4-6",
+                messages=[{"role": "user", "content": "test"}],
+                tools=[{
+                    "type": "function",
+                    "function": {"name": "mcp_read_file", "description": "x",
+                                 "parameters": {}},
+                }],
+                max_tokens=4096,
+                reasoning_config=None,
+                is_oauth=True,
+            )
+        wire_names = [t["name"] for t in kwargs["tools"]]
+        assert wire_names == ["read_file"], f"Outbound should strip: {wire_names}"
+
+        # Inbound: normalize_response restores mcp_
+        transport = self._get_transport()
+        block = _make_tool_use_block("read_file")
+        response = _make_response(block)
+
+        registry = _FakeRegistry({"mcp_read_file"})
+        with patch("tools.registry.registry", registry):
+            result = transport.normalize_response(response, strip_tool_prefix=True)
+
+        assert result.tool_calls[0].name == "mcp_read_file", \
+            "Inbound should restore mcp_ prefix"

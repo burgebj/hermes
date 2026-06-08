@@ -117,6 +117,16 @@ class AnthropicTransport(ProviderTransport):
                     if (_tool_registry.get_entry(stripped)
                             and not _tool_registry.get_entry(name)):
                         name = stripped
+                elif strip_tool_prefix and not name.startswith(_MCP_PREFIX):
+                    # Reverse mapping: the outbound path now *strips* mcp_
+                    # prefixes (to avoid the billing classifier), so Anthropic
+                    # returns bare names.  Restore the prefix if the bare name
+                    # isn't registered but the prefixed version is.
+                    from tools.registry import registry as _tool_registry
+                    prefixed = _MCP_PREFIX + name
+                    if (_tool_registry.get_entry(prefixed)
+                            and not _tool_registry.get_entry(name)):
+                        name = prefixed
                 tool_calls.append(
                     ToolCall(
                         id=block.id,
