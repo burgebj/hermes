@@ -1232,6 +1232,72 @@ class TestEventBridgePollE2E:
         assert len(r2["events"]) == 1
         assert r2["events"][0]["content"] == "New reply!"
 
+    def test_poll_detects_new_session_when_only_sessions_json_changes(self, tmp_path, monkeypatch):
+        """A new session in sessions.json is picked up even when state.db mtime is unchanged.
+
+        Under SQLite WAL mode the main state.db file mtime frequently does not
+        advance on small message writes (the bytes land in the ``-wal`` sidecar),
+        so the sessions.json update is the only signal the bridge receives.
+        Regression for the dead mtime-guard clause that made a sessions.json
+        change a no-op whenever state.db looked unchanged.
+        """
+        import mcp_serve
+        sessions_dir = tmp_path / "sessions"
+        sessions_dir.mkdir()
+        monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: sessions_dir)
+
+        db_path = tmp_path / "state.db"
+        session_id = "20260329_150000_wal_session"
+        _create_test_db(db_path, session_id, [
+            {"role": "user", "content": "Hello from a fresh session",
+             "timestamp": "2026-03-29T15:00:01"},
+        ])
+
+        # Pin both file mtimes to known values so the test is deterministic and
+        # independent of filesystem timestamp granularity.
+        base_mtime = 1_000_000.0
+        os.utime(db_path, (base_mtime, base_mtime))
+        sessions_file = sessions_dir / "sessions.json"
+        sessions_file.write_text(json.dumps({}))  # no sessions yet
+        os.utime(sessions_file, (base_mtime, base_mtime))
+
+        class TestDB:
+            def get_messages(self, sid):
+                conn = sqlite3.connect(str(db_path))
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
+                    (sid,),
+                ).fetchall()
+                conn.close()
+                return [dict(r) for r in rows]
+
+        monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: TestDB())
+
+        bridge = mcp_serve.EventBridge()
+
+        # First poll: empty index, nothing to emit. Records both mtimes.
+        bridge._poll_once(TestDB())
+        assert bridge.poll_events(after_cursor=0)["events"] == []
+
+        # The session now appears in sessions.json. Bump ONLY the sessions.json
+        # mtime; leave state.db untouched (a WAL write that did not move the
+        # main-file mtime).
+        sessions_file.write_text(json.dumps({
+            "agent:main:telegram:dm:wal": {
+                "session_key": "agent:main:telegram:dm:wal",
+                "session_id": session_id,
+                "platform": "telegram",
+                "origin": {"platform": "telegram", "chat_id": "wal"},
+            }
+        }))
+        os.utime(sessions_file, (base_mtime + 10, base_mtime + 10))
+        os.utime(db_path, (base_mtime, base_mtime))  # state.db mtime stays constant
+
+        bridge._poll_once(TestDB())
+        events = bridge.poll_events(after_cursor=0)["events"]
+        assert [e["content"] for e in events] == ["Hello from a fresh session"]
+
     def test_poll_interval_is_200ms(self):
         """Verify the poll interval constant."""
         from mcp_serve import POLL_INTERVAL

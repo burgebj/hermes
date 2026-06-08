@@ -356,7 +356,8 @@ class EventBridge:
         except OSError:
             sj_mtime = 0.0
 
-        if sj_mtime != self._sessions_json_mtime:
+        sessions_changed = sj_mtime != self._sessions_json_mtime
+        if sessions_changed:
             self._sessions_json_mtime = sj_mtime
             self._cached_sessions_index = _load_sessions_index()
 
@@ -372,7 +373,17 @@ class EventBridge:
         except OSError:
             db_mtime = 0.0
 
-        if db_mtime == self._state_db_mtime and sj_mtime == self._sessions_json_mtime:
+        db_changed = db_mtime != self._state_db_mtime
+
+        # Skip only when NEITHER input changed. Use the pre-update
+        # `sessions_changed` snapshot: comparing sj_mtime against
+        # self._sessions_json_mtime here is always True (it was just stored
+        # above), which would silently disable the sessions.json signal. Under
+        # SQLite WAL mode the main state.db mtime often does not advance on small
+        # message writes (the bytes land in the -wal sidecar), so the
+        # sessions.json bump is the only signal new messages arrived — dropping
+        # it stalls event delivery until an unrelated state.db write happens.
+        if not db_changed and not sessions_changed:
             return  # Nothing changed since last poll — skip entirely
 
         self._state_db_mtime = db_mtime
