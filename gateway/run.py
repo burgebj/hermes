@@ -1157,6 +1157,7 @@ from gateway.session import (
     build_session_context,
     build_session_context_prompt,
     build_session_key,
+    effective_session_policy,
     is_shared_multi_user_session,
 )
 from gateway.delivery import DeliveryRouter
@@ -2423,10 +2424,14 @@ class GatewayRunner(GatewayKanbanWatchersMixin):
             except Exception:
                 pass
         config = getattr(self, "config", None)
+        group_sessions_per_user, thread_sessions_per_user = effective_session_policy(
+            config,
+            source,
+        )
         return build_session_key(
             source,
-            group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
+            group_sessions_per_user=group_sessions_per_user,
+            thread_sessions_per_user=thread_sessions_per_user,
         )
 
     def _telegram_topic_mode_enabled(self, source: SessionSource) -> bool:
@@ -7632,8 +7637,10 @@ class GatewayRunner(GatewayKanbanWatchersMixin):
         """
         history = history or []
         message_text = event.text or ""
-        _group_sessions_per_user = getattr(self.config, "group_sessions_per_user", True)
-        _thread_sessions_per_user = getattr(self.config, "thread_sessions_per_user", False)
+        _group_sessions_per_user, _thread_sessions_per_user = effective_session_policy(
+            self.config,
+            source,
+        )
         # Use the same helper every other call site uses so the write key here
         # matches the consume key at the run_conversation site — even if the
         # session store overrides build_session_key's default behavior.
@@ -7757,10 +7764,20 @@ class GatewayRunner(GatewayKanbanWatchersMixin):
             from tools.credential_files import to_agent_visible_cache_path
 
             _TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
+            _TEXT_MIME_TYPES = {
+                "application/json",
+                "application/ld+json",
+                "application/xml",
+                "application/yaml",
+                "application/x-yaml",
+                "application/toml",
+                "application/x-ndjson",
+            }
+            _MAX_INLINE_DOCUMENT_CHARS = 120_000
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
+                _ext = os.path.splitext(path)[1].lower()
                 if mtype in {"", "application/octet-stream"}:
-                    _ext = os.path.splitext(path)[1].lower()
                     if _ext in _TEXT_EXTENSIONS:
                         mtype = "text/plain"
                     else:
@@ -7780,19 +7797,42 @@ class GatewayRunner(GatewayKanbanWatchersMixin):
                 # cache directories are auto-mounted at /root/.hermes/cache/* by get_cache_directory_mounts().
                 agent_path = to_agent_visible_cache_path(path)
 
-                if mtype.startswith("text/"):
+                is_text_document = mtype.startswith("text/") or mtype in _TEXT_MIME_TYPES or _ext in _TEXT_EXTENSIONS
+                inline_content = None
+                inline_truncated = False
+                if is_text_document:
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="replace") as _fh:
+                            inline_content = _fh.read(_MAX_INLINE_DOCUMENT_CHARS + 1)
+                        if len(inline_content) > _MAX_INLINE_DOCUMENT_CHARS:
+                            inline_content = inline_content[:_MAX_INLINE_DOCUMENT_CHARS]
+                            inline_truncated = True
+                    except Exception as exc:
+                        logger.warning("Failed to read text document attachment %s: %s", path, exc)
+
+                if inline_content is not None:
+                    truncation_note = " Content was truncated." if inline_truncated else ""
                     context_note = (
                         f"[The user sent a text document: '{display_name}'. "
-                        f"Its content has been included below. "
+                        f"Its content is included below.{truncation_note} "
                         f"The file is also saved at: {agent_path}]"
                     )
+                    message_text = f"{context_note}\n\n```{_ext.lstrip('.') or 'text'}\n{inline_content}\n```\n\n{message_text}"
+                elif is_text_document:
+                    context_note = (
+                        f"[The user sent a text document: '{display_name}'. "
+                        f"I could not read its content automatically. "
+                        f"The file is saved at: {agent_path}. "
+                        f"Use read_file on that path if needed.]"
+                    )
+                    message_text = f"{context_note}\n\n{message_text}"
                 else:
                     context_note = (
                         f"[The user sent a document: '{display_name}'. "
                         f"The file is saved at: {agent_path}. "
                         f"Ask the user what they'd like you to do with it.]"
                     )
-                message_text = f"{context_note}\n\n{message_text}"
+                    message_text = f"{context_note}\n\n{message_text}"
 
         if getattr(event, "reply_to_text", None) and event.reply_to_message_id:
             # Always inject the reply-to pointer — even when the quoted text

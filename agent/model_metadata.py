@@ -1788,7 +1788,17 @@ def get_model_context_length(
         from agent.models_dev import lookup_models_dev_context
         ctx = lookup_models_dev_context(effective_provider, model)
         if ctx:
-            return ctx
+            # MiniMax M3's context is 1M; some registries expose the 512K
+            # max-output/token-generation ceiling instead. Treat sub-1M values
+            # for M3 as underreports and fall through to the curated default.
+            if _model_name_suggests_minimax_m3(model) and ctx < 1_000_000:
+                logger.info(
+                    "Rejecting models.dev context=%s for %r (MiniMax-M3 underreport); "
+                    "falling through to hardcoded defaults",
+                    ctx, model,
+                )
+            else:
+                return ctx
 
     # 6. OpenRouter live API metadata — provider-unaware fallback.
     # Only consulted when the provider is unknown (no effective_provider),

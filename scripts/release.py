@@ -80,6 +80,7 @@ AUTHOR_MAP = {
     "116314616+ThyFriendlyFox@users.noreply.github.com": "ThyFriendlyFox",
     "liliangjya@gmail.com": "truenorth-lj",
     "16943149+nepenth@users.noreply.github.com": "nepenth",
+    "elkimek@users.noreply.github.com": "elkimek",
     "ben.bartholomew@vectorize.io": "benfrank241",
     "74339271+SaguaroDev@users.noreply.github.com": "SaguaroDev",
     "subw3@mail2.sysu.edu.cn": "Subway2023",

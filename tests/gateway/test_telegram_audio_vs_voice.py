@@ -53,6 +53,16 @@ def _audio_event(path: str = "/tmp/song.mp3") -> MessageEvent:
     )
 
 
+def _document_event(path: str, media_type: str = "application/json") -> MessageEvent:
+    return MessageEvent(
+        text="please inspect this getbased export",
+        message_type=MessageType.DOCUMENT,
+        source=SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm"),
+        media_urls=[path],
+        media_types=[media_type],
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1. VOICE still goes through STT
 # ---------------------------------------------------------------------------
@@ -134,6 +144,31 @@ async def test_audio_attachment_context_note_format():
     assert "audio file attachment" in result.lower()
     # Should NOT contain the voice-message transcription wrapper text
     assert "voice message" not in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_text_document_attachment_inlines_content(tmp_path):
+    """Text-like DOCUMENT attachments must be visible to the agent, not only linked by path."""
+    runner = _make_runner(stt_enabled=True)
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm")
+    doc = tmp_path / "getbased-export.json"
+    doc.write_text('{"marker":"gb_attachment_visible","lab":"homocysteine"}', encoding="utf-8")
+    event = _document_event(str(doc), "application/json")
+
+    with patch(
+        "tools.credential_files.to_agent_visible_cache_path",
+        side_effect=lambda p: p,
+    ):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert "getbased-export.json" in result
+    assert "gb_attachment_visible" in result
+    assert '"lab":"homocysteine"' in result
+    assert "please inspect this getbased export" in result
 
 
 # ---------------------------------------------------------------------------
