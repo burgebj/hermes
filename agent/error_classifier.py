@@ -825,7 +825,24 @@ def _classify_by_status(
         )
 
     if status_code == 429:
-        # Already checked long_context_tier above; this is a normal rate limit
+        # Already checked long_context_tier above. Most 429s are ordinary
+        # throttling (transient — resets on a timer), but some providers return
+        # a 429 for a HARD billing / account wall ("Insufficient balance … please
+        # recharge", "payment required", "credits exhausted") that will NOT clear
+        # by waiting. Treating those as transient makes a kanban worker probe the
+        # wall every cooldown forever and burn paid requests (#41805, #31273).
+        # Disambiguate the same way 402 does (see _classify_402): explicit
+        # billing vocabulary → billing; everything else stays rate_limit. We do
+        # NOT route bare "usage limit"/"quota" 429s to billing — those are
+        # commonly periodic windows that reset, so the transient cooldown path is
+        # correct for them.
+        if any(p in error_msg for p in _BILLING_PATTERNS):
+            return result_fn(
+                FailoverReason.billing,
+                retryable=False,
+                should_rotate_credential=True,
+                should_fallback=True,
+            )
         return result_fn(
             FailoverReason.rate_limit,
             retryable=True,
