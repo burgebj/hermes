@@ -79,8 +79,13 @@ if __name__ == "__main__":
         idx = args.index("--pages")
         p = args[idx + 1]
         if "-" in p:
-            start, end = p.split("-")
-            pages = list(range(int(start), int(end) + 1))
+            parts = p.split("-")
+            if len(parts) == 2:
+                start, end = parts
+                pages = list(range(int(start), int(end) + 1))
+            else:
+                print(f"ERROR: Invalid page range format: {p}", file=sys.stderr)
+                sys.exit(1)
         else:
             pages = [int(p)]
 
