@@ -300,7 +300,7 @@ class IRCAdapter(BasePlatformAdapter):
         # Strip markdown formatting that doesn't render in IRC
         content = self._strip_markdown(content)
 
-        overhead = len(f"PRIVMSG {target} :".encode("utf-8")) + 2  # +2 for \r\n
+        overhead = len(f"PRIVMSG {target} :".encode()) + 2  # +2 for \r\n
         max_bytes = 510 - overhead
         user_limit = self.max_message_length
 
@@ -871,7 +871,7 @@ async def _standalone_send(
         # exceeds the IRC 510-byte protocol limit.  Reuses the same
         # algorithm as IRCAdapter._split_message, with control-character
         # stripping per line to block CRLF injection from message content.
-        overhead = len(f"PRIVMSG {target} :".encode("utf-8")) + 2
+        overhead = len(f"PRIVMSG {target} :".encode()) + 2
         max_bytes = 510 - overhead
         sent_any = False
         for paragraph in plain.split("\n"):
