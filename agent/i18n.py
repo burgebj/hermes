@@ -272,7 +272,7 @@ def t(key: str, lang: str | None = None, **format_kwargs: Any) -> str:
     value = catalog.get(key)
 
     if value is None and target != DEFAULT_LANGUAGE:
-        # Fall through to English rather than showing a key path to the user.
+        # Fall through to English catalog rather than showing a key path.
         value = _load_catalog(DEFAULT_LANGUAGE).get(key)
 
     if value is None:
