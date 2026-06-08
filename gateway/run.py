@@ -4082,16 +4082,24 @@ class GatewayRunner:
                 _CREATE_NEW_PROCESS_GROUP = 0x00000200
                 _DETACHED_PROCESS = 0x00000008
                 _CREATE_NO_WINDOW = 0x08000000
+                # Strip gateway markers so the CLI doesn't refuse the
+                # restart as "inside the gateway process".
+                env = dict(os.environ)
+                env.pop("_HERMES_GATEWAY", None)
+                env.pop("HERMES_GATEWAY_DETACHED", None)
                 subprocess.Popen(
                     cmd,
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    env=env,
                     creationflags=_CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS | _CREATE_NO_WINDOW,
                 )
                 """
             ).strip()
             subprocess.Popen(
                 [sys.executable, "-c", watcher, str(current_pid), *cmd_argv],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 **windows_detach_popen_kwargs(),
@@ -4107,6 +4115,7 @@ class GatewayRunner:
         if setsid_bin:
             subprocess.Popen(
                 [setsid_bin, "bash", "-lc", shell_cmd],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -4114,6 +4123,7 @@ class GatewayRunner:
         else:
             subprocess.Popen(
                 ["bash", "-lc", shell_cmd],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,

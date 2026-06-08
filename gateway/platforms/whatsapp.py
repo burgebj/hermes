@@ -810,7 +810,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
             try:
                 try:
                     _terminate_bridge_process(self._bridge_process, force=False)
-                except (ProcessLookupError, PermissionError):
+                except (ProcessLookupError, PermissionError, OSError):
                     self._bridge_process.terminate()
                 await asyncio.sleep(1)
                 if self._bridge_process.poll() is None:
