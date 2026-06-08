@@ -166,6 +166,17 @@ model:
 # worktree: false   # Default — only create when -w flag is passed
 
 # =============================================================================
+# Session State Storage
+# =============================================================================
+# SQLite is the default local session/state store. PostgreSQL is opt-in for
+# larger installs, network-volume deployments, or shared durable state.
+#
+# sessions:
+#   state_backend: "sqlite"  # "sqlite" (default) or "postgres"
+#   # PostgreSQL DSN. Prefer HERMES_STATE_DATABASE_URL in ~/.hermes/.env for secrets.
+#   # postgres_dsn: "postgresql://user:***@localhost:5432/hermes"
+
+# =============================================================================
 # Terminal Tool Configuration
 # =============================================================================
 # Choose ONE of the following terminal configurations by uncommenting it.

@@ -1,8 +1,10 @@
 # Session Storage
 
-Hermes Agent uses a SQLite database (`~/.hermes/state.db`) to persist session
-metadata, full message history, and model configuration across CLI and gateway
-sessions. This replaces the earlier per-session JSONL file approach.
+Hermes Agent uses a SQLite database (`~/.hermes/state.db`) by default to persist
+session metadata, full message history, and model configuration across CLI and
+gateway sessions. PostgreSQL is available as an explicit opt-in backend for
+shared or long-running deployments. This replaces the earlier per-session JSONL
+file approach.
 
 Source file: `hermes_state.py`
 
@@ -22,9 +24,35 @@ Source file: `hermes_state.py`
 Key design decisions:
 - **WAL mode** for concurrent readers + one writer (gateway multi-platform)
 - **FTS5 virtual table** for fast text search across all session messages
+- **PostgreSQL opt-in** via `sessions.state_backend=postgres` plus a DSN
 - **Session lineage** via `parent_session_id` chains (compression-triggered splits)
 - **Source tagging** (`cli`, `telegram`, `discord`, etc.) for platform filtering
 - Batch runner and RL trajectories are NOT stored here (separate systems)
+
+
+## PostgreSQL Backend
+
+SQLite remains the default. To use PostgreSQL, install the optional dependency
+and configure the backend explicitly:
+
+```yaml
+sessions:
+  state_backend: postgres
+  postgres_dsn: ${HERMES_STATE_DATABASE_URL}
+```
+
+Migration is handled by the CLI so users can copy from the old SQLite file before
+cutting over config:
+
+```bash
+hermes migrate state-postgres --dsn "$HERMES_STATE_DATABASE_URL" --apply
+```
+
+The migration command exports SQLite sessions/messages (including inactive
+rewound rows by default), imports them into PostgreSQL, verifies row counts, and
+backs up `state.db` unless `--no-backup` is passed. Add `--update-config` after a
+successful import to write `sessions.state_backend=postgres` to `config.yaml`.
+PostgreSQL currently uses portable `ILIKE` message search rather than SQLite FTS5.
 
 
 ## SQLite Schema
@@ -133,7 +161,7 @@ END;
 
 ## Schema Version and Migrations
 
-Current schema version: **11**
+Current schema version: **14**
 
 The `schema_version` table stores a single integer. Simple column additions are handled declaratively by `_reconcile_columns()` (which diffs live columns against `SCHEMA_SQL` and ADDs any missing ones). The version-gated chain is reserved for data migrations and index/FTS changes that can't be expressed declaratively:
 
@@ -150,6 +178,9 @@ The `schema_version` table stores a single integer. Simple column additions are 
 | 9 | Add `codex_message_items` column to messages for Codex Responses message id/phase replay |
 | 10 | Add `messages_fts_trigram` virtual table (trigram tokenizer for CJK / substring search) and backfill existing rows |
 | 11 | Re-index `messages_fts` and `messages_fts_trigram` to cover `tool_name` + `tool_calls` and switch from external-content to inline mode; drop old triggers and backfill every message row |
+| 12 | Add handoff state/platform/error fields to sessions |
+| 13 | Add rewind/active-row tracking for message history |
+| 14 | Add archived-session support |
 
 Declarative column adds use `ALTER TABLE ADD COLUMN` wrapped in try/except to handle the column-already-exists case (idempotent). The version number is bumped after each successful migration block.
 

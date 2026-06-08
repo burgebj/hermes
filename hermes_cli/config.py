@@ -2232,6 +2232,11 @@ DEFAULT_CONFIG = {
     # reports 384MB+ databases with 68K+ messages, which slows down FTS5
     # inserts, /resume listing, and insights queries.
     "sessions": {
+        # Durable session/state backend. SQLite keeps the historical single-file
+        # default; PostgreSQL is opt-in for large or network-volume installs.
+        "state_backend": "sqlite",
+        "postgres_dsn": "",
+        "state_db_path": "",
         # When true, prune ended sessions older than retention_days once
         # per (roughly) min_interval_hours at CLI/gateway/cron startup.
         # Only touches ended sessions — active sessions are always preserved.
