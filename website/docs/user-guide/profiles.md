@@ -22,6 +22,40 @@ coder chat                        # start chatting
 
 That's it. `coder` is now its own Hermes profile with its own config, memory, and state.
 
+## One agent on many platforms vs many agents
+
+Hermes can connect one agent to multiple messaging platforms at the same time.
+If you want the same assistant, memory, model, and sessions to answer from
+Telegram, Feishu/Lark, Weixin, and other gateway adapters, keep one profile,
+configure every platform in that profile, and start that profile's gateway:
+
+```bash
+hermes gateway setup
+hermes gateway start
+```
+
+Use additional profiles only when you want separate agents: different API keys,
+models, memories, personalities, allowed users, bot tokens, or service names.
+Each profile owns its own `.env`, `config.yaml`, `SOUL.md`, sessions, and gateway
+state.
+
+For example, to run two independent gateway agents on the same machine:
+
+```bash
+hermes profile create support --clone
+hermes profile create research --clone
+
+support gateway setup
+research gateway setup
+
+support gateway start
+research gateway start
+```
+
+Use different bot credentials for each profile. If two profiles try to start the
+same supported bot token, Hermes blocks the second gateway with a token-lock
+error so the two agents do not race on the same account.
+
 ## Creating a profile
 
 :::tip

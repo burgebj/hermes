@@ -116,6 +116,14 @@ hermes gateway setup        # Interactive setup for all messaging platforms
 
 This walks you through configuring each platform with arrow-key selection, shows which platforms are already configured, and offers to start/restart the gateway when done.
 
+You do not need a separate Hermes profile for every platform. One gateway
+process can connect all platforms configured in the active profile, so a single
+agent can answer from Telegram, Feishu/Lark, Weixin, Discord, Slack, and other
+enabled adapters at the same time. Create separate profiles only when you want
+separate agents with different models, memories, personalities, bot tokens, or
+service names. See [Profiles: Running Multiple Agents](../profiles.md) for the
+multi-agent setup pattern.
+
 ## Gateway Commands
 
 ```bash
