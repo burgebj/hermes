@@ -1673,7 +1673,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
                 pfpath = _get_hermes_home() / pfpath
             if pfpath.exists():
                 try:
-                    with open(pfpath, "r", encoding="utf-8") as _pf:
+                    with open(pfpath, encoding="utf-8") as _pf:
                         prefill_messages = json.load(_pf)
                     if not isinstance(prefill_messages, list):
                         prefill_messages = None

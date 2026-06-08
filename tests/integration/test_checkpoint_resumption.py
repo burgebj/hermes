@@ -80,7 +80,7 @@ def monitor_checkpoint_during_run(checkpoint_file: Path, duration: int = 30) -> 
                 elapsed = time.time() - start_time
                 
                 try:
-                    with open(checkpoint_file, 'r') as f:
+                    with open(checkpoint_file) as f:
                         checkpoint_data = json.load(f)
                     
                     snapshot = {
@@ -237,7 +237,7 @@ def test_interruption_and_resume():
     temp_dataset = Path("tests/test_data/checkpoint_test_resume_partial.jsonl")
     try:
         # Create a modified dataset with only first 5 prompts for initial run
-        with open(dataset_file, 'r') as f:
+        with open(dataset_file) as f:
             lines = f.readlines()[:5]
         with open(temp_dataset, 'w') as f:
             f.writelines(lines)
@@ -260,7 +260,7 @@ def test_interruption_and_resume():
             print("❌ ERROR: Checkpoint file not created after first run")
             return False
         
-        with open(checkpoint_file, 'r') as f:
+        with open(checkpoint_file) as f:
             checkpoint_data = json.load(f)
         
         initial_completed = len(checkpoint_data.get("completed_prompts", []))
@@ -283,7 +283,7 @@ def test_interruption_and_resume():
         runner2.run(resume=True)
         
         # Check final checkpoint
-        with open(checkpoint_file, 'r') as f:
+        with open(checkpoint_file) as f:
             final_checkpoint = json.load(f)
         
         final_completed = len(final_checkpoint.get("completed_prompts", []))

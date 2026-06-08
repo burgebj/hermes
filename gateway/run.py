@@ -1580,7 +1580,7 @@ def _load_gateway_config() -> dict:
     try:
         if config_path.exists():
             import yaml
-            with open(config_path, 'r', encoding='utf-8') as f:
+            with open(config_path, encoding='utf-8') as f:
                 return yaml.safe_load(f) or {}
     except Exception:
         logger.debug("Could not load gateway config from %s", config_path)
@@ -3136,7 +3136,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             logger.warning("Prefill messages file not found: %s", path)
             return []
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             if not isinstance(data, list):
                 logger.warning("Prefill messages file must contain a JSON array: %s", path)

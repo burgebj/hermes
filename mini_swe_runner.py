@@ -706,7 +706,7 @@ def main(
     elif prompts_file:
         # Batch mode
         prompts = []
-        with open(prompts_file, 'r', encoding='utf-8') as f:
+        with open(prompts_file, encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if line:

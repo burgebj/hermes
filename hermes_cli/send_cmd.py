@@ -252,7 +252,7 @@ def _load_hermes_env() -> None:
         return
 
     try:
-        with open(config_path, "r", encoding="utf-8") as fh:
+        with open(config_path, encoding="utf-8") as fh:
             raw = yaml.safe_load(fh) or {}
     except Exception:
         return

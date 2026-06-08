@@ -560,7 +560,7 @@ def get_container_exec_info() -> Optional[dict]:
 
     try:
         info = {}
-        with open(container_mode_file, "r", encoding="utf-8") as f:
+        with open(container_mode_file, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if "=" in line and not line.startswith("#"):
@@ -710,7 +710,7 @@ def _is_container() -> bool:
         return True
     # LXC / cgroup-based detection
     try:
-        with open("/proc/1/cgroup", "r", encoding="utf-8") as f:
+        with open("/proc/1/cgroup", encoding="utf-8") as f:
             cgroup_content = f.read()
         if "docker" in cgroup_content or "lxc" in cgroup_content or "kubepods" in cgroup_content:
             return True
@@ -6305,7 +6305,7 @@ def _inject_platform_plugin_env_vars() -> None:
             if not manifest_path.exists():
                 continue
             try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
+                with open(manifest_path, encoding="utf-8") as f:
                     manifest = yaml.safe_load(f) or {}
             except Exception:
                 continue

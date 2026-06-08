@@ -303,7 +303,7 @@ def _load_prefill_messages(file_path: str) -> List[Dict[str, Any]]:
         logger.warning("Prefill messages file not found: %s", path)
         return []
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, list):
             logger.warning("Prefill messages file must contain a JSON array: %s", path)
@@ -502,7 +502,7 @@ def load_cli_config() -> Dict[str, Any]:
     # Load from file if exists
     if config_path.exists():
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 from hermes_cli.config import _normalize_root_model_keys
 
                 file_config = _normalize_root_model_keys(yaml.safe_load(f) or {})
@@ -2686,7 +2686,7 @@ def _preserve_ctrl_enter_newline() -> bool:
     # WSL detection — env vars can be scrubbed under sudo, also peek /proc.
     for p in ("/proc/version", "/proc/sys/kernel/osrelease"):
         try:
-            with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            with open(p, encoding="utf-8", errors="ignore") as f:
                 if "microsoft" in f.read().lower():
                     return True
         except OSError:

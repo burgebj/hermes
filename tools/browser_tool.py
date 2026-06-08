@@ -924,7 +924,7 @@ def _run_chrome_fallback_command(
             proc.wait()
             return {"success": False, "error": f"Chrome fallback '{cmd}' timed out"}
         try:
-            with open(stdout_path, "r", encoding="utf-8") as f:
+            with open(stdout_path, encoding="utf-8") as f:
                 stdout = f.read().strip()
             if stdout:
                 return json.loads(stdout.split("\n")[-1])
@@ -2092,9 +2092,9 @@ def _run_browser_command(
             result = {"success": False, "error": f"Command timed out after {timeout} seconds"}
             # Fall through to fallback check below
         else:
-            with open(stdout_path, "r", encoding="utf-8") as f:
+            with open(stdout_path, encoding="utf-8") as f:
                 stdout = f.read()
-            with open(stderr_path, "r", encoding="utf-8") as f:
+            with open(stderr_path, encoding="utf-8") as f:
                 stderr = f.read()
             returncode = proc.returncode
 
@@ -3644,7 +3644,7 @@ def _running_in_docker() -> bool:
     if os.path.exists("/.dockerenv"):
         return True
     try:
-        with open("/proc/1/cgroup", "rt", encoding="utf-8") as fp:
+        with open("/proc/1/cgroup", encoding="utf-8") as fp:
             return "docker" in fp.read()
     except OSError:
         return False

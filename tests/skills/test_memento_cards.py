@@ -229,7 +229,7 @@ class TestCSV:
         assert result["exported"] == 2
 
         # Verify CSV content
-        with open(csv_path, "r") as f:
+        with open(csv_path) as f:
             reader = csv.reader(f)
             rows = list(reader)
         assert len(rows) == 2

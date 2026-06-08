@@ -88,7 +88,7 @@ def _load_sessions_index() -> dict:
     if not sessions_file.exists():
         return {}
     try:
-        with open(sessions_file, "r", encoding="utf-8") as f:
+        with open(sessions_file, encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         logger.debug("Failed to load sessions.json: %s", e)
@@ -108,7 +108,7 @@ def _load_channel_directory() -> dict:
     if not directory_file.exists():
         return {}
     try:
-        with open(directory_file, "r", encoding="utf-8") as f:
+        with open(directory_file, encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         logger.debug("Failed to load channel_directory.json: %s", e)

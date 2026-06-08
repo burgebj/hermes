@@ -587,7 +587,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                 )
             # Validate file parses before handing to google-auth for nicer error.
             try:
-                with open(sa_path, "r", encoding="utf-8") as fh:
+                with open(sa_path, encoding="utf-8") as fh:
                     info = json.load(fh)
             except json.JSONDecodeError as exc:
                 raise ValueError(
@@ -3198,7 +3198,7 @@ async def _standalone_send(
                 if not os.path.exists(sa_value):
                     return {"error": f"Google Chat standalone send: SA JSON file not found at {sa_value}"}
                 try:
-                    with open(sa_value, "r", encoding="utf-8") as fh:
+                    with open(sa_value, encoding="utf-8") as fh:
                         info = json.load(fh)
                 except json.JSONDecodeError as exc:
                     return {"error": f"Google Chat standalone send: SA JSON file is invalid: {exc}"}

@@ -72,7 +72,7 @@ class EvidenceStore:
         }
         if os.path.exists(filepath):
             try:
-                with open(filepath, "r", encoding="utf-8") as f:
+                with open(filepath, encoding="utf-8") as f:
                     self.data = json.load(f)
             except (json.JSONDecodeError, IOError) as e:
                 print(f"Error loading evidence store '{filepath}': {e}", file=sys.stderr)
