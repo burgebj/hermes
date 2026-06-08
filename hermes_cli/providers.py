@@ -629,11 +629,16 @@ def resolve_custom_provider(
         if requested not in {display_name.lower(), slug}:
             continue
 
+        key_env = (entry.get("key_env") or "").strip()
+        env_vars: List[str] = []
+        if key_env:
+            env_vars.append(key_env)
+
         return ProviderDef(
             id=slug,
             name=display_name,
             transport="openai_chat",
-            api_key_env_vars=(),
+            api_key_env_vars=tuple(env_vars),
             base_url=api_url,
             is_aggregator=False,
             auth_type="api_key",

@@ -255,6 +255,30 @@ def test_list_dedupes_dict_model_matching_singular_default(monkeypatch):
     assert ds_rows[0]["models"] == ["deepseek-chat", "deepseek-reasoner"]
 
 
+def test_resolve_custom_provider_passes_key_env():
+    """resolve_custom_provider should propagate key_env into api_key_env_vars.
+
+    Regression: previously api_key_env_vars was always (), silently dropping
+    the configured env var and causing 401s on every request.
+    """
+    from hermes_cli.providers import resolve_custom_provider
+
+    resolved = resolve_custom_provider(
+        "custom:token-plan",
+        custom_providers=[
+            {
+                "name": "token-plan",
+                "base_url": "https://token-plan-sgp.xiaomimimo.com/v1",
+                "key_env": "XIAOMI_MIMO_API_KEY",
+                "model": "mimo-v2-pro",
+            }
+        ],
+    )
+
+    assert resolved is not None
+    assert resolved.api_key_env_vars == ("XIAOMI_MIMO_API_KEY",)
+    assert resolved.base_url == "https://token-plan-sgp.xiaomimimo.com/v1"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # #9210: group custom_providers by (base_url, api_key) in /model picker
