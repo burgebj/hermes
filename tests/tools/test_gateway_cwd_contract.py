@@ -14,7 +14,33 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from tools import code_execution_tool, file_tools, terminal_tool
+
+
+@pytest.fixture
+def isolated_terminal_file_state():
+    """Clear live terminal/file-tool cwd caches that other tests may populate."""
+    with terminal_tool._env_lock:
+        old_envs = dict(terminal_tool._active_environments)
+        old_last_activity = dict(terminal_tool._last_activity)
+        terminal_tool._active_environments.clear()
+        terminal_tool._last_activity.clear()
+    with file_tools._file_ops_lock:
+        old_file_ops = dict(file_tools._file_ops_cache)
+        file_tools._file_ops_cache.clear()
+    try:
+        yield
+    finally:
+        with file_tools._file_ops_lock:
+            file_tools._file_ops_cache.clear()
+            file_tools._file_ops_cache.update(old_file_ops)
+        with terminal_tool._env_lock:
+            terminal_tool._active_environments.clear()
+            terminal_tool._active_environments.update(old_envs)
+            terminal_tool._last_activity.clear()
+            terminal_tool._last_activity.update(old_last_activity)
 
 
 def test_terminal_env_config_uses_terminal_cwd(monkeypatch, tmp_path):
@@ -30,7 +56,7 @@ def test_terminal_env_config_uses_terminal_cwd(monkeypatch, tmp_path):
     assert config["cwd"] == str(workspace)
 
 
-def test_file_tool_relative_paths_use_terminal_cwd(monkeypatch, tmp_path):
+def test_file_tool_relative_paths_use_terminal_cwd(monkeypatch, tmp_path, isolated_terminal_file_state):
     """Relative file/search/patch paths resolve under TERMINAL_CWD."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()

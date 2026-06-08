@@ -150,19 +150,19 @@ def test_sigterm_with_kanban_task_env_terminates_quickly():
         t0 = time.time()
         os.kill(proc.pid, signal.SIGTERM)
 
-        # Should die in <2s. The handler sleeps ~50ms, then os._exit(0)
-        # is immediate. Give generous headroom for slow CI runners.
-        deadline = t0 + 2.0
-        while time.time() < deadline:
-            if not _is_alive_like_dispatcher(proc.pid):
-                elapsed = time.time() - t0
-                assert elapsed < 2.0
-                return
-            time.sleep(0.02)
-        pytest.fail(
-            f"process still alive 2s after SIGTERM with HERMES_KANBAN_TASK set "
-            f"(dispatcher would keep extending claim) — fix regressed"
-        )
+        # Should die promptly. Use proc.wait() so the child is reaped; on
+        # Android/Termux a just-exited child can remain visible as a live PID
+        # until its parent waits, making dispatcher-like polling flaky.
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            pytest.fail(
+                "process still alive 5s after SIGTERM with HERMES_KANBAN_TASK set "
+                "(dispatcher would keep extending claim) — fix regressed"
+            )
+        elapsed = time.time() - t0
+        assert elapsed < 5.0
+        assert not _is_alive_like_dispatcher(proc.pid)
     finally:
         _cleanup(proc)
 
