@@ -1030,7 +1030,16 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
             )
         argv = [_bash, str(path)]
     else:
-        argv = [sys.executable, str(path)]
+        # Bug fix (issue #38633): On Windows, when Hermes runs under pythonw.exe
+        # (no console subsystem), spawning a child pythonw.exe gives the child no
+        # console and stdout is lost when captured via subprocess.PIPE.  Prefer
+        # python.exe (console subsystem) from the same directory when available.
+        _py = sys.executable
+        if sys.platform == "win32" and os.path.basename(_py).lower() == "pythonw.exe":
+            _console_py = os.path.join(os.path.dirname(_py), "python.exe")
+            if os.path.isfile(_console_py):
+                _py = _console_py
+        argv = [_py, str(path)]
 
     run_env = os.environ.copy()
     run_env["HERMES_HOME"] = str(_get_hermes_home())
@@ -1049,6 +1058,8 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=script_timeout,
             cwd=str(path.parent),
             env=run_env,
