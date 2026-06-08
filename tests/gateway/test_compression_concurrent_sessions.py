@@ -56,7 +56,12 @@ def _build_agent_with_db(db: SessionDB, session_id: str):
     compressor = MagicMock()
 
     def _compress_with_overlap(*_a, **_kw):
-        time.sleep(0.25)  # match fork test sleep so threads reliably overlap
+        # Keep the lock held long enough for the competing thread to reach
+        # try_acquire_compression_lock() even on heavily loaded CI runners.
+        # A shorter 250ms sleep can let the winner finish and release before
+        # the loser is scheduled, making both compress sequentially instead
+        # of exercising the lock-loser path this test is meant to cover.
+        time.sleep(1.0)
         return [
             {"role": "user", "content": "[CONTEXT COMPACTION] summary"},
             {"role": "user", "content": "tail"},

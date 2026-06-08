@@ -876,6 +876,11 @@ def test_startup_runtime_does_not_call_network_detector(monkeypatch):
     assert provider in {None, "anthropic"}
 
 
+def _disable_notification_poller(monkeypatch):
+    """Prevent session-start tests from leaking a global completion poller thread."""
+    monkeypatch.setattr(server, "_start_notification_poller", lambda *_a, **_kw: threading.Event())
+
+
 def _session(agent=None, **extra):
     return {
         "agent": agent if agent is not None else types.SimpleNamespace(),
@@ -987,6 +992,7 @@ def test_ws_orphan_reap_disabled_when_grace_zero(monkeypatch):
 
 
 def test_init_session_fires_reset_hook(monkeypatch):
+    _disable_notification_poller(monkeypatch)
     hooks = []
 
     class _FakeWorker:
@@ -3679,6 +3685,7 @@ def test_mirror_slash_compress_does_not_prelock_history(monkeypatch):
 
 
 def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
+    _disable_notification_poller(monkeypatch)
     """Regression guard: if session.close runs while session.create's
     _build thread is still constructing the agent, the build thread
     must detect the orphan and clean up the slash_worker + notify
@@ -3805,6 +3812,7 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
 
 
 def test_session_create_no_race_keeps_worker_alive(monkeypatch):
+    _disable_notification_poller(monkeypatch)
     """Regression guard: when session.close does NOT race, the build
     thread must install the worker + notify normally and leave them
     alone (no over-eager cleanup)."""
@@ -3893,6 +3901,8 @@ def test_get_db_degrades_cleanly_when_sessiondb_init_fails(monkeypatch):
 
 
 def test_session_create_continues_when_state_db_is_unavailable(monkeypatch):
+    _disable_notification_poller(monkeypatch)
+
     class _FakeWorker:
         def __init__(self, key, model):
             self.key = key
@@ -3937,6 +3947,7 @@ def test_session_create_continues_when_state_db_is_unavailable(monkeypatch):
 
 
 def test_session_create_lazy_info_reports_desktop_contract(monkeypatch):
+    _disable_notification_poller(monkeypatch)
     """The lazy session.create info payload must carry desktop_contract, else
     the desktop GUI reads it as undefined and falsely warns "Backend out of
     date" on every launch even against a current backend."""
