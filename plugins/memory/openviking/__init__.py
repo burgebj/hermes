@@ -418,6 +418,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         self._api_key = ""
         self._session_id = ""
         self._turn_count = 0
+        self._last_message_count = 0  # tracks how many messages have been synced to the session
         self._sync_thread: Optional[threading.Thread] = None
         self._prefetch_result = ""
         self._prefetch_lock = threading.Lock()
@@ -474,6 +475,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         self._agent = os.environ.get("OPENVIKING_AGENT", "hermes")
         self._session_id = session_id
         self._turn_count = 0
+        self._last_message_count = 0
 
         try:
             self._client = _VikingClient(
@@ -565,8 +567,14 @@ class OpenVikingMemoryProvider(MemoryProvider):
         )
         self._prefetch_thread.start()
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Record the conversation turn in OpenViking's session (non-blocking)."""
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", messages: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Record the conversation turn in OpenViking's session (non-blocking).
+
+        When ``messages`` is provided (full OpenAI-style conversation list as of the
+        completed turn), only messages not yet synced are posted — avoids re-sending
+        previous turns on every call. Falls back to legacy text-only behavior when
+        ``messages`` is absent (backward-compatible with older MemoryManager).
+        """
         if not self._client:
             return
 
@@ -580,16 +588,48 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 )
                 sid = self._session_id
 
-                # Add user message
-                client.post(f"/api/v1/sessions/{sid}/messages", {
-                    "role": "user",
-                    "content": user_content[:4000],  # trim very long messages
-                })
-                # Add assistant message
-                client.post(f"/api/v1/sessions/{sid}/messages", {
-                    "role": "assistant",
-                    "content": assistant_content[:4000],
-                })
+                if messages is not None and len(messages) > self._last_message_count:
+                    # Only sync messages we haven't sent yet — the full conversation
+                    # history grows each turn, so we compute the delta.
+                    new_messages = messages[self._last_message_count:]
+                    for msg in new_messages:
+                        role = msg.get("role", "user")
+                        content = ""
+                        if msg.get("content"):
+                            content = msg["content"]
+                        elif role == "assistant" and msg.get("tool_calls"):
+                            # Serialize tool calls into a text representation
+                            calls = []
+                            for tc in msg["tool_calls"]:
+                                fn = tc.get("function", {})
+                                name = fn.get("name", "?")
+                                args = fn.get("arguments", "")[:200]
+                                calls.append(f"[{name}({args})]")
+                            content = " ".join(calls) if calls else "[tool_calls]"
+                        elif role == "tool":
+                            content = msg.get("content", "")[:4000]
+                        elif role == "system":
+                            # Skip system prompts — they're session-wide state,
+                            # not conversational turns
+                            continue
+
+                        if not content:
+                            content = "(empty)"
+                        client.post(f"/api/v1/sessions/{sid}/messages", {
+                            "role": role,
+                            "content": content[:4000],
+                        })
+                    self._last_message_count = len(messages)
+                else:
+                    # Legacy behavior: post user + assistant text only
+                    client.post(f"/api/v1/sessions/{sid}/messages", {
+                        "role": "user",
+                        "content": user_content[:4000],
+                    })
+                    client.post(f"/api/v1/sessions/{sid}/messages", {
+                        "role": "assistant",
+                        "content": assistant_content[:4000],
+                    })
             except Exception as e:
                 logger.debug("OpenViking sync_turn failed: %s", e)
 
@@ -683,6 +723,11 @@ class OpenVikingMemoryProvider(MemoryProvider):
             return tool_error(f"Unknown tool: {tool_name}")
         except Exception as e:
             return tool_error(str(e))
+
+    def on_session_switch(self, new_session_id: str, **kwargs) -> None:
+        """Reset sync state when the agent switches sessions (/resume, /reset, /branch)."""
+        self._session_id = new_session_id
+        self._last_message_count = 0
 
     def shutdown(self) -> None:
         # Wait for background threads to finish
