@@ -499,6 +499,7 @@ class TestWebSearchSchema:
         fake_provider.name = "parallel"
 
         with patch("tools.web_tools._get_search_backend", return_value="parallel"), \
+             patch("tools.web_tools._is_backend_available", return_value=True), \
              patch("agent.web_search_registry.get_provider", return_value=fake_provider), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch.object(tools.web_tools._debug, "log_call"), \
@@ -527,6 +528,7 @@ class TestWebSearchErrorHandling:
         fake_provider.name = "firecrawl"
 
         with patch("tools.web_tools._get_search_backend", return_value="firecrawl"), \
+             patch("tools.web_tools._is_backend_available", return_value=True), \
              patch("agent.web_search_registry.get_provider", return_value=fake_provider), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch.object(tools.web_tools._debug, "log_call") as mock_log_call, \
@@ -543,6 +545,60 @@ class TestWebSearchErrorHandling:
         assert "exception_type" not in result
         assert "exception_chain" not in result
         assert "traceback" not in result
+
+    def test_web_search_returns_clear_error_when_backend_unavailable(self):
+        """When the configured backend is unavailable at invocation time,
+        web_search_tool returns a structured error instead of silently
+        falling through (issue #42011)."""
+        import tools.web_tools
+
+        with patch("tools.web_tools._get_search_backend", return_value="ddgs"), \
+             patch("tools.web_tools._is_backend_available", return_value=False), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("test", limit=5))
+
+        assert result["success"] is False
+        assert "ddgs" in result["error"]
+        assert "pip install ddgs" in result["error"]
+
+    def test_web_search_returns_clear_error_for_unavailable_api_backend(self):
+        """For non-ddgs backends, the error mentions API keys and hermes tools."""
+        import tools.web_tools
+
+        with patch("tools.web_tools._get_search_backend", return_value="tavily"), \
+             patch("tools.web_tools._is_backend_available", return_value=False), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("test", limit=5))
+
+        assert result["success"] is False
+        assert "tavily" in result["error"]
+        assert "hermes tools" in result["error"]
+
+    def test_web_search_skips_availability_check_when_no_backend_configured(self):
+        """When _get_search_backend returns empty, the guard must not trigger."""
+        import tools.web_tools
+
+        fake_provider = MagicMock(
+            supports_search=MagicMock(return_value=True),
+        )
+        fake_provider.search.return_value = {"success": True, "data": {"web": []}}
+        fake_provider.name = "brave-free"
+
+        with patch("tools.web_tools._get_search_backend", return_value=""), \
+             patch("tools.web_tools._is_backend_available", return_value=False), \
+             patch("agent.web_search_registry.get_provider", return_value=None), \
+             patch("agent.web_search_registry.get_active_search_provider",
+                   return_value=fake_provider), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("test", limit=5))
+
+        assert result["success"] is True
 
 
 class TestCheckWebApiKey:

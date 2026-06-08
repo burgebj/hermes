@@ -848,6 +848,32 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         )
 
         backend = _get_search_backend()
+
+        # Runtime availability guard: when the configured backend is
+        # explicitly set but its package / credentials are missing, fail
+        # early with an actionable error instead of silently falling
+        # through.  check_fn filters the tool from the LLM's schema list
+        # at get_definitions() time, but the handler can still be reached
+        # via the tool_call bridge or a stale context — issue #42011.
+        if backend and not _is_backend_available(backend):
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        f"Error: configured web search backend '{backend}' "
+                        "is not available. "
+                        + (
+                            "Install the package with: pip install ddgs"
+                            if backend == "ddgs"
+                            else "Check that the required API key or "
+                            "environment variable is set. "
+                            "Run `hermes tools` to reconfigure."
+                        )
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
         provider = _wsp_get_provider(backend) if backend else None
         if provider is None or not provider.supports_search():
             # Fall back to availability-walked active provider when the

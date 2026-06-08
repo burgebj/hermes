@@ -292,7 +292,7 @@ class TestUnconfiguredErrorEnvelopeParity:
             monkeypatch.delenv(k, raising=False)
 
     def test_unconfigured_search_emits_top_level_error(self, monkeypatch):
-        """``web_search_tool`` with no creds returns ``{"error": "Error searching web: ..."}``
+        """``web_search_tool`` with no creds returns ``{"error": "..."}``
         — matching main's ``tool_error()`` envelope, not a per-result shape.
         """
         from tools import web_tools
@@ -305,9 +305,10 @@ class TestUnconfiguredErrorEnvelopeParity:
 
         result = json.loads(web_tools.web_search_tool("hello world", limit=3))
         assert "error" in result, f"expected top-level 'error' key, got {result}"
-        # ``Error searching web:`` prefix comes from web_tools' top-level except handler
-        assert "Error searching web:" in result["error"]
-        assert "FIRECRAWL_API_KEY" in result["error"]
+        # Runtime availability guard returns a clear error when the configured
+        # backend is unavailable (issue #42011).
+        assert "not available" in result["error"]
+        assert "hermes tools" in result["error"]
         # No per-result burying
         assert "results" not in result
 
