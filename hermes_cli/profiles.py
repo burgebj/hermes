@@ -685,6 +685,11 @@ def list_profiles() -> List[ProfileInfo]:
             name = entry.name
             if not _PROFILE_ID_RE.match(name):
                 continue
+            # The built-in "default" profile is always added first (above);
+            # skip a physical ~/.hermes/profiles/default/ directory to avoid
+            # duplicate entries that inflate the cron dashboard job count.
+            if name == "default":
+                continue
             model, provider = _read_config_model(entry)
             alias_name = find_alias_for_profile(name)
             if alias_name:
