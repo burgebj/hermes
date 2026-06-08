@@ -99,6 +99,11 @@ export interface Translations {
       plugins: string;
       sessions: string;
       skills: string;
+      mcp?: string;
+      channels?: string;
+      webhooks?: string;
+      pairing?: string;
+      system?: string;
     };
     modelToolsSheetSubtitle: string;
     modelToolsSheetTitle: string;
