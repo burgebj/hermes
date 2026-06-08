@@ -1443,6 +1443,8 @@ class MessageEvent:
     # Reply context
     reply_to_message_id: Optional[str] = None
     reply_to_text: Optional[str] = None  # Text of the replied-to message (for context injection)
+    reply_to_channel_id: Optional[str] = None  # Channel where the replied-to message lives (may differ from current chat — e.g. user replied in a parent channel from inside a thread, or vice versa)
+    reply_to_author: Optional[str] = None  # Display name of the replied-to message author
     
     # Auto-loaded skill(s) for topic/channel bindings (e.g., Telegram DM Topics,
     # Discord channel_skill_bindings).  A single name or ordered list.

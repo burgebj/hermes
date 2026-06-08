@@ -7801,8 +7801,33 @@ class GatewayRunner(GatewayKanbanWatchersMixin):
             # is referencing. History can contain the same or similar text
             # multiple times, and without an explicit pointer the agent has to
             # guess (or answer for both subjects). Token overhead is minimal.
-            reply_snippet = event.reply_to_text[:500]
-            message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
+            #
+            # Cap the inline quote at 1500 chars to bound prompt cost. If the
+            # quoted message is longer (or the user wants surrounding context),
+            # the agent can call discord.fetch_messages with around=<msg_id>
+            # to pull the full message and its neighbors.
+            INLINE_REPLY_QUOTE_CAP = 1500
+            full_quote = event.reply_to_text
+            reply_snippet = full_quote[:INLINE_REPLY_QUOTE_CAP]
+            truncated = len(full_quote) > INLINE_REPLY_QUOTE_CAP
+
+            author = getattr(event, "reply_to_author", None)
+            ref_chan = getattr(event, "reply_to_channel_id", None) or source.chat_id
+            ref_msg = event.reply_to_message_id
+            author_part = f" by {author}" if author else ""
+            trunc_note = (
+                f" (truncated from {len(full_quote)} chars — call discord(action='fetch_messages', "
+                f"channel_id='{ref_chan}', around='{ref_msg}', limit=1) for the full message)"
+                if truncated else ""
+            )
+            pointer = (
+                f"[Replying to message {ref_msg}{author_part} "
+                f"in channel {ref_chan}{trunc_note}: \"{reply_snippet}\"]\n"
+                f"[If you need more surrounding context, call "
+                f"discord(action='fetch_messages', channel_id='{ref_chan}', "
+                f"around='{ref_msg}', limit=20).]\n\n"
+            )
+            message_text = f"{pointer}{message_text}"
 
         if "@" in message_text:
             try:
