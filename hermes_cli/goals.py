@@ -91,18 +91,141 @@ CONTINUATION_PROMPT_WITH_SUBGOALS_TEMPLATE = (
     "and stop."
 )
 
+# ---------------------------------------------------------------------
+# Exploratory-goal heuristic (#34196)
+# ---------------------------------------------------------------------
+# Words / phrases that flag a goal as exploratory — i.e. asks the agent
+# to review, reflect, synthesize, suggest options. For these goals a
+# substantive analysis IS the deliverable; the judge should not keep
+# pushing the agent to manufacture additional artifacts (especially
+# when the goal listed those artifacts as *examples* of possible help).
+_EXPLORATORY_KEYWORDS: Tuple[str, ...] = (
+    "review",
+    "reflect",
+    "reflection",
+    "suggest",
+    "suggestions",
+    "explore",
+    "brainstorm",
+    "propose options",
+    "propose some",
+    "analyze",
+    "analysis",
+    "compare",
+    "comparison",
+    "summarize",
+    "summary",
+    "think about",
+    "think through",
+    "consider",
+    "recommend",
+    "recommendation",
+    "observe",
+    "reflect on ways",
+    "ways you can help",
+    "ways to help",
+    "what could",
+    "what would you suggest",
+    "investigate",
+    "audit",
+    "evaluate",
+)
+
+# Phrases that explicitly mark items as illustrative rather than required.
+_ILLUSTRATIVE_MARKERS: Tuple[str, ...] = (
+    "for example",
+    "e.g.",
+    "such as",
+    "examples include",
+    "examples:",
+    "maybe",
+    "you could",
+    "could be",
+    "or maybe",
+    "or perhaps",
+    "like writing",
+    "like preparing",
+    "like creating",
+)
+
+
+def _classify_goal_shape(goal: str) -> str:
+    """Classify a goal as 'exploratory', 'illustrative', or 'concrete'.
+
+    - 'exploratory' — verbs like review/reflect/suggest/analyze imply a
+      synthesis is the deliverable, not a list of artifacts.
+    - 'illustrative' — goal lists possible actions with markers like
+      'for example' / 'maybe' / 'you could'. Examples are NOT required.
+    - 'concrete' — default. Judge applies strict deliverable matching.
+
+    Used to hint the user-prompt template so the judge factors goal
+    shape into its DONE/CONTINUE decision. This is intentionally simple
+    keyword detection — cheap, transparent, and reviewer-friendly. The
+    final DONE/CONTINUE decision still belongs to the LLM judge; this
+    only adds context so the judge sees what kind of goal it is.
+    """
+    if not goal:
+        return "concrete"
+    text = goal.lower()
+    is_exploratory = any(kw in text for kw in _EXPLORATORY_KEYWORDS)
+    is_illustrative = any(marker in text for marker in _ILLUSTRATIVE_MARKERS)
+    if is_exploratory:
+        return "exploratory"
+    if is_illustrative:
+        return "illustrative"
+    return "concrete"
+
+
+_GOAL_SHAPE_HINTS: Dict[str, str] = {
+    "exploratory": (
+        "\n\nNote: This goal is EXPLORATORY (review/reflect/suggest/analyze). "
+        "A substantive synthesis or recommendation list IS the deliverable. "
+        "Do not require the agent to manufacture additional artifacts that "
+        "the goal only mentioned as examples. Mark DONE when the response "
+        "meaningfully addresses the stated scope."
+    ),
+    "illustrative": (
+        "\n\nNote: This goal lists possible actions with 'for example' / "
+        "'maybe' / 'you could' markers. Treat those as illustrative "
+        "possibilities, NOT as required deliverables. The agent satisfies "
+        "the goal by addressing the core request \u2014 it does not need to "
+        "produce every listed example."
+    ),
+    "concrete": "",
+}
+
 
 JUDGE_SYSTEM_PROMPT = (
     "You are a strict judge evaluating whether an autonomous agent has "
     "achieved a user's stated goal. You receive the goal text and the "
     "agent's most recent response. Your only job is to decide whether "
     "the goal is fully satisfied based on that response.\n\n"
-    "A goal is DONE only when:\n"
+    "A goal is DONE when ANY of the following hold:\n"
     "- The response explicitly confirms the goal was completed, OR\n"
     "- The response clearly shows the final deliverable was produced, OR\n"
     "- The response explains the goal is unachievable / blocked / needs "
-    "user input (treat this as DONE with reason describing the block).\n\n"
-    "Otherwise the goal is NOT done — CONTINUE.\n\n"
+    "user input (treat this as DONE with reason describing the block), OR\n"
+    "- The goal is EXPLORATORY (asks to review, reflect, suggest, "
+    "explore, brainstorm, propose options, analyze, or compare) AND "
+    "the response provides a substantive synthesis / analysis / "
+    "recommendation list that addresses the stated scope. For "
+    "exploratory goals a high-quality synthesis IS the deliverable \u2014 "
+    "do NOT keep continuing just to produce additional artifacts "
+    "that the goal merely listed as examples of possible help.\n\n"
+    "Important guardrails when judging CONTINUE:\n"
+    "- Do NOT infer 'incomplete' from a file being untracked, "
+    "unstaged, or uncommitted unless the goal explicitly required "
+    "staging, committing, pushing, or a clean working tree.\n"
+    "- Do NOT require a magic phrase like 'goal complete' or 'I am "
+    "done'. A clear final answer with the requested content satisfies "
+    "the goal.\n"
+    "- When the goal lists actions as 'examples' or 'maybe' or 'for "
+    "example' or 'you could', treat those as illustrative possibilities, "
+    "NOT as required deliverables.\n"
+    "- When the goal's scope is narrow (one file, one section, one "
+    "specific change) and the response confirms that exact scope is "
+    "done, return DONE \u2014 do not expand scope to neighboring sections.\n\n"
+    "Otherwise the goal is NOT done \u2014 CONTINUE.\n\n"
     "Reply ONLY with a single JSON object on one line:\n"
     '{\"done\": <true|false>, \"reason\": \"<one-sentence rationale>\"}'
 )
@@ -419,6 +542,14 @@ def judge_goal(
     # Build the prompt — pick the with-subgoals variant when applicable.
     clean_subgoals = [s.strip() for s in (subgoals or []) if s and s.strip()]
     current_time = datetime.now(tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    # Classify goal shape so the judge sees what kind of goal it is.
+    # Exploratory and illustrative goals get an extra hint appended to
+    # the user prompt; concrete goals get the original strict template.
+    # See #34196 (exploratory over-continuation) and #34197 (illustrative
+    # 'examples' treated as required deliverables).
+    goal_shape = _classify_goal_shape(goal)
+    shape_hint = _GOAL_SHAPE_HINTS.get(goal_shape, "")
+
     if clean_subgoals:
         subgoals_block = "\n".join(
             f"- {i}. {text}" for i, text in enumerate(clean_subgoals, start=1)
@@ -429,12 +560,16 @@ def judge_goal(
             response=_truncate(last_response, _JUDGE_RESPONSE_SNIPPET_CHARS),
             current_time=current_time,
         )
+        # With-subgoals template enforces strict evidence per criterion;
+        # don't dilute that with exploratory/illustrative hints.
     else:
         prompt = JUDGE_USER_PROMPT_TEMPLATE.format(
             goal=_truncate(goal, 2000),
             response=_truncate(last_response, _JUDGE_RESPONSE_SNIPPET_CHARS),
             current_time=current_time,
         )
+        if shape_hint:
+            prompt = prompt + shape_hint
 
     try:
         resp = client.chat.completions.create(
@@ -903,7 +1038,12 @@ __all__ = [
     "JUDGE_USER_PROMPT_WITH_SUBGOALS_TEMPLATE",
     "KANBAN_GOAL_CONTINUATION_TEMPLATE",
     "KANBAN_GOAL_FINALIZE_TEMPLATE",
+    "JUDGE_SYSTEM_PROMPT",
     "DEFAULT_MAX_TURNS",
+    "_classify_goal_shape",
+    "_GOAL_SHAPE_HINTS",
+    "_EXPLORATORY_KEYWORDS",
+    "_ILLUSTRATIVE_MARKERS",
     "load_goal",
     "save_goal",
     "clear_goal",
