@@ -856,12 +856,33 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             provider = get_active_search_provider()
 
         if provider is None:
-            response_data = {
-                "success": False,
-                "error": (
+            if backend and backend in {"ddgs", "searxng", "brave-free", "firecrawl", "parallel", "tavily", "exa", "xai"}:
+                # Configured backend is known but not available — give a
+                # specific, actionable error instead of the generic
+                # "no provider configured" message.
+                install_hints = {
+                    "ddgs": "pip install ddgs",
+                    "searxng": "Set SEARXNG_URL in ~/.hermes/.env",
+                    "brave-free": "Set BRAVE_SEARCH_API_KEY in ~/.hermes/.env",
+                    "firecrawl": "Set FIRECRAWL_API_KEY in ~/.hermes/.env",
+                    "parallel": "Set PARALLEL_API_KEY in ~/.hermes/.env",
+                    "tavily": "Set TAVILY_API_KEY in ~/.hermes/.env",
+                    "exa": "Set EXA_API_KEY in ~/.hermes/.env",
+                    "xai": "Set XAI_API_KEY in ~/.hermes/.env or run `hermes auth xai`",
+                }
+                hint = install_hints.get(backend, "")
+                error_msg = (
+                    f"Web search backend '{backend}' is not available. "
+                    f"{hint or 'Check configuration in ~/.hermes/config.yaml.'}"
+                )
+            else:
+                error_msg = (
                     "No web search provider configured. "
                     "Run `hermes tools` to set one up."
-                ),
+                )
+            response_data = {
+                "success": False,
+                "error": error_msg,
             }
         else:
             logger.info(

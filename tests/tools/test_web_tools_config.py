@@ -681,6 +681,56 @@ class TestCheckWebApiKey:
                     assert check_web_api_key() is True
 
 
+class TestWebSearchUnavailableBackendError:
+    """When a configured backend is known but unavailable, web_search_tool
+    should return a specific, actionable error — not a generic
+    'no provider configured' message. (issue #42011)
+    """
+
+    def test_ddgs_configured_but_package_missing(self):
+        import tools.web_tools
+
+        with patch("tools.web_tools._get_search_backend", return_value="ddgs"), \
+             patch("agent.web_search_registry.get_provider", return_value=None), \
+             patch("agent.web_search_registry.get_active_search_provider", return_value=None), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("test", limit=3))
+
+        assert result["success"] is False
+        assert "ddgs" in result["error"]
+        assert "pip install ddgs" in result["error"]
+
+    def test_searxng_configured_but_url_missing(self):
+        import tools.web_tools
+
+        with patch("tools.web_tools._get_search_backend", return_value="searxng"), \
+             patch("agent.web_search_registry.get_provider", return_value=None), \
+             patch("agent.web_search_registry.get_active_search_provider", return_value=None), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("test", limit=3))
+
+        assert result["success"] is False
+        assert "searxng" in result["error"]
+        assert "SEARXNG_URL" in result["error"]
+
+    def test_no_backend_configured_generic_error(self):
+        import tools.web_tools
+
+        with patch("tools.web_tools._get_search_backend", return_value=""), \
+             patch("agent.web_search_registry.get_active_search_provider", return_value=None), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("test", limit=3))
+
+        assert result["success"] is False
+        assert "No web search provider configured" in result["error"]
+
+
 def test_web_requires_env_includes_exa_key():
     from tools.web_tools import _web_requires_env
 
