@@ -175,6 +175,19 @@ class QQAdapter(BasePlatformAdapter):
                 fut.set_exception(RuntimeError(reason))
         self._pending_responses.clear()
 
+    def _clear_gateway_approval_sessions(self) -> None:
+        """Cancel QQBot approval waits across a WebSocket reconnect boundary."""
+        try:
+            from tools.approval import clear_gateway_sessions_for_platform
+
+            clear_gateway_sessions_for_platform("qqbot")
+        except Exception as exc:
+            logger.warning(
+                "[%s] Failed to clear gateway approval sessions: %s",
+                self._log_tag,
+                exc,
+            )
+
     def _mark_transport_disconnected(self) -> None:
         """Mark QQ WS down without stopping the reconnect loop.
 
@@ -537,6 +550,7 @@ class QQAdapter(BasePlatformAdapter):
 
                 self._mark_transport_disconnected()
                 self._fail_pending("Connection closed")
+                self._clear_gateway_approval_sessions()
 
                 # Stop reconnecting for fatal codes (unrecoverable errors)
                 if code in {
@@ -642,6 +656,7 @@ class QQAdapter(BasePlatformAdapter):
                 logger.warning("[%s] WebSocket error: %s", self._log_tag, exc)
                 self._mark_transport_disconnected()
                 self._fail_pending("Connection interrupted")
+                self._clear_gateway_approval_sessions()
 
                 if backoff_idx >= MAX_RECONNECT_ATTEMPTS:
                     logger.error("[%s] Max reconnect attempts reached", self._log_tag)
@@ -1092,7 +1107,7 @@ class QQAdapter(BasePlatformAdapter):
 
         chat_type = parsed.get("chat_type", "")
         chat_id = parsed.get("chat_id", "")
-        if chat_type == "c2c":
+        if chat_type in {"c2c", "dm"}:
             return bool(chat_id) and operator == chat_id
 
         if chat_type in {"group", "guild"}:
