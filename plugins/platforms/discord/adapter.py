@@ -170,6 +170,75 @@ def _build_allowed_mentions():
     )
 
 
+# --- Markdown table detection for Discord code-fence wrapping ---
+
+_TABLE_SEPARATOR_RE = re.compile(
+    r'^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*){1,}\|?\s*$'
+)
+
+
+def _is_table_row(line: str) -> bool:
+    """Return True if *line* could plausibly be a table data row."""
+    stripped = line.strip()
+    return bool(stripped) and '|' in stripped
+
+
+def _wrap_tables_in_code_fence(text: str) -> str:
+    """Wrap GFM-style pipe tables in fenced code blocks for Discord.
+
+    Discord does not render markdown tables natively — raw pipe characters
+    display as garbage.  Wrapping the table in triple-backtick fences
+    produces a readable monospaced rendering.
+
+    Tables that are already inside fenced code blocks are left alone.
+    """
+    if '|' not in text or '-' not in text:
+        return text
+
+    lines = text.split('\n')
+    out: list[str] = []
+    in_fence = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.lstrip()
+
+        # Track existing fenced code blocks — never touch content inside.
+        if stripped.startswith('```'):
+            in_fence = not in_fence
+            out.append(line)
+            i += 1
+            continue
+        if in_fence:
+            out.append(line)
+            i += 1
+            continue
+
+        # Look for a header row (contains '|') immediately followed by a
+        # delimiter row matching the separator regex.
+        if (
+            '|' in line
+            and i + 1 < len(lines)
+            and _TABLE_SEPARATOR_RE.match(lines[i + 1])
+        ):
+            table_block = [line, lines[i + 1]]
+            j = i + 2
+            while j < len(lines) and _is_table_row(lines[j]):
+                table_block.append(lines[j])
+                j += 1
+            # Wrap the detected table in code fences
+            out.append('```')
+            out.extend(table_block)
+            out.append('```')
+            i = j
+            continue
+
+        out.append(line)
+        i += 1
+
+    return '\n'.join(out)
+
+
 class VoiceReceiver:
     """Captures and decodes voice audio from a Discord voice channel.
 
@@ -3119,10 +3188,12 @@ class DiscordAdapter(BasePlatformAdapter):
         """
         Format message for Discord.
 
-        Discord uses its own markdown variant.
+        Discord uses its own markdown variant.  In particular, Discord does
+        not render GFM pipe tables — the raw pipe characters display as
+        garbage.  Detected tables are wrapped in triple-backtick code fences
+        so they render as readable monospaced text.
         """
-        # Discord markdown is fairly standard, no special escaping needed
-        return content
+        return _wrap_tables_in_code_fence(content)
 
     async def _run_simple_slash(
         self,
