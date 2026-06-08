@@ -35,6 +35,12 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     "show_reasoning": False,
     "tool_preview_length": 0,
     "streaming": None,  # None = follow top-level streaming config
+    # Rich final reply controls. These are intentionally conservative defaults:
+    # platforms can opt into richer native rendering without changing legacy
+    # delivery behavior for existing users.
+    "final_response_format": "legacy",  # legacy | auto | text | post | card
+    "markdown_tables": "table",  # table | code | text
+    "card_schema": "2.0",
     # Gateway-only assistant/status chatter controls. These default on for
     # back-compat, but mobile platforms can opt down to final-answer-first.
     "interim_assistant_messages": True,
@@ -237,4 +243,13 @@ def _normalise(setting: str, value: Any) -> Any:
             return int(value)
         except (TypeError, ValueError):
             return 0
+    if setting == "final_response_format":
+        normalized = str(value or "legacy").strip().lower()
+        return normalized if normalized in {"legacy", "auto", "text", "post", "card"} else "legacy"
+    if setting == "markdown_tables":
+        normalized = str(value or "table").strip().lower()
+        return normalized if normalized in {"table", "code", "text"} else "table"
+    if setting == "card_schema":
+        normalized = str(value or "2.0").strip()
+        return normalized if normalized == "2.0" else "2.0"
     return value

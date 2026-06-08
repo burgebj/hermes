@@ -4233,8 +4233,9 @@ class BasePlatformAdapter(ABC):
                     if _thread_metadata is not None:
                         _thread_metadata = dict(_thread_metadata)
                         _thread_metadata["notify"] = True
+                        _thread_metadata["hermes_final_response"] = True
                     else:
-                        _thread_metadata = {"notify": True}
+                        _thread_metadata = {"notify": True, "hermes_final_response": True}
                     result = await self._send_with_retry(
                         chat_id=event.source.chat_id,
                         content=text_content,

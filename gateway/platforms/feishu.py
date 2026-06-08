@@ -241,6 +241,7 @@ _FEISHU_REACTION_FAILURE = "CrossMark"
 # delete-failures, not a capacity plan.
 _FEISHU_PROCESSING_REACTION_CACHE_SIZE = 1024
 _FEISHU_MESSAGE_TEXT_CACHE_SIZE = 512       # LRU cap for reply-context message text lookups
+_FEISHU_CARD_FINAL_REPLY_MAX_CHARS = 12_000
 
 # QR onboarding constants
 _ONBOARD_ACCOUNTS_URLS = {
@@ -1633,10 +1634,6 @@ class FeishuAdapter(BasePlatformAdapter):
                 "drive.notice.comment_add_v1",
                 self._on_drive_comment_event,
             )
-            .register_p2_customized_event(
-                "vc.bot.meeting_invited_v1",
-                self._on_meeting_invited_event,
-            )
             .build()
         )
 
@@ -1783,6 +1780,29 @@ class FeishuAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         formatted = self.format_message(content)
+        final_mode = self._resolve_final_response_format(formatted, metadata)
+        if final_mode == "card":
+            return await self._send_final_card_with_fallback(
+                chat_id=chat_id,
+                content=formatted,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        if final_mode == "text":
+            return await self._send_final_text(
+                chat_id=chat_id,
+                content=formatted,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        if final_mode == "post":
+            return await self._send_final_post_or_text_fallback(
+                chat_id=chat_id,
+                content=formatted,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
         last_response = None
 
@@ -2479,16 +2499,6 @@ class FeishuAdapter(BasePlatformAdapter):
             loop,
             handle_drive_comment_event(self._client, data, self_open_id=self._bot_open_id),
         )
-
-    def _on_meeting_invited_event(self, data: Any) -> None:
-        """Handle VC bot meeting invitation notification (vc.bot.meeting_invited_v1)."""
-        from gateway.platforms.feishu_meeting_invite import handle_meeting_invited_event
-
-        loop = self._loop
-        if not self._loop_accepts_callbacks(loop):
-            logger.warning("[Feishu] Dropping meeting invite event before adapter loop is ready")
-            return
-        self._submit_on_loop(loop, handle_meeting_invited_event(self, data))
 
     def _on_reaction_event(self, event_type: str, data: Any) -> None:
         """Route user reactions on bot messages as synthetic text events."""
@@ -3419,8 +3429,6 @@ class FeishuAdapter(BasePlatformAdapter):
             self._on_card_action_trigger(data)
         elif event_type == "drive.notice.comment_add_v1":
             self._on_drive_comment_event(data)
-        elif event_type == "vc.bot.meeting_invited_v1":
-            self._on_meeting_invited_event(data)
         else:
             logger.debug("[Feishu] Ignoring webhook event type: %s", event_type or "unknown")
         return web.json_response({"code": 0, "msg": "ok"})
@@ -4373,6 +4381,137 @@ class FeishuAdapter(BasePlatformAdapter):
     # Outbound payload construction and send pipeline
     # =========================================================================
 
+    def _resolve_final_response_format(self, content: str, metadata: Optional[Dict[str, Any]]) -> str:
+        if not (metadata or {}).get("hermes_final_response"):
+            return "legacy"
+        mode = str(self.config.extra.get("final_response_format", "legacy") or "legacy").strip().lower()
+        if mode not in {"legacy", "auto", "text", "post", "card"}:
+            mode = "legacy"
+        if mode == "auto":
+            if len(content) > _FEISHU_CARD_FINAL_REPLY_MAX_CHARS:
+                return "legacy"
+            return "card" if (_MARKDOWN_TABLE_RE.search(content) or "```" in content) else "legacy"
+        if mode == "card" and len(content) > _FEISHU_CARD_FINAL_REPLY_MAX_CHARS:
+            return "legacy"
+        return mode
+
+    def _resolve_markdown_table_policy(self) -> str:
+        policy = str(self.config.extra.get("markdown_tables", "table") or "table").strip().lower()
+        return policy if policy in {"table", "code", "text"} else "table"
+
+    async def _send_final_text(
+        self,
+        *,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> SendResult:
+        response = await self._feishu_send_with_retry(
+            chat_id=chat_id,
+            msg_type="text",
+            payload=json.dumps({"text": content}, ensure_ascii=False),
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+        return self._finalize_send_result(response, "final text send failed")
+
+    async def _send_final_card_with_fallback(
+        self,
+        *,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> SendResult:
+        from gateway.platforms.feishu_card_renderer import build_feishu_card_v2_payload
+
+        card_payload = build_feishu_card_v2_payload(
+            content,
+            table_policy=self._resolve_markdown_table_policy(),
+        )
+        try:
+            response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type="interactive",
+                payload=card_payload,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            logger.warning("[Feishu] Final card send failed; falling back to post/text: %s", exc)
+            return await self._send_final_post_or_text_fallback(
+                chat_id=chat_id,
+                content=content,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+
+        result = self._finalize_send_result(response, "final card send failed")
+        if result.success:
+            return result
+        logger.warning("[Feishu] Final card rejected by API; falling back to post/text: %s", result.error)
+        return await self._send_final_post_or_text_fallback(
+            chat_id=chat_id,
+            content=content,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+
+    async def _send_final_post_or_text_fallback(
+        self,
+        *,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> SendResult:
+        if _MARKDOWN_TABLE_RE.search(content):
+            text_response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type="text",
+                payload=json.dumps({"text": content}, ensure_ascii=False),
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+            return self._finalize_send_result(text_response, "final text fallback failed")
+
+        post_payload = _build_markdown_post_payload(content)
+        try:
+            post_response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type="post",
+                payload=post_payload,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            if not _POST_CONTENT_INVALID_RE.search(str(exc)):
+                raise
+            logger.warning("[Feishu] Final post fallback failed; falling back to plain text")
+            text_response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type="text",
+                payload=json.dumps({"text": _strip_markdown_to_plain_text(content)}, ensure_ascii=False),
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+            return self._finalize_send_result(text_response, "final text fallback failed")
+
+        post_result = self._finalize_send_result(post_response, "final post fallback failed")
+        if post_result.success or not _POST_CONTENT_INVALID_RE.search(post_result.error or ""):
+            return post_result
+
+        logger.warning("[Feishu] Final post fallback rejected; falling back to plain text")
+        text_response = await self._feishu_send_with_retry(
+            chat_id=chat_id,
+            msg_type="text",
+            payload=json.dumps({"text": _strip_markdown_to_plain_text(content)}, ensure_ascii=False),
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+        return self._finalize_send_result(text_response, "final text fallback failed")
+
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
         # Feishu post-type 'md' elements do not render markdown tables; sending
         # table content as post causes the message to appear blank on the client.
@@ -4485,20 +4624,17 @@ class FeishuAdapter(BasePlatformAdapter):
             )
             request = self._build_create_message_request("thread_id", body)
         else:
-            receive_id = chat_id
-            receive_id_type = "chat_id"
-            if chat_id.startswith("feishu_user_id:"):
-                receive_id = chat_id.split(":", 1)[1]
-                receive_id_type = "user_id"
-            elif chat_id.startswith("ou_"):
-                receive_id_type = "open_id"
-
             body = self._build_create_message_body(
-                receive_id=receive_id,
+                receive_id=chat_id,
                 msg_type=msg_type,
                 content=payload,
                 uuid_value=str(uuid.uuid4()),
             )
+            # Detect whether chat_id is a user open_id (DM) or a chat_id (group).
+            if chat_id.startswith("ou_"):
+                receive_id_type = "open_id"
+            else:
+                receive_id_type = "chat_id"
             request = self._build_create_message_request(receive_id_type, body)
         return await asyncio.to_thread(self._client.im.v1.message.create, request)
 
