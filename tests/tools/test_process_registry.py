@@ -819,6 +819,35 @@ class TestCheckpoint:
             data = json.loads(checkpoint.read_text())
             assert data == []
 
+    def test_recover_handles_non_list_checkpoint(self, registry, tmp_path):
+        """Checkpoint shaped as a JSON object/null must not crash recovery."""
+        checkpoint = tmp_path / "procs.json"
+
+        for payload in ('null', '{}', '{"session_id": "x", "pid": 1}', '"oops"', '42'):
+            checkpoint.write_text(payload)
+            with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+                assert registry.recover_from_checkpoint() == 0
+
+    def test_recover_skips_non_dict_entries(self, registry, tmp_path):
+        """A list with garbage entries must not abort recovery of the good ones."""
+        checkpoint = tmp_path / "procs.json"
+        checkpoint.write_text(json.dumps([
+            None,
+            "garbage",
+            42,
+            {
+                "session_id": "proc_live",
+                "command": "sleep 999",
+                "pid": os.getpid(),
+                "task_id": "t1",
+                "session_key": "sk1",
+            },
+        ]))
+        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+            recovered = registry.recover_from_checkpoint()
+            assert recovered == 1
+            assert registry.get("proc_live") is not None
+
     def test_detached_recovered_process_eventually_exits(self, registry, tmp_path):
         proc = _spawn_python_sleep(0.4)
         checkpoint = tmp_path / "procs.json"

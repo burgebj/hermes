@@ -1418,8 +1418,18 @@ class ProcessRegistry:
         except Exception:
             return 0
 
+        if not isinstance(entries, list):
+            logger.warning(
+                "Checkpoint file %s is not a JSON list (got %s); skipping recovery",
+                CHECKPOINT_PATH,
+                type(entries).__name__,
+            )
+            return 0
+
         recovered = 0
         for entry in entries:
+            if not isinstance(entry, dict):
+                continue
             pid = entry.get("pid")
             if not pid:
                 continue
