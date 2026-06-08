@@ -57,19 +57,29 @@ class TestClarifyPrimitive:
         assert pending.clarify_id == "id2"
 
     def test_button_choice_does_not_auto_await(self):
-        """Multi-choice clarify should NOT be in text-capture mode initially."""
+        """Multi-choice clarify: awaiting_text=False but get_pending_for_session
+        still returns the entry so the gateway text-intercept can handle it
+        on platforms without native button support (Discord, Slack, etc.)."""
         from tools import clarify_gateway as cm
 
         entry = cm.register("id3", "sk3", "Pick", ["X", "Y"])
         assert entry.awaiting_text is False
-        assert cm.get_pending_for_session("sk3") is None
+        # get_pending_for_session now returns ANY pending clarify regardless
+        # of awaiting_text, so text-intercept works on Discord/Slack/WhatsApp.
+        pending = cm.get_pending_for_session("sk3")
+        assert pending is not None
+        assert pending.clarify_id == "id3"
 
     def test_other_button_flips_to_text_mode(self):
-        """mark_awaiting_text makes get_pending_for_session find the entry."""
+        """mark_awaiting_text makes get_pending_for_session ... still works,
+        but now get_pending_for_session also returns entries before marking."""
         from tools import clarify_gateway as cm
 
         cm.register("id4", "sk4", "Pick", ["X", "Y"])
-        assert cm.get_pending_for_session("sk4") is None
+        # Note: with the fix, get_pending_for_session now returns the entry
+        # even before mark_awaiting_text (so text-intercept works on
+        # platforms without button support). The awaiting_text flag still
+        # correctly tracks whether the entry is in text-capture mode.
 
         flipped = cm.mark_awaiting_text("id4")
         assert flipped is True
@@ -183,9 +193,11 @@ class TestGatewayTextIntercept:
     def setup_method(self):
         _clear_clarify_state()
 
-    def test_get_pending_for_session_returns_oldest_text_awaiting(self):
+    def test_get_pending_for_session_returns_oldest_entry(self):
         """When two clarifies are pending, get_pending_for_session returns the
-        first that is awaiting_text (the older one if both)."""
+        oldest entry regardless of awaiting_text state. This ensures the
+        text-intercept works even for choice-based clarifies on platforms
+        without native button support (Discord, Slack, WhatsApp)."""
         from tools import clarify_gateway as cm
 
         # Older multi-choice (not awaiting text)
@@ -194,9 +206,9 @@ class TestGatewayTextIntercept:
         cm.register("second", "sk", "Q2?", None)
 
         pending = cm.get_pending_for_session("sk")
-        # The newer one is awaiting text; the older isn't.
+        # With the fix, returns oldest entry regardless of awaiting_text
         assert pending is not None
-        assert pending.clarify_id == "second"
+        assert pending.clarify_id == "first"
 
         # Now flip the first to text mode too.  Both are awaiting text,
         # FIFO returns the older one.
