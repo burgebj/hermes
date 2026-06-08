@@ -53,6 +53,7 @@ AUTHOR_MAP = {
     "ccook@nvms.com": "ccook1963",
     "thomas.paquette@gmail.com": "RyTsYdUp",
     "266365592+bmoore210@users.noreply.github.com": "bmoore210",
+    "290882307+agentswe@users.noreply.github.com": "agentswe",
     "manishbyatroy@gmail.com": "manishbyatroy",
     "chilltulpa@gmail.com": "TheGardenGallery",
     "al@randomsnowflake.me": "randomsnowflake",
