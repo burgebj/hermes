@@ -1413,6 +1413,7 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             "_anthropic_base_url",
             "_is_anthropic_oauth",
             "_config_context_length",
+            "_bedrock_region",
         )
     }
     # _client_kwargs is a dict — snapshot a shallow copy so mutating the
@@ -1443,7 +1444,28 @@ def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mo
             agent.api_key = api_key
 
         # ── Build new client ──
-        if api_mode == "anthropic_messages":
+        if new_provider == "bedrock" and api_mode in {"anthropic_messages", "bedrock_converse"}:
+            _br_match = re.search(
+                r"bedrock-runtime\.([a-z0-9-]+)\.",
+                (base_url or agent.base_url or ""),
+            )
+            _br_region = _br_match.group(1) if _br_match else "us-east-1"
+            agent._bedrock_region = _br_region
+            agent.api_key = "aws-sdk"
+            agent.client = None
+            agent._client_kwargs = {}
+            if api_mode == "anthropic_messages":
+                from agent.anthropic_adapter import build_anthropic_bedrock_client
+                agent._anthropic_client = build_anthropic_bedrock_client(_br_region)
+                agent._anthropic_api_key = "aws-sdk"
+                agent._anthropic_base_url = base_url or agent.base_url
+                agent._is_anthropic_oauth = False
+            else:
+                agent._anthropic_client = None
+                agent._anthropic_api_key = None
+                agent._anthropic_base_url = None
+                agent._is_anthropic_oauth = False
+        elif api_mode == "anthropic_messages":
             from agent.anthropic_adapter import (
                 build_anthropic_client,
                 resolve_anthropic_token,

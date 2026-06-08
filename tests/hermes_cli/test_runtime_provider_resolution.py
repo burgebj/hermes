@@ -2705,3 +2705,61 @@ def test_host_derived_key_helper_basic_cases():
     for k in ("DEEPSEEK_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY",
               "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         _os.environ.pop(k, None)
+
+
+def test_bedrock_runtime_provider_uses_target_model_for_switch(monkeypatch):
+    """Bedrock /model switches should route from the target model, not stale config."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "bedrock")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {"provider": "openrouter", "default": "openai/gpt-5.5"},
+    )
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {"bedrock": {"region": "ap-northeast-1"}},
+    )
+    monkeypatch.setattr(
+        "agent.bedrock_adapter.resolve_aws_auth_env_var",
+        lambda: "aws-sdk-default-chain",
+    )
+
+    resolved = rp.resolve_runtime_provider(
+        requested="bedrock",
+        target_model="jp.anthropic.claude-opus-4-8",
+    )
+
+    assert resolved["provider"] == "bedrock"
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["bedrock_anthropic"] is True
+    assert resolved["region"] == "ap-northeast-1"
+    assert resolved["base_url"] == "https://bedrock-runtime.ap-northeast-1.amazonaws.com"
+
+
+def test_bedrock_runtime_provider_keeps_converse_for_non_anthropic_target(monkeypatch):
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "bedrock")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {"provider": "anthropic", "default": "anthropic/claude-sonnet-4"},
+    )
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {"bedrock": {"region": "eu-west-1"}},
+    )
+    monkeypatch.setattr(
+        "agent.bedrock_adapter.resolve_aws_auth_env_var",
+        lambda: "aws-sdk-default-chain",
+    )
+
+    resolved = rp.resolve_runtime_provider(
+        requested="bedrock",
+        target_model="amazon.nova-pro-v1:0",
+    )
+
+    assert resolved["provider"] == "bedrock"
+    assert resolved["api_mode"] == "bedrock_converse"
+    assert "bedrock_anthropic" not in resolved
+    assert resolved["region"] == "eu-west-1"
