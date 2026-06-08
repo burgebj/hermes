@@ -262,6 +262,14 @@ if [ -d "$HERMES_HOME/profiles" ]; then
     chown -R hermes:hermes "$HERMES_HOME/profiles" 2>/dev/null || true
 fi
 
+# Reset ownership of cron/ on every boot for the same reason as profiles/
+# above: docker exec commands run as root and leave jobs.json root-owned,
+# which prevents the unprivileged hermes runtime from reading cron state
+# in multi-profile setups (issue #41966).
+if [ -d "$HERMES_HOME/cron" ]; then
+    chown -R hermes:hermes "$HERMES_HOME/cron" 2>/dev/null || true
+fi
+
 # Reset ownership of hermes-owned top-level state files on every boot.
 # The targeted data-volume chown above only covers hermes-owned
 # *subdirectories*; loose state files living directly under $HERMES_HOME
