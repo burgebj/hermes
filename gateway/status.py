@@ -108,17 +108,34 @@ def _get_scope_lock_path(scope: str, identity: str) -> Path:
     return _get_lock_dir() / f"{scope}-{_scope_hash(identity)}.lock"
 
 
-def _get_process_start_time(pid: int) -> Optional[int]:
-    """Return the kernel start time for a process when available."""
+def _get_process_start_time(pid: int) -> Optional[float]:
+    """Return the process start time when available.
+
+    Linux exposes the kernel start tick in ``/proc/<pid>/stat``. macOS does not
+    have ``/proc``, so fall back to psutil's portable ``create_time()``. This is
+    important for scoped gateway locks: PID reuse on macOS can otherwise make a
+    stale Telegram-token lock look live just because a different app reused the
+    old PID.
+    """
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         # Field 22 in /proc/<pid>/stat is process start time (clock ticks).
         return int(stat_path.read_text(encoding="utf-8").split()[21])
     except (FileNotFoundError, IndexError, PermissionError, ValueError, OSError):
+        pass
+
+    try:
+        import psutil  # type: ignore
+    except ImportError:
+        return None
+
+    try:
+        return float(psutil.Process(int(pid)).create_time())
+    except (ValueError, OSError, psutil.Error):
         return None
 
 
-def get_process_start_time(pid: int) -> Optional[int]:
+def get_process_start_time(pid: int) -> Optional[float]:
     """Public wrapper for retrieving a process start time when available."""
     return _get_process_start_time(pid)
 
@@ -701,7 +718,7 @@ def release_scoped_lock(scope: str, identity: str) -> None:
 def release_all_scoped_locks(
     *,
     owner_pid: Optional[int] = None,
-    owner_start_time: Optional[int] = None,
+    owner_start_time: Optional[float] = None,
 ) -> int:
     """Remove scoped lock files in the lock directory.
 

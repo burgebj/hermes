@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,22 @@ from gateway import status
 
 
 class TestGatewayPidState:
+    def test_get_process_start_time_uses_psutil_when_proc_unavailable(self, monkeypatch):
+        """macOS has no /proc; use psutil so PID-reuse checks still work."""
+
+        class FakeProcess:
+            def __init__(self, pid):
+                self.pid = pid
+
+            def create_time(self):
+                return 1234.5
+
+        monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(Process=FakeProcess))
+
+        # Pick a PID that will not have a /proc entry even on Linux test hosts,
+        # forcing the portable psutil fallback path.
+        assert status._get_process_start_time(987654321) == 1234.5
+
     def test_write_pid_file_records_gateway_metadata(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
@@ -547,6 +564,33 @@ class TestScopedLocks:
         acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
 
         assert acquired is True
+        payload = json.loads(lock_path.read_text())
+        assert payload["pid"] == os.getpid()
+        assert payload["metadata"]["platform"] == "telegram"
+
+    def test_acquire_scoped_lock_replaces_reused_pid_record(self, tmp_path, monkeypatch):
+        """A live but different process reusing a stale PID must not own the lock."""
+
+        monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
+        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "pid": 99999,
+            "start_time": 123,
+            "kind": "hermes-gateway",
+        }))
+
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 456)
+
+        acquired, existing = status.acquire_scoped_lock(
+            "telegram-bot-token",
+            "secret",
+            metadata={"platform": "telegram"},
+        )
+
+        assert acquired is True
+        assert existing is None
         payload = json.loads(lock_path.read_text())
         assert payload["pid"] == os.getpid()
         assert payload["metadata"]["platform"] == "telegram"
