@@ -114,6 +114,14 @@ class TestCommandTimeoutCache:
             _get_command_timeout()
         mock_read.assert_called_once()
 
+    def test_returns_default_when_cleanup_race_clears_cached_value(self):
+        import tools.browser_tool as bt
+
+        bt._cached_command_timeout = None
+        bt._command_timeout_resolved = True
+
+        assert bt._get_command_timeout() == bt.DEFAULT_COMMAND_TIMEOUT
+
 
 # ---------------------------------------------------------------------------
 # Caching: _discover_homebrew_node_dirs
