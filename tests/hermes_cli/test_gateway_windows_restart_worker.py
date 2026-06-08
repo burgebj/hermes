@@ -1078,6 +1078,7 @@ class TestTransactionIsolation:
                 old_pid=1234,
                 origin="test",
                 task_name="Hermes_Gateway",
+                task_registered=False,
             )
 
     def test_concurrent_only_one_worker(self, worker_env, monkeypatch):
@@ -1696,7 +1697,7 @@ class TestSchtasksFailClosed:
         )
 
         with pytest.raises(RuntimeError, match="schtasks /Run succeeded|no launch evidence|Direct spawn failed"):
-            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway")
+            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway", task_registered=True)
 
     def test_dual_gateway_detected(self, worker_env, monkeypatch):
         """P1-1: Two gateways running simultaneously → detection fails."""
@@ -1754,7 +1755,7 @@ class TestSchtasksFailClosedStrict:
         )
 
         with pytest.raises(RuntimeError, match="schtasks /Run succeeded"):
-            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway")
+            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway", task_registered=True)
 
         direct_spawn_mock.assert_not_called()
 
@@ -2115,7 +2116,7 @@ class TestSchtasksFailClosedStrict:
         monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._direct_spawn_gateway", direct_spawn_mock)
 
         with pytest.raises(RuntimeError, match="124|Will NOT direct-spawn"):
-            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway")
+            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway", task_registered=True)
         direct_spawn_mock.assert_not_called()
 
     def test_schtasks_exception_no_direct_spawn(self, worker_env, monkeypatch):
@@ -2137,7 +2138,7 @@ class TestSchtasksFailClosedStrict:
         monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._direct_spawn_gateway", direct_spawn_mock)
 
         with pytest.raises(RuntimeError, match="exception|Will NOT direct-spawn"):
-            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway")
+            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway", task_registered=True)
         direct_spawn_mock.assert_not_called()
 
     def test_schtasks_ambiguous_nonzero_fails_closed(self, worker_env, monkeypatch):
@@ -2159,7 +2160,7 @@ class TestSchtasksFailClosedStrict:
         monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._direct_spawn_gateway", direct_spawn_mock)
 
         with pytest.raises(RuntimeError, match="Will NOT direct-spawn"):
-            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway")
+            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway", task_registered=True)
         direct_spawn_mock.assert_not_called()
 
 
@@ -2385,65 +2386,161 @@ class TestTaskStateConvergence:
 # ---------------------------------------------------------------------------
 
 class TestTriStateProbe:
-    """Tests for _probe_task_registration — tri-state task existence probe."""
+    """Tests for _probe_task_registration — COM API tri-state probe.
 
-    def test_probe_registered_returns_true(self, worker_env, monkeypatch):
-        """Task registered + COM queryable → True."""
+    Uses subprocess.run mock to control PowerShell COM output.
+    """
+
+    def _make_subprocess_result(self, stdout="", returncode=0):
+        """Create a mock subprocess.CompletedProcess."""
+        result = MagicMock()
+        result.stdout = stdout
+        result.returncode = returncode
+        return result
+
+    def test_com_gettask_exists_returns_true(self, worker_env, monkeypatch):
+        """COM GetTask succeeds → probe=True."""
         import hermes_cli.gateway_windows_restart_worker as mod
+        import subprocess
 
-        monkeypatch.setattr(
-            "hermes_cli.gateway_windows.is_task_registered", lambda: True,
-        )
-        monkeypatch.setattr(mod, "_query_task_state_com", lambda name: 3)
+        mock_result = self._make_subprocess_result(stdout="EXISTS")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock_result)
 
         assert mod._probe_task_registration("Hermes_Gateway") is True
 
-    def test_probe_not_registered_returns_false(self, worker_env, monkeypatch):
-        """schtasks /Query fails → False."""
+    def test_com_file_not_found_returns_false(self, worker_env, monkeypatch):
+        """COM GetTask returns FILE_NOT_FOUND HRESULT (0x80070002) → probe=False."""
         import hermes_cli.gateway_windows_restart_worker as mod
+        import subprocess
 
-        monkeypatch.setattr(
-            "hermes_cli.gateway_windows.is_task_registered", lambda: False,
+        mock_result = self._make_subprocess_result(
+            stdout="HRESULT:-2147024894"  # 0x80070002 as signed int
         )
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock_result)
 
         assert mod._probe_task_registration("Hermes_Gateway") is False
 
-    def test_probe_schtasks_says_yes_com_fails_returns_none(self, worker_env, monkeypatch):
-        """schtasks says yes but COM returns -1 → None (ambiguous)."""
+    def test_com_path_not_found_returns_false(self, worker_env, monkeypatch):
+        """COM GetTask returns PATH_NOT_FOUND HRESULT (0x80070003) → probe=False."""
         import hermes_cli.gateway_windows_restart_worker as mod
+        import subprocess
+
+        mock_result = self._make_subprocess_result(
+            stdout="HRESULT:-2147024893"  # 0x80070003 as signed int
+        )
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock_result)
+
+        assert mod._probe_task_registration("Hermes_Gateway") is False
+
+    def test_com_timeout_returns_none(self, worker_env, monkeypatch):
+        """PowerShell timeout → probe=None (ambiguous)."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        import subprocess
 
         monkeypatch.setattr(
-            "hermes_cli.gateway_windows.is_task_registered", lambda: True,
+            subprocess, "run",
+            MagicMock(side_effect=subprocess.TimeoutExpired("powershell", 10)),
         )
-        monkeypatch.setattr(mod, "_query_task_state_com", lambda name: -1)
 
         assert mod._probe_task_registration("Hermes_Gateway") is None
 
-    def test_probe_schtasks_exception_returns_none(self, worker_env, monkeypatch):
-        """is_task_registered raises → None (ambiguous)."""
+    def test_com_access_denied_returns_none(self, worker_env, monkeypatch):
+        """COM returns E_ACCESSDENIED HRESULT → probe=None (ambiguous)."""
         import hermes_cli.gateway_windows_restart_worker as mod
+        import subprocess
 
-        def boom():
-            raise OSError("schtasks not found")
+        mock_result = self._make_subprocess_result(
+            stdout="HRESULT:-2147024891"  # 0x80070005 as signed int
+        )
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock_result)
+
+        assert mod._probe_task_registration("Hermes_Gateway") is None
+
+    def test_com_unknown_hresult_returns_none(self, worker_env, monkeypatch):
+        """COM returns unknown HRESULT → probe=None (ambiguous)."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        import subprocess
+
+        mock_result = self._make_subprocess_result(
+            stdout="HRESULT:-2147221164"  # 0x80040154 (class not registered)
+        )
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock_result)
+
+        assert mod._probe_task_registration("Hermes_Gateway") is None
+
+    def test_powershell_nonzero_exit_returns_none(self, worker_env, monkeypatch):
+        """PowerShell exits non-zero → probe=None."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        import subprocess
+
+        mock_result = self._make_subprocess_result(stdout="", returncode=1)
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock_result)
+
+        assert mod._probe_task_registration("Hermes_Gateway") is None
+
+    def test_powershell_empty_output_returns_none(self, worker_env, monkeypatch):
+        """PowerShell returns empty output → probe=None."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        import subprocess
+
+        mock_result = self._make_subprocess_result(stdout="", returncode=0)
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock_result)
+
+        assert mod._probe_task_registration("Hermes_Gateway") is None
+
+    def test_unexpected_output_returns_none(self, worker_env, monkeypatch):
+        """Unexpected PowerShell output → probe=None."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        import subprocess
+
+        mock_result = self._make_subprocess_result(stdout="GARBAGE")
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock_result)
+
+        assert mod._probe_task_registration("Hermes_Gateway") is None
+
+    def test_oserror_returns_none(self, worker_env, monkeypatch):
+        """OSError (e.g., powershell not found) → probe=None."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        import subprocess
 
         monkeypatch.setattr(
-            "hermes_cli.gateway_windows.is_task_registered", boom,
+            subprocess, "run",
+            MagicMock(side_effect=OSError("powershell not found")),
         )
 
         assert mod._probe_task_registration("Hermes_Gateway") is None
 
-    def test_probe_com_any_valid_state_returns_true(self, worker_env, monkeypatch):
-        """Any COM state 0-4 (including UNKNOWN=0) → True (task exists)."""
-        import hermes_cli.gateway_windows_restart_worker as mod
 
-        monkeypatch.setattr(
-            "hermes_cli.gateway_windows.is_task_registered", lambda: True,
-        )
-        for state in (0, 1, 2, 3, 4):
-            monkeypatch.setattr(mod, "_query_task_state_com", lambda name, s=state: s)
-            assert mod._probe_task_registration("Hermes_Gateway") is True, (
-                f"state={state} should return True"
+class TestStartGatewayFailClosed:
+    """Tests for _start_new_gateway fail-closed on task_registered=None."""
+
+    def test_none_raises_no_run_no_spawn(self, worker_env, monkeypatch):
+        """task_registered=None → raise, no /Run, no direct spawn."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        from hermes_cli.gateway_restart_state import append_restart_log
+
+        schtasks_called = {"v": False}
+        spawn_called = {"v": False}
+
+        def mock_schtasks(*a, **kw):
+            schtasks_called["v"] = True
+            return (0, "", "")
+
+        def mock_spawn():
+            spawn_called["v"] = True
+            return 9999
+
+        monkeypatch.setattr("hermes_cli.gateway_windows._exec_schtasks", mock_schtasks)
+        monkeypatch.setattr(mod, "_direct_spawn_gateway", mock_spawn)
+
+        with pytest.raises(RuntimeError, match="ambiguous"):
+            mod._start_new_gateway(
+                "default", "req-test", 100, "test", "Hermes_Gateway",
+                task_registered=None,
             )
+
+        assert not schtasks_called["v"], "schtasks /Run should NOT be called"
+        assert not spawn_called["v"], "direct spawn should NOT be called"
 
 
 class TestIntegratedControlFlow:
@@ -2605,16 +2702,13 @@ class TestIntegratedControlFlow:
         lock = RestartLock("default")
         assert lock.try_acquire(rid) is True
 
-        com_called = {"v": False}
+        probe_called = {"v": False}
 
-        def mock_com(name):
-            com_called["v"] = True
-            return -1
+        def mock_probe(name):
+            probe_called["v"] = True
+            return False  # Task not registered → direct spawn allowed
 
-        monkeypatch.setattr(mod, "_query_task_state_com", mock_com)
-        monkeypatch.setattr(
-            "hermes_cli.gateway_windows.is_task_registered", lambda: False,
-        )
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._probe_task_registration", mock_probe)
         monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_handoff", lambda *a, **kw: True)
         monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
         monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._drain_and_stop", lambda *a, **kw: None)
@@ -2626,9 +2720,6 @@ class TestIntegratedControlFlow:
 
         mod._run_restart_transaction(disk_intent, "default", rid, nonce, 100, "test",
                                      str(worker_env), "Hermes_Gateway")
-
-        # COM should NOT be called because is_task_registered returned False
-        assert not com_called["v"], "_query_task_state_com should not be called for unregistered task"
 
     def test_early_pid_exit_still_waits_ready(self, worker_env, monkeypatch):
         """Old PID exits during drain → still waits for Task READY before /Run."""

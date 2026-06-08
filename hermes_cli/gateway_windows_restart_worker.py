@@ -573,25 +573,58 @@ _TASK_STATE_NAMES = {
 def _probe_task_registration(task_name: str) -> bool | None:
     """Tri-state probe: is the Scheduled Task registered?
 
+    Uses Task Scheduler COM API directly.  Does NOT rely on schtasks.exe
+    exit codes (which conflate "not found" with "timeout"/"access denied").
+
     Returns:
-        True  = Scheduled Task confirmed registered (COM state queryable)
-        False = Scheduled Task confirmed NOT registered
+        True  = task definitely exists (GetTask succeeds, state queryable)
+        False = task definitely does not exist (FILE_NOT_FOUND HRESULT)
         None  = query failed / ambiguous — caller must fail closed
     """
-    # Step 1: schtasks /Query (binary: exists or not)
+    import subprocess
     try:
-        from hermes_cli.gateway_windows import is_task_registered
-        if not is_task_registered():
-            return False    # Definitely not installed
-    except Exception:
-        return None         # Cannot determine
+        # GetTask throws for non-existent tasks; catch the HRESULT.
+        # 0x80070002 = HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)
+        # 0x80070003 = HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND)
+        ps_cmd = (
+            f'try {{ '
+            f'$svc = New-Object -ComObject "Schedule.Service"; '
+            f'$svc.Connect(); '
+            f'$null = $svc.GetFolder("\\").GetTask("\\{task_name}"); '
+            f'"EXISTS" '
+            f'}} catch {{ '
+            f'$hr = [System.Runtime.InteropServices.Marshal]::GetHRForException($_.Exception); '
+            f'"HRESULT:$hr" '
+            f'}}'
+        )
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=10,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        )
+        output = (proc.stdout or "").strip()
 
-    # Step 2: COM query to confirm (and distinguish from schtasks false positive)
-    state = _query_task_state_com(task_name)
-    if state >= 0:
-        return True         # COM can query → task exists
-    # schtasks says yes but COM fails — ambiguous
-    return None
+        if proc.returncode != 0 or not output:
+            return None         # PowerShell itself failed
+
+        if output == "EXISTS":
+            return True         # GetTask succeeded → task exists
+
+        if output.startswith("HRESULT:"):
+            try:
+                hr = int(output.split(":")[1]) & 0xFFFFFFFF  # signed → unsigned
+                # FILE_NOT_FOUND / PATH_NOT_FOUND → definitely absent
+                if hr in (0x80070002, 0x80070003):
+                    return False
+            except (ValueError, IndexError):
+                pass
+            return None         # Other HRESULT → ambiguous
+
+        return None             # Unexpected output → ambiguous
+    except subprocess.TimeoutExpired:
+        return None             # Timeout → ambiguous
+    except Exception:
+        return None             # Any exception → ambiguous
 
 
 def _query_task_state_com(task_name: str) -> int:
@@ -705,14 +738,12 @@ def _start_new_gateway(
     """
     from hermes_cli.gateway_restart_state import append_restart_log, write_status
 
-    # Determine from shared probe result (no second query)
+    # Fail closed: caller must provide registration state from shared probe
     if task_registered is None:
-        # Fallback: re-probe only if caller didn't provide one (legacy code path)
-        task_registered = False
-        try:
-            task_registered = _probe_task_registration(task_name or "") is True
-        except Exception:
-            task_registered = False
+        raise RuntimeError(
+            "Scheduled Task registration state is ambiguous; "
+            "refusing /Run and direct spawn"
+        )
 
     if task_registered:
         write_status(profile, "starting_task", request_id=request_id)
