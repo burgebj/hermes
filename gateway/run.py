@@ -3521,6 +3521,38 @@ class GatewayRunner:
         is_queue_mode = effective_mode == "queue"
         is_steer_mode = effective_mode == "steer"
 
+        # Before interrupting, check for a pending clarify request.
+        # If the user is replying to a clarify, route the message there
+        # instead of killing the current turn.  This mirrors the clarify
+        # interception in _handle_message (~L5837-5860) that is never
+        # reached for busy sessions because this handler intercepts first.
+        if effective_mode == "interrupt":
+            try:
+                from tools import clarify_gateway as _clarify_mod
+                _pending_clarify = _clarify_mod.get_pending_for_session(session_key)
+            except Exception:
+                _pending_clarify = None
+            if _pending_clarify is not None:
+                _raw_clarify_reply = (event.text or "").strip()
+                # Skip slash commands — the user clearly wanted to issue a
+                # command, not answer the clarify.
+                if _raw_clarify_reply and not _raw_clarify_reply.startswith("/"):
+                    try:
+                        _resolved = _clarify_mod.resolve_gateway_clarify(
+                            _pending_clarify.clarify_id, _raw_clarify_reply,
+                        )
+                    except Exception:
+                        _resolved = False
+                    if _resolved:
+                        logger.info(
+                            "Clarify text response intercepted in busy handler "
+                            "(session=%s, id=%s)",
+                            session_key, _pending_clarify.clarify_id,
+                        )
+                        # Consume without interrupt — the agent thread
+                        # will unblock and produce the next response.
+                        return True
+
         # If not in queue/steer mode, interrupt the running agent immediately.
         # This aborts in-flight tool calls and causes the agent loop to exit
         # at the next check point.
