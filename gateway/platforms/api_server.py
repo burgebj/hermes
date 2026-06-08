@@ -3951,16 +3951,20 @@ class APIServerAdapter(BasePlatformAdapter):
         await response.prepare(request)
 
         try:
+            last_activity = time.monotonic()
             while True:
                 try:
-                    event = await asyncio.wait_for(q.get(), timeout=30.0)
+                    event = await asyncio.wait_for(q.get(), timeout=0.5)
                 except asyncio.TimeoutError:
-                    await response.write(b": keepalive\n\n")
+                    if time.monotonic() - last_activity >= CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS:
+                        await response.write(b": keepalive\n\n")
+                        last_activity = time.monotonic()
                     continue
                 if event is None:
                     # Run finished — send final SSE comment and close
                     await response.write(b": stream closed\n\n")
                     break
+                last_activity = time.monotonic()
                 payload = f"data: {json.dumps(event)}\n\n"
                 await response.write(payload.encode())
         except Exception as exc:
