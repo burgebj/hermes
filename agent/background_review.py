@@ -328,6 +328,7 @@ def _run_review_in_thread(
     agent: Any,
     messages_snapshot: List[Dict],
     prompt: str,
+    baseline_snapshot: Optional[List[Dict]] = None,
 ) -> None:
     """Worker function executed in the background-review daemon thread.
 
@@ -515,13 +516,16 @@ def _run_review_in_thread(
 
         # Scan the review agent's messages for successful tool actions
         # and surface a compact summary to the user. Tool messages
-        # already present in messages_snapshot must be skipped, since
+        # already present in the inherited context must be skipped, since
         # the review agent inherits that history and would otherwise
         # re-surface stale "created"/"updated" messages from the prior
-        # conversation as if they just happened (issue #14944).
+        # conversation as if they just happened (issue #14944).  Use the
+        # wider baseline when available: context compression can rewrite the
+        # final post-turn snapshot, but the original pre-turn history still
+        # knows which tool results were old (issue #8775).
         actions = summarize_background_review_actions(
             review_messages,
-            messages_snapshot,
+            baseline_snapshot if baseline_snapshot is not None else messages_snapshot,
         )
 
         if actions:
@@ -575,6 +579,7 @@ def spawn_background_review_thread(
     messages_snapshot: List[Dict],
     review_memory: bool = False,
     review_skills: bool = False,
+    baseline_snapshot: Optional[List[Dict]] = None,
 ):
     """Build the review thread target and prompt for a background review.
 
@@ -593,7 +598,7 @@ def spawn_background_review_thread(
         prompt = getattr(agent, "_SKILL_REVIEW_PROMPT", _SKILL_REVIEW_PROMPT)
 
     def _target() -> None:
-        _run_review_in_thread(agent, messages_snapshot, prompt)
+        _run_review_in_thread(agent, messages_snapshot, prompt, baseline_snapshot)
 
     return _target, prompt
 

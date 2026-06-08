@@ -148,6 +148,63 @@ def test_background_review_summarizer_receives_captured_messages_after_close(mon
     assert captured["prior_snapshot"] == messages_snapshot
 
 
+def test_background_review_uses_pre_compression_baseline(monkeypatch):
+    """Old tool results must stay filtered after context compression.
+
+    Compression can rewrite the post-turn snapshot so it no longer contains an
+    older tool result.  The review fork may still surface that result from its
+    inherited state, so the summary filter needs the pre-turn baseline too.
+    """
+    import json
+
+    old_tool_message = {
+        "role": "tool",
+        "tool_call_id": "call_old",
+        "content": json.dumps(
+            {"success": True, "message": "Cron job 'remind-me' created."}
+        ),
+    }
+    delivered: list[str] = []
+
+    class FakeReviewAgent:
+        def __init__(self, **kwargs):
+            self._session_messages = []
+
+        def run_conversation(self, **kwargs):
+            self._session_messages = [old_tool_message]
+
+        def shutdown_memory_provider(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(run_agent_module, "AIAgent", FakeReviewAgent)
+    monkeypatch.setattr(run_agent_module.threading, "Thread", ImmediateThread)
+
+    agent = _bare_agent()
+    agent.background_review_callback = delivered.append
+
+    compressed_snapshot = [
+        {"role": "user", "content": "[CONTEXT COMPACTION] Summary..."},
+        {"role": "assistant", "content": "Current answer"},
+    ]
+    pre_compression_baseline = [
+        {"role": "user", "content": "create a reminder"},
+        old_tool_message,
+        {"role": "assistant", "content": "Done"},
+    ]
+
+    AIAgent._spawn_background_review(
+        agent,
+        messages_snapshot=compressed_snapshot,
+        baseline_snapshot=pre_compression_baseline + compressed_snapshot,
+        review_memory=True,
+    )
+
+    assert delivered == []
+
+
 def test_background_review_installs_auto_deny_approval_callback(monkeypatch):
     """Regression guard for #15216.
 
