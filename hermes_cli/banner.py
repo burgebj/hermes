@@ -225,25 +225,6 @@ def check_for_updates() -> Optional[int]:
     cache_file = hermes_home / ".update_check"
     embedded_rev = os.environ.get("HERMES_REVISION") or None
 
-    # Docker images have no working tree to count commits against — the
-    # published image excludes `.git` (see .dockerignore) and sets no
-    # HERMES_REVISION (that's nix-only). Without this guard the checks below
-    # fall through to `check_via_pypi()`, whose PyPI-version mismatch flag (1)
-    # then gets rendered by the CLI banner and the TUI badge as a phantom
-    # "1 commit behind" — even though no git repo or commit math is involved,
-    # and `hermes update` correctly refuses to run in-place inside the
-    # container anyway. The dashboard's REST `/api/hermes/update/check`
-    # endpoint already short-circuits docker the same way (web_server.py);
-    # mirror that here so the banner/TUI surfaces agree. Returning None makes
-    # both the Rich banner (build_welcome_banner) and the Ink badge
-    # (branding.tsx, guarded on `typeof === 'number' && > 0`) show nothing.
-    try:
-        from hermes_cli.config import detect_install_method
-        if detect_install_method() == "docker":
-            return None
-    except Exception:
-        pass
-
     # Read cache — invalidate if the embedded rev OR installed version has
     # changed since the last check. The version guard matters for pip installs:
     # `check_via_pypi()` compares against VERSION, so a `pip install --upgrade`
@@ -661,16 +642,32 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
     skills_by_category = get_available_skills()
     total_skills = sum(len(s) for s in skills_by_category.values())
 
+    # Dynamically size skills display based on terminal width.
+    # Rich grid with 2 columns; right column gets roughly 60% of terminal.
+    _term_cols = shutil.get_terminal_size().columns
+    _right_col_width = max(int(_term_cols * 0.6) - 10, 30)
+
     if skills_by_category:
         for category in sorted(skills_by_category.keys()):
             skill_names = sorted(skills_by_category[category])
-            if len(skill_names) > 8:
-                display_names = skill_names[:8]
-                skills_str = ", ".join(display_names) + f" +{len(skill_names) - 8} more"
-            else:
-                skills_str = ", ".join(skill_names)
-            if len(skills_str) > 50:
-                skills_str = skills_str[:47] + "..."
+            # Account for "category: " prefix
+            _prefix_len = len(category) + 2
+            _avail = max(_right_col_width - _prefix_len, 20)
+            # Accumulate skills until we run out of space
+            parts, length = [], 0
+            for i, name in enumerate(skill_names):
+                _sep = ", " if parts else ""
+                _needed = len(_sep) + len(name)
+                # Estimate indicator size IF we were to add this skill then stop
+                _after = len(skill_names) - (i + 1)  # remaining after adding this
+                _ind_len = len(f", +{_after} more") if _after > 0 else 0
+                if parts and length + _needed + _ind_len > _avail:
+                    remaining = len(skill_names) - len(parts)
+                    parts.append(f"+{remaining} more")
+                    break
+                parts.append(name)
+                length += _needed
+            skills_str = ", ".join(parts)
             right_lines.append(f"[dim {dim}]{category}:[/] [{text}]{skills_str}[/]")
     else:
         right_lines.append(f"[dim {dim}]No skills installed[/]")
