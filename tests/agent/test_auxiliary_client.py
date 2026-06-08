@@ -641,6 +641,42 @@ class TestResolveProviderClientUniversalModelFallback:
         mock_read_main.assert_not_called()
         assert mock_build.call_args.args[0] == "grok-4.20-multi-agent"
 
+    def test_auto_resolution_uses_resolved_model_not_config_fallback(self):
+        """Regression: auto aux routing must not overwrite the resolved
+        runtime model with config.model.default.
+
+        Cron and fallback sessions can run with provider=openai-codex and a
+        live runtime model such as gpt-5.5 while config.yaml still names the
+        normal Anthropic chat model.  Compression previously resolved the
+        Codex client correctly, then replaced its resolved model with the
+        configured Anthropic model, causing a ChatGPT-account 400.
+        """
+        from agent.auxiliary_client import resolve_provider_client
+
+        codex_client = MagicMock(name="codex-client")
+        with (
+            patch("agent.auxiliary_client._read_main_provider", return_value="anthropic"),
+            patch("agent.auxiliary_client._read_main_model", return_value="claude-opus-4-8"),
+            patch("agent.auxiliary_client.resolve_provider_client") as mock_resolve,
+        ):
+            mock_resolve.side_effect = [
+                (codex_client, "gpt-5.5"),
+            ]
+            client, model = resolve_provider_client(
+                "auto",
+                model=None,  # type: ignore[arg-type]  # None means "auto-resolve"
+                main_runtime={
+                    "provider": "openai-codex",
+                    "model": "gpt-5.5",
+                    "base_url": "https://chatgpt.com/backend-api/codex",
+                    "api_key": "token",
+                    "api_mode": "codex_responses",
+                },
+            )
+
+        assert client is codex_client
+        assert model == "gpt-5.5"
+
 
 class TestExpiredCodexFallback:
     """Test that expired Codex tokens don't block the auto chain."""

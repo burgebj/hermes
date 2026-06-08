@@ -3390,7 +3390,13 @@ def resolve_provider_client(
     # main_model also empty), the branches still hit their own
     # missing-credentials returns and ``_resolve_auto`` falls through to
     # the Step-2 chain as before.
-    if not model:
+    # Do not apply the generic config.model fallback before the auto branch.
+    # _resolve_auto() already has the live main_runtime and returns the model
+    # paired with the provider it actually selected.  If we pre-fill from
+    # config.yaml here, a fallback/Codex session can resolve the Codex client
+    # correctly, then overwrite its resolved model with the normal Anthropic
+    # config model and fail at request time.
+    if not model and provider != "auto":
         model = _get_aux_model_for_provider(provider) or _read_main_model() or model
 
     def _needs_codex_wrap(client_obj, base_url_str: str, model_str: str) -> bool:
