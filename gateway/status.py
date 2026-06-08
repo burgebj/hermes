@@ -818,6 +818,24 @@ def _consume_pid_marker_for_self(
             pass
         return False
 
+    # Cross-profile guard (#29092): reject markers written by a gateway
+    # running under a different HERMES_HOME.  Without this, two profile
+    # services on the same host share a PID namespace; a --replace from
+    # profile B can land in profile A's marker file (same path resolved
+    # via the shared default ~/.hermes), match on PID + start_time by
+    # coincidence, and cause profile A to exit 0 — triggering an infinite
+    # systemd restart flap loop between the two services.
+    #
+    # The field is absent in markers written by older Hermes versions.
+    # We treat absent as "same home" so old markers are not broken.
+    replacer_home = record.get("replacer_hermes_home")
+    if replacer_home is not None:
+        our_home = str(get_hermes_home())
+        if replacer_home != our_home:
+            # This marker was written by a gateway in a different profile.
+            # Leave it in place so the correct profile can consume it.
+            return False
+
     our_pid = os.getpid()
     our_start_time = _get_process_start_time(our_pid)
     # Start-time is a PID-reuse guard. It is only meaningful when both
@@ -854,6 +872,15 @@ def write_takeover_marker(target_pid: int) -> bool:
     target exits cannot later match the marker. Also records the
     replacer's PID and a UTC timestamp for TTL-based staleness checks.
 
+    The marker now also records the replacer's ``hermes_home`` path.
+    ``consume_takeover_marker_for_self`` rejects markers written from a
+    different HERMES_HOME, closing the cross-profile flap loop (#29092):
+    when two profile gateway services share the same host and one sends
+    --replace, the target in the *other* profile used to see its own PID
+    in the marker (same PID namespace, different HERMES_HOME), treat the
+    SIGTERM as a planned takeover, and exit 0 — only to be revived by
+    systemd Restart=always, which then raced the replacer again and again.
+
     Returns True on successful write, False on any failure. The caller
     should proceed with the SIGTERM even if the write fails (the marker
     is a best-effort signal, not a correctness requirement).
@@ -864,6 +891,7 @@ def write_takeover_marker(target_pid: int) -> bool:
             "target_pid": target_pid,
             "target_start_time": target_start_time,
             "replacer_pid": os.getpid(),
+            "replacer_hermes_home": str(get_hermes_home()),
             "written_at": _utc_now_iso(),
         }
         _write_json_file(_get_takeover_marker_path(), record)
