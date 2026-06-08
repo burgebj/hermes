@@ -197,7 +197,48 @@ async def _async_call_service(
             resp.raise_for_status()
             result = await resp.json()
 
-    return _parse_service_response(domain, service, result)
+    parsed = _parse_service_response(domain, service, result)
+
+    # Verify: fetch current state of the entity after the service call.
+    # The HA API returns success even for non-existent entities, so checking
+    # the actual state is the only reliable way to confirm the action worked.
+    if entity_id:
+        try:
+            async with aiohttp.ClientSession() as verify_session:
+                async with verify_session.get(
+                    f"{hass_url}/api/states/{entity_id}",
+                    headers=_get_headers(hass_token),
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as verify_resp:
+                    if verify_resp.status == 200:
+                        state_data = await verify_resp.json()
+                        parsed["current_state"] = state_data.get("state", "unknown")
+                        attrs = state_data.get("attributes", {})
+                        if "friendly_name" in attrs:
+                            parsed["friendly_name"] = attrs["friendly_name"]
+                        # Include domain-relevant attributes for richer feedback
+                        for key in (
+                            "brightness", "color_temp_kelvin", "rgb_color",
+                            "temperature", "hvac_action", "current_temperature",
+                            "media_title", "media_artist", "volume_level",
+                            "current_position", "is_locked", "battery_level",
+                            "speed", "percentage",
+                        ):
+                            if key in attrs:
+                                parsed[key] = attrs[key]
+                    elif verify_resp.status == 404:
+                        parsed["success"] = False
+                        parsed["error"] = (
+                            f"Entity '{entity_id}' does not exist in Home "
+                            f"Assistant. Use ha_list_entities to find valid "
+                            f"entity IDs."
+                        )
+                    else:
+                        parsed["current_state"] = "unknown (could not verify)"
+        except Exception:
+            parsed["current_state"] = "unknown (verification failed)"
+
+    return parsed
 
 
 # ---------------------------------------------------------------------------
