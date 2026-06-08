@@ -31,6 +31,7 @@ def make_adapter_skeleton(
     *,
     bot_open_id: str = "ou_me",
     bot_user_id: str = "",
+    dm_policy: str = "open",
     allow_bots: str = "none",
     require_mention: bool = True,
     group_policy: str = "allowlist",
@@ -47,6 +48,7 @@ def make_adapter_skeleton(
     adapter._group_policy = group_policy
     adapter._default_group_policy = group_policy
     adapter._allowed_group_users = frozenset()
+    adapter._dm_policy = dm_policy
     adapter._allow_bots = allow_bots
     adapter._require_mention = require_mention
     return adapter

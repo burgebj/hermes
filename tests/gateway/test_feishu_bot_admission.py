@@ -49,6 +49,45 @@ def test_feishu_load_settings_allow_bots_defaults_to_none(monkeypatch):
     assert settings.allow_bots == "none"
 
 
+@pytest.mark.parametrize(
+    "env_value, expected",
+    [
+        (None, "open"),
+        ("open", "open"),
+        ("disabled", "disabled"),
+        ("  DISABLED  ", "disabled"),
+    ],
+)
+def test_feishu_load_settings_dm_policy(monkeypatch, env_value, expected):
+    from gateway.platforms.feishu import FeishuAdapter
+
+    monkeypatch.setenv("FEISHU_APP_ID", "cli_test")
+    monkeypatch.setenv("FEISHU_APP_SECRET", "secret_test")
+    if env_value is None:
+        monkeypatch.delenv("FEISHU_DM_POLICY", raising=False)
+    else:
+        monkeypatch.setenv("FEISHU_DM_POLICY", env_value)
+
+    settings = FeishuAdapter._load_settings(extra={})
+    assert settings.dm_policy == expected
+
+
+def test_feishu_load_settings_warns_on_unknown_dm_policy(monkeypatch, caplog):
+    import logging
+
+    from gateway.platforms.feishu import FeishuAdapter
+
+    monkeypatch.setenv("FEISHU_APP_ID", "cli_test")
+    monkeypatch.setenv("FEISHU_APP_SECRET", "secret_test")
+    monkeypatch.setenv("FEISHU_DM_POLICY", "closed")
+
+    with caplog.at_level(logging.WARNING, logger="gateway.platforms.feishu"):
+        settings = FeishuAdapter._load_settings(extra={})
+
+    assert settings.dm_policy == "open"
+    assert any("dm_policy" in r.message and "closed" in r.message for r in caplog.records)
+
+
 def test_feishu_load_settings_ignores_extra_allow_bots(monkeypatch):
     # extra is ignored — env is single source of truth (yaml is bridged to env).
     from gateway.platforms.feishu import FeishuAdapter
@@ -330,6 +369,24 @@ _ADMIT_CASES = [
     ),
     pytest.param(
         _admit_case(
+            adapter={"dm_policy": "disabled"},
+            sender={"sender_type": "user", "open_id": "ou_human"},
+            message={"message_id": "om_blocked", "chat_type": "p2p"},
+            expected="dm_disabled",
+        ),
+        id="human:p2p_rejected_when_dm_policy_disabled",
+    ),
+    pytest.param(
+        _admit_case(
+            adapter={"dm_policy": "disabled", "group_policy": "open", "require_mention": False},
+            sender={"sender_type": "user", "open_id": "ou_human"},
+            message={"message_id": "om_group", "chat_type": "group"},
+            expected=None,
+        ),
+        id="human:group_admitted_when_dm_policy_disabled",
+    ),
+    pytest.param(
+        _admit_case(
             adapter={
                 "bot_open_id": "ou_self",
                 "require_mention": False,
@@ -424,6 +481,34 @@ def test_admit_group_mention_checked_once_per_call():
     sender = make_sender(sender_type="bot", open_id="ou_peer")
     assert adapter._admit(sender, make_message(chat_type="group")) is None
     assert calls == 1
+
+
+def test_message_mentions_bot_accepts_bare_open_id_string():
+    adapter = make_adapter_skeleton(bot_open_id="ou_self")
+    mentions = [SimpleNamespace(id="ou_self", id_type="", name="ThreadWave Vault Updater")]
+
+    assert adapter._message_mentions_bot(mentions) is True
+
+
+def test_message_mentions_bot_accepts_bare_user_id_string():
+    adapter = make_adapter_skeleton(bot_open_id="", bot_user_id="u_self")
+    mentions = [SimpleNamespace(id="u_self", id_type="", name="ThreadWave Vault Updater")]
+
+    assert adapter._message_mentions_bot(mentions) is True
+
+
+def test_admit_group_bot_mention_accepts_bare_open_id_string():
+    adapter = make_adapter_skeleton(
+        bot_open_id="ou_self", allow_bots="mentions", require_mention=True,
+        group_policy="open",
+    )
+    sender = make_sender(sender_type="bot", open_id="ou_peer")
+    message = make_message(
+        chat_type="group",
+        mentions=[SimpleNamespace(id="ou_self", id_type="", name="ThreadWave Vault Updater")],
+    )
+
+    assert adapter._admit(sender, message) is None
 
 
 # --- Per-group require_mention override ------------------------------------

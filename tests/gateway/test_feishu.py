@@ -79,6 +79,63 @@ class TestConfigEnvOverrides(unittest.TestCase):
         self.assertIn(Platform.FEISHU, config.get_connected_platforms())
 
 
+class TestFeishuOutboundMentions(unittest.TestCase):
+    @patch.dict(os.environ, {"FEISHU_MENTION_ALIASES": "MOSS:ou_moss"}, clear=False)
+    def test_plain_alias_becomes_post_at_entity(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(enabled=True, extra={}))
+        msg_type, payload = adapter._build_outbound_payload("@MOSS please inspect")
+
+        self.assertEqual(msg_type, "post")
+        data = json.loads(payload)
+        row = data["zh_cn"]["content"][0]
+        self.assertEqual(row[0], {"tag": "at", "user_id": "ou_moss", "user_name": "MOSS"})
+        self.assertEqual(row[1], {"tag": "text", "text": " please inspect"})
+
+    @patch.dict(os.environ, {"FEISHU_MENTION_ALIASES": "MOSS:ou_moss"}, clear=False)
+    def test_alias_with_markdown_table_still_becomes_at_entity(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(enabled=True, extra={}))
+        msg_type, payload = adapter._build_outbound_payload(
+            "@MOSS\n\n| 尝试 | 结果 |\n|---|---|\n| restart | active |"
+        )
+
+        self.assertEqual(msg_type, "post")
+        data = json.loads(payload)
+        row = data["zh_cn"]["content"][0]
+        self.assertEqual(row[0], {"tag": "at", "user_id": "ou_moss", "user_name": "MOSS"})
+        self.assertEqual(row[1]["tag"], "text")
+        self.assertIn("| 尝试 | 结果 |", row[1]["text"])
+
+    @patch.dict(os.environ, {"FEISHU_MENTION_ALIASES": "MOSS:ou_moss"}, clear=False)
+    def test_alias_does_not_match_email_fragment(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(enabled=True, extra={}))
+        msg_type, payload = adapter._build_outbound_payload("ops@example.com@MOSSsuffix")
+
+        self.assertEqual(msg_type, "text")
+        self.assertEqual(json.loads(payload)["text"], "ops@example.com@MOSSsuffix")
+    @patch.dict(os.environ, {"FEISHU_MENTION_ALIASES": "MOSS:ou_moss"}, clear=False)
+    def test_alias_in_inline_code_stays_plain_text(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(enabled=True, extra={}))
+        msg_type, payload = adapter._build_outbound_payload("example `@MOSS` then @MOSS please inspect")
+
+        self.assertEqual(msg_type, "post")
+        row = json.loads(payload)["zh_cn"]["content"][0]
+        self.assertEqual(row[0], {"tag": "text", "text": "example `@MOSS` then "})
+        self.assertEqual(row[1], {"tag": "at", "user_id": "ou_moss", "user_name": "MOSS"})
+        self.assertEqual(row[2], {"tag": "text", "text": " please inspect"})
+
+
 class TestFeishuMessageNormalization(unittest.TestCase):
     def test_normalize_merge_forward_preserves_summary_lines(self):
         from gateway.platforms.feishu import normalize_feishu_message

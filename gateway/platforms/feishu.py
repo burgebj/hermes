@@ -370,6 +370,7 @@ class FeishuAdapterSettings:
     verification_token: str
     group_policy: str
     allowed_group_users: frozenset[str]
+    dm_policy: str  # "open" | "disabled"
     # Bot's own open_id (app-scoped) — returned by /bot/v3/info.  Used only for
     # @mention matching: Feishu puts this value in mentions[].id.open_id when
     # a user @-mentions the bot in a group chat.
@@ -424,6 +425,7 @@ RejectReason = Literal[
     "self_ids_unknown",
     "bots_disabled",
     "bot_not_mentioned",
+    "dm_disabled",
     "group_policy_rejected",
 ]
 
@@ -548,8 +550,44 @@ def _coerce_required_int(value: Any, default: int, min_value: int = 0) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _build_markdown_post_payload(content: str) -> str:
-    rows = _build_markdown_post_rows(content)
+def _parse_outbound_mention_aliases(value: str) -> Dict[str, str]:
+    """Parse outbound @mention aliases from env/config text.
+
+    Format: ``Name:ou_xxx,Other Bot:ou_yyy``.  ``=`` is accepted as an
+    alternative separator for operational convenience.  Values are app-scoped
+    Feishu open_ids for the bot/user to mention.
+    """
+    aliases: Dict[str, str] = {}
+    for item in (value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            name, open_id = item.split(":", 1)
+        elif "=" in item:
+            name, open_id = item.split("=", 1)
+        else:
+            continue
+        name = name.strip().lstrip("@")
+        open_id = open_id.strip()
+        if name and open_id:
+            aliases[name] = open_id
+    return aliases
+
+
+def _build_markdown_post_payload(
+    content: str,
+    mention_aliases: Optional[Dict[str, str]] = None,
+    *,
+    text_tag: str = "md",
+) -> str:
+    rows = _build_markdown_post_rows(content, mention_aliases=mention_aliases, text_tag=text_tag)
+    # Feishu im.v1.message.create/reply/update with msg_type='post' expects
+    # content to be the language object directly (for example
+    # {"zh_cn": {"content": [[...]]}}), not the legacy/custom-bot wrapper
+    # {"post": {"zh_cn": ...}}.  Supplying the wrapper makes the Open API
+    # reject the message with 230001 invalid message content; callers then fall
+    # back to text and @mentions render as plain text.
     return json.dumps(
         {
             "zh_cn": {
@@ -560,7 +598,86 @@ def _build_markdown_post_payload(content: str) -> str:
     )
 
 
-def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
+def _split_inline_code_segments(text: str) -> List[tuple[str, bool]]:
+    """Split markdown-ish text into (segment, is_inline_code) pieces.
+
+    Outbound @mention aliases must not fire inside inline-code examples such as
+    ``@MOSS``.  Feishu post rows already keep fenced code blocks separate; this
+    helper covers single-backtick spans in normal markdown text.
+    """
+    if "`" not in text:
+        return [(text, False)]
+    segments: List[tuple[str, bool]] = []
+    buf: List[str] = []
+    in_code = False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "`":
+            if buf:
+                segments.append(("".join(buf), in_code))
+                buf = []
+            buf.append(ch)
+            i += 1
+            while i < len(text) and text[i] == "`":
+                buf.append(text[i])
+                i += 1
+            segments.append(("".join(buf), True))
+            buf = []
+            in_code = not in_code
+            continue
+        buf.append(ch)
+        i += 1
+    if buf:
+        segments.append(("".join(buf), in_code))
+    return segments
+
+
+def _split_outbound_mentions(text: str, mention_aliases: Optional[Dict[str, str]], *, text_tag: str = "md") -> List[Dict[str, str]]:
+    if not text:
+        return []
+    aliases = mention_aliases or {}
+    if not aliases:
+        return [{"tag": text_tag, "text": text}]
+
+    # Prefer longer aliases first so "@MOSS Bot" wins over "@MOSS" when both
+    # are configured.  Boundaries avoid converting email/user fragments.
+    names = sorted((name for name in aliases if name), key=len, reverse=True)
+    if not names:
+        return [{"tag": text_tag, "text": text}]
+    pattern = re.compile(
+        r"@(" + "|".join(re.escape(name) for name in names) + r")(?=$|[\s\t\n\r.,;:!?、，。；：！？()\[\]{}<>\"'`])"
+    )
+    parts: List[Dict[str, str]] = []
+
+    def append_text(value: str) -> None:
+        if not value:
+            return
+        if parts and parts[-1].get("tag") == text_tag:
+            parts[-1]["text"] += value
+        else:
+            parts.append({"tag": text_tag, "text": value})
+
+    for segment, is_inline_code in _split_inline_code_segments(text):
+        if is_inline_code:
+            append_text(segment)
+            continue
+        pos = 0
+        for match in pattern.finditer(segment):
+            append_text(segment[pos:match.start()])
+            name = match.group(1)
+            parts.append({"tag": "at", "user_id": aliases[name], "user_name": name})
+            pos = match.end()
+        append_text(segment[pos:])
+    return parts or [{"tag": text_tag, "text": text}]
+
+
+def _build_markdown_post_rows(
+    content: str,
+    mention_aliases: Optional[Dict[str, str]] = None,
+    *,
+    text_tag: str = "md",
+) -> List[List[Dict[str, str]]]:
     """Build Feishu post rows while isolating fenced code blocks.
 
     Feishu's `md` renderer can swallow trailing content when a fenced code block
@@ -569,9 +686,9 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
     in a dedicated row.
     """
     if not content:
-        return [[{"tag": "md", "text": ""}]]
+        return [[{"tag": text_tag, "text": ""}]]
     if "```" not in content:
-        return [[{"tag": "md", "text": content}]]
+        return [_split_outbound_mentions(content, mention_aliases, text_tag=text_tag)]
 
     rows: List[List[Dict[str, str]]] = []
     current: List[str] = []
@@ -583,7 +700,7 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
             return
         segment = "\n".join(current)
         if segment.strip():
-            rows.append([{"tag": "md", "text": segment}])
+            rows.append(_split_outbound_mentions(segment, mention_aliases, text_tag=text_tag))
         current = []
 
     for raw_line in content.splitlines():
@@ -606,7 +723,7 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
         current.append(raw_line)
 
     _flush_current()
-    return rows or [[{"tag": "md", "text": content}]]
+    return rows or [_split_outbound_mentions(content, mention_aliases, text_tag=text_tag)]
 
 
 def parse_feishu_post_payload(
@@ -1176,22 +1293,26 @@ def _unique_lines(lines: List[str]) -> List[str]:
 
 
 def _extract_mention_ids(mention: Any) -> tuple[str, str]:
-    # Returns (open_id, user_id). im.v1.message.get hands back id as a string
-    # plus id_type discriminator; event payloads hand back a nested UserId
-    # object carrying both fields.
+    # Returns (open_id, user_id). im.v1.message.get can hand back id as a
+    # string plus id_type discriminator; some Feishu event payloads hand back a
+    # bare string without id_type; other event payloads hand back a nested
+    # UserId object carrying both fields.
     mention_id = getattr(mention, "id", None)
     if isinstance(mention_id, str):
+        mention_id = mention_id.strip()
+        if not mention_id:
+            return "", ""
         id_type = str(getattr(mention, "id_type", "") or "").lower()
-        if id_type == "open_id":
+        if id_type == "open_id" or mention_id.startswith("ou_"):
             return mention_id, ""
-        if id_type == "user_id":
+        if id_type == "user_id" or mention_id.startswith("u_"):
             return "", mention_id
         return "", ""
     if mention_id is None:
         return "", ""
     return (
-        str(getattr(mention_id, "open_id", "") or ""),
-        str(getattr(mention_id, "user_id", "") or ""),
+        str(getattr(mention_id, "open_id", "") or "").strip(),
+        str(getattr(mention_id, "user_id", "") or "").strip(),
     )
 
 
@@ -1511,6 +1632,14 @@ class FeishuAdapter(BasePlatformAdapter):
             )
             allow_bots = "none"
 
+        dm_policy = os.getenv("FEISHU_DM_POLICY", "open").strip().lower()
+        if dm_policy not in ("open", "disabled"):
+            logger.warning(
+                "[Feishu] Unknown dm_policy=%r, falling back to 'open'. Valid: open, disabled.",
+                dm_policy,
+            )
+            dm_policy = "open"
+
         return FeishuAdapterSettings(
             app_id=str(extra.get("app_id") or os.getenv("FEISHU_APP_ID", "")).strip(),
             app_secret=str(extra.get("app_secret") or os.getenv("FEISHU_APP_SECRET", "")).strip(),
@@ -1528,6 +1657,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 for item in os.getenv("FEISHU_ALLOWED_USERS", "").split(",")
                 if item.strip()
             ),
+            dm_policy=dm_policy,
             bot_open_id=os.getenv("FEISHU_BOT_OPEN_ID", "").strip(),
             bot_user_id=os.getenv("FEISHU_BOT_USER_ID", "").strip(),
             bot_name=os.getenv("FEISHU_BOT_NAME", "").strip(),
@@ -1584,6 +1714,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._verification_token = settings.verification_token
         self._group_policy = settings.group_policy
         self._allowed_group_users = set(settings.allowed_group_users)
+        self._dm_policy = settings.dm_policy
         self._admins = set(settings.admins)
         self._default_group_policy = settings.default_group_policy or settings.group_policy
         self._group_rules = settings.group_rules
@@ -2420,7 +2551,19 @@ class FeishuAdapter(BasePlatformAdapter):
 
         reason = self._admit(sender, message)
         if reason is not None:
-            logger.debug("[Feishu] dropping inbound event: %s", reason)
+            if _is_bot_sender(sender):
+                sender_id = getattr(sender, "sender_id", None)
+                logger.info(
+                    "[Feishu] dropping bot inbound event: reason=%s message_id=%s chat_id=%s sender_type=%s sender_open_id=%s sender_user_id=%s",
+                    reason,
+                    message_id,
+                    getattr(message, "chat_id", "") or "",
+                    getattr(sender, "sender_type", "") or "",
+                    getattr(sender_id, "open_id", None),
+                    getattr(sender_id, "user_id", None),
+                )
+            else:
+                logger.debug("[Feishu] dropping inbound event: %s", reason)
             return
 
         chat_type = getattr(message, "chat_type", "p2p")
@@ -4115,6 +4258,8 @@ class FeishuAdapter(BasePlatformAdapter):
                 return "bot_not_mentioned"
 
         if not is_group:
+            if self._dm_policy == "disabled":
+                return "dm_disabled"
             return None
 
         if not self._allow_group_message(
@@ -4197,22 +4342,23 @@ class FeishuAdapter(BasePlatformAdapter):
     def _message_mentions_bot(self, mentions: List[Any]) -> bool:
         # IDs trump names: when both sides have open_id (or both user_id),
         # match requires equal IDs. Name fallback only when either side
-        # lacks an ID.
+        # lacks an ID. Use the same mention-id normalizer as post parsing so
+        # bare ``mention.id = "ou_..."`` payloads don't get misclassified as
+        # missing mentions under strict group admission.
+        bot = self._bot_identity()
         for mention in mentions:
-            mention_id = getattr(mention, "id", None)
-            mention_open_id = (getattr(mention_id, "open_id", None) or "").strip()
-            mention_user_id = (getattr(mention_id, "user_id", None) or "").strip()
+            mention_open_id, mention_user_id = _extract_mention_ids(mention)
             mention_name = (getattr(mention, "name", None) or "").strip()
 
             if mention_open_id and self._bot_open_id:
-                if mention_open_id == self._bot_open_id:
+                if bot.matches(open_id=mention_open_id, user_id="", name=mention_name):
                     return True
                 continue  # IDs differ — not the bot; skip name fallback.
             if mention_user_id and self._bot_user_id:
-                if mention_user_id == self._bot_user_id:
+                if bot.matches(open_id="", user_id=mention_user_id, name=mention_name):
                     return True
                 continue
-            if self._bot_name and mention_name == self._bot_name:
+            if bot.matches(open_id=mention_open_id, user_id=mention_user_id, name=mention_name):
                 return True
 
         return False
@@ -4372,14 +4518,33 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
+        mention_aliases = _parse_outbound_mention_aliases(
+            os.getenv("FEISHU_MENTION_ALIASES")
+            or os.getenv("FEISHU_OUTBOUND_MENTION_ALIASES")
+            or ""
+        )
+        has_outbound_mention = any(
+            re.search(
+                r"@" + re.escape(name) + r"(?=$|[\s\t\n\r.,;:!?、，。；：！？()\[\]{}<>\"'`])",
+                content,
+            )
+            for name in mention_aliases
+        )
+        if has_outbound_mention:
+            # Native Feishu @ mentions require a rich-text post payload.  Keep
+            # all non-mention content as plain text elements so markdown tables
+            # in incident-report templates do not force a downgrade to a text
+            # payload and silently lose the real mention entity.
+            return "post", _build_markdown_post_payload(content, mention_aliases=mention_aliases, text_tag="text")
         # Feishu post-type 'md' elements do not render markdown tables; sending
         # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
+        # Force plain text for anything that looks like a markdown table, unless
+        # a native mention is present (handled above).
         if _MARKDOWN_TABLE_RE.search(content):
             text_payload = {"text": content}
             return "text", json.dumps(text_payload, ensure_ascii=False)
         if _MARKDOWN_HINT_RE.search(content):
-            return "post", _build_markdown_post_payload(content)
+            return "post", _build_markdown_post_payload(content, mention_aliases=mention_aliases, text_tag="md")
         text_payload = {"text": content}
         return "text", json.dumps(text_payload, ensure_ascii=False)
 

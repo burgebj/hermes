@@ -1603,6 +1603,17 @@ async def _send_feishu(pconfig, chat_id, message, media_files=None, thread_id=No
     media_files = media_files or []
 
     try:
+        # send_message runs inside agent/cron/tool processes, not necessarily
+        # inside the long-lived gateway process.  FeishuAdapter's outbound
+        # mention support reads FEISHU_MENTION_ALIASES from the process env, so
+        # profile-local .env must be loaded here before constructing the adapter.
+        try:
+            from dotenv import load_dotenv
+            from hermes_constants import get_hermes_home
+            load_dotenv(get_hermes_home() / ".env", override=False)
+        except Exception:
+            logger.debug("Failed to load Hermes .env before Feishu send", exc_info=True)
+
         adapter = FeishuAdapter(pconfig)
         domain_name = getattr(adapter, "_domain_name", "feishu")
         domain = FEISHU_DOMAIN if domain_name != "lark" else LARK_DOMAIN
