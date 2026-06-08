@@ -502,7 +502,7 @@ class TestRunJobImmediate:
     def test_action_run_queues_for_next_tick_when_live_delivery_context_is_required(self, monkeypatch):
         """Jobs that require a live gateway adapter should queue instead of failing delivery."""
         import cron.scheduler as sched
-        from cron.jobs import create_job, resolve_job_ref
+        from cron.jobs import create_job, resolve_job_ref, update_job
         from tools.cronjob_tools import cronjob
 
         sched._parallel_pool = None
@@ -534,6 +534,20 @@ class TestRunJobImmediate:
         assert "queued for the next gateway tick" in result["note"].lower()
         assert queued_job["next_run_at"] != original_next_run_at
         assert queued_job["manual_run_schedule_snapshot"]["next_run_at"] == original_next_run_at
+
+        update_job(
+            job_id,
+            {
+                "next_run_at": "2000-01-01T00:00:00+00:00",
+                "manual_run_schedule_snapshot": dict(queued_job["manual_run_schedule_snapshot"]),
+            },
+        )
+        result_again = json.loads(cronjob(action="run", job_id=job_id))
+        queued_again = resolve_job_ref(job_id)
+
+        assert result_again["success"] is True
+        assert result_again["dispatched"] is False
+        assert queued_again["manual_run_schedule_snapshot"]["next_run_at"] == original_next_run_at
 
         sched._shutdown_parallel_pool()
 

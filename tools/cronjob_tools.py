@@ -622,7 +622,8 @@ def cronjob(
             return json.dumps({"success": True, "job": _format_job(updated)}, indent=2)
 
         if normalized in {"run", "run_now", "trigger"}:
-            schedule_snapshot = {
+            existing_snapshot = job.get("manual_run_schedule_snapshot")
+            schedule_snapshot = existing_snapshot if isinstance(existing_snapshot, dict) else {
                 "enabled": job.get("enabled", True),
                 "state": job.get("state"),
                 "paused_at": job.get("paused_at"),
