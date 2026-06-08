@@ -16119,27 +16119,28 @@ def main(
 
                     # Ensure proper exit code for automation wrappers.
                     #
-                    # Kanban workers get a special case: when the run failed
-                    # purely because the provider rate-limited / exhausted
-                    # quota (not because the task itself is broken), exit with
-                    # the EX_TEMPFAIL sentinel instead of the generic 1. The
-                    # dispatcher's reap classifier maps that code to a
-                    # ``rate_limited`` exit and releases the task back to
-                    # ``ready`` WITHOUT incrementing the failure counter, so a
-                    # 5-hour quota window can't trip the circuit breaker and
-                    # permanently block the card. Non-kanban runs keep the
-                    # plain 0/1 contract automation wrappers expect.
+                    # Kanban workers get a special case keyed on the run's
+                    # classified ``failure_reason`` so the dispatcher can tell a
+                    # transient throttle from a hard wall (it only sees the exit
+                    # code, not the error text):
+                    #   • ``rate_limit`` → EX_TEMPFAIL sentinel → released back to
+                    #     ``ready`` WITHOUT counting a failure and cheap-probed on
+                    #     a cooldown (a 5-hour quota window can't trip the breaker).
+                    #   • ``billing``    → hard-blocker sentinel → auto-blocked with
+                    #     the cause surfaced; retrying/probing a depleted balance
+                    #     just burns paid requests and loops forever (#41805).
+                    # Non-kanban runs keep the plain 0/1 contract wrappers expect.
                     _exit_code = 0
                     if isinstance(result, dict) and result.get("failed"):
                         _exit_code = 1
-                        if os.environ.get("HERMES_KANBAN_TASK") and result.get(
-                            "failure_reason"
-                        ) in ("rate_limit", "billing"):
+                        if os.environ.get("HERMES_KANBAN_TASK"):
                             try:
                                 from hermes_cli.kanban_db import (
-                                    KANBAN_RATE_LIMIT_EXIT_CODE as _RL_CODE,
+                                    kanban_worker_exit_code_for_failure,
                                 )
-                                _exit_code = _RL_CODE
+                                _exit_code = kanban_worker_exit_code_for_failure(
+                                    result.get("failure_reason")
+                                )
                             except Exception:
                                 _exit_code = 1
                     sys.exit(_exit_code)

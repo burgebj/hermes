@@ -165,6 +165,39 @@ DEFAULT_CRASH_GRACE_SECONDS = 30
 KANBAN_RATE_LIMIT_EXIT_CODE = 75
 
 
+# Sentinel exit code a kanban worker uses to signal "I bailed on a HARD billing
+# / account wall (insufficient balance, payment required, credits exhausted),
+# not a transient throttle." Unlike ``KANBAN_RATE_LIMIT_EXIT_CODE`` this will
+# NOT clear by waiting, so the dispatcher must NOT cheap-probe it on a cooldown
+# (that just burns paid requests and loops forever — #41805, #31273). The reap
+# classifier maps this to a ``billing_blocked`` exit kind, which stamps the real
+# cause and auto-blocks the task immediately for human attention. 77 == BSD
+# ``EX_NOPERM`` (sysexits.h) — "permission denied", the closest conventional
+# code for "the account lacks the credits/entitlement to proceed".
+KANBAN_BILLING_BLOCKER_EXIT_CODE = 77
+
+
+def kanban_worker_exit_code_for_failure(failure_reason: "Optional[str]") -> int:
+    """Map a run's classified ``failure_reason`` to a kanban worker exit code.
+
+    Centralises the worker-side exit-code contract so it can be unit-tested
+    without driving a full conversation (the cli.py kanban single-query path
+    calls this):
+
+    * ``"rate_limit"`` → ``KANBAN_RATE_LIMIT_EXIT_CODE`` (transient throttle —
+      released without counting a failure, cheap-probed on a cooldown).
+    * ``"billing"``    → ``KANBAN_BILLING_BLOCKER_EXIT_CODE`` (hard wall —
+      auto-blocked with the cause surfaced; retrying won't help).
+    * anything else / ``None`` → ``1`` (ordinary failure — counts toward the
+      circuit breaker via the normal crashed path).
+    """
+    if failure_reason == "rate_limit":
+        return KANBAN_RATE_LIMIT_EXIT_CODE
+    if failure_reason == "billing":
+        return KANBAN_BILLING_BLOCKER_EXIT_CODE
+    return 1
+
+
 def _resolve_crash_grace_seconds() -> int:
     """Return the crash-detection grace period in seconds.
 
@@ -4830,9 +4863,25 @@ KANBAN_TERMINAL_TIMEOUT_GRACE_SECONDS = 30
 
 # Patterns in last_failure_error that indicate a quota / auth blocker.
 # These errors won't resolve by retrying immediately — auto-block instead.
+#
+# The second line mirrors the hard usage-limit / billing wording recognised by
+# ``agent.error_classifier`` (``_BILLING_PATTERNS`` / ``_USAGE_LIMIT_PATTERNS``).
+# Hard quota/billing 429s ("the usage limit has been reached", "Insufficient
+# balance or no resource package. Please recharge.") otherwise slip past the
+# bare ``quota|429|billing`` set, so a worker that bails on them before any tool
+# work looks like a generic crash and the dispatcher re-spawns it forever
+# (#41805). Keep these anchored to billing/quota vocabulary to avoid widening
+# into ordinary transient errors.
 _RESPAWN_BLOCKER_RE = re.compile(
     r"\b(quota|rate[\s_\-]?limit|429|403|auth\w*|"
     r"unauthorized|forbidden|billing|subscription|"
+    # Hard billing/account vocabulary (anchored — NOT bare ``insufficient`` /
+    # ``recharge``, which match benign task text like "insufficient tests" or
+    # "recharge battery" and would wrongly defer a real crash from the breaker).
+    r"usage[\s_-]limit|"
+    r"insufficient[\s_-]+(?:balance|credits?|quota|funds)|"
+    r"resource[\s_-]package|out[\s_-]of[\s_-]funds|"
+    r"payment[\s_-]required|balance[\s_-]?depleted|please[\s_-]+recharge|"
     r"access[\s_]denied|permission[\s_]denied|"
     r"invalid[\s_]api[\s_]key)\b",
     re.IGNORECASE,
@@ -4964,6 +5013,11 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
       provider rate-limited / exhausted quota, NOT because the task failed.
       ``detect_crashed_workers`` releases the task back to ``ready`` without
       counting a failure, so a long quota window can't trip the breaker.
+    * ``"billing_blocked"`` — ``WIFEXITED`` with status
+      ``KANBAN_BILLING_BLOCKER_EXIT_CODE``. The worker bailed on a HARD billing
+      / account wall (insufficient balance, payment required). This won't clear
+      by waiting, so ``detect_crashed_workers`` stamps the cause and auto-blocks
+      the task immediately rather than cheap-probing it forever (#41805).
     * ``"nonzero_exit"`` — ``WIFEXITED`` with non-zero status. Real error.
     * ``"signaled"`` — ``WIFSIGNALED`` (OOM killer, SIGKILL, etc). Real crash.
     * ``"unknown"`` — pid was not in the reap registry (either reaped by
@@ -4985,6 +5039,8 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
                 return ("clean_exit", 0)
             if code == KANBAN_RATE_LIMIT_EXIT_CODE:
                 return ("rate_limited", code)
+            if code == KANBAN_BILLING_BLOCKER_EXIT_CODE:
+                return ("billing_blocked", code)
             return ("nonzero_exit", code)
         if os.WIFSIGNALED(raw):
             return ("signaled", os.WTERMSIG(raw))
@@ -5469,11 +5525,12 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     rate_limited: list[str] = []
     # Per-crash details collected inside the main txn, used after it
     # closes to run ``_record_task_failure`` (which needs its own
-    # write_txn so can't nest). ``protocol_violation`` flags the
-    # clean-exit-but-still-running case so we can trip the breaker
+    # write_txn so can't nest). ``protocol_violation`` and ``billing_blocked``
+    # each flag a deterministic failure (clean-exit-but-still-running, and a
+    # hard billing/quota wall respectively) so we can trip the breaker
     # immediately instead of incrementing by 1.
-    crash_details: list[tuple[str, int, str, bool, str]] = []
-    # (task_id, pid, claimer, protocol_violation, error_text)
+    crash_details: list[tuple[str, int, str, bool, str, bool]] = []
+    # (task_id, pid, claimer, protocol_violation, error_text, billing_blocked)
     with write_txn(conn):
         rows = conn.execute(
             "SELECT id, worker_pid, claim_lock, started_at FROM tasks "
@@ -5499,6 +5556,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             pid = int(row["worker_pid"])
             kind, code = _classify_worker_exit(pid)
             rate_limited_exit = False
+            billing_blocked = False
             if kind == "clean_exit":
                 # Worker subprocess returned 0 but its task is still
                 # ``running`` in the DB — it exited without calling
@@ -5533,6 +5591,30 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 event_payload = {
                     "pid": pid,
                     "claimer": row["claim_lock"],
+                    "exit_code": code,
+                }
+            elif kind == "billing_blocked":
+                # Worker bailed on a HARD billing / account wall (insufficient
+                # balance, payment required) — distinct from a transient
+                # throttle. This won't clear by waiting, so cheap-probing it on
+                # a cooldown just burns paid requests and loops forever (#41805,
+                # #31273). Treat it as a deterministic crash: stamp the real
+                # cause (so ``check_respawn_guard`` recognises it and the board
+                # shows WHY) and force an immediate auto-block for human
+                # attention, rather than respawning ``DEFAULT_FAILURE_LIMIT``
+                # times against a depleted balance first.
+                protocol_violation = False
+                billing_blocked = True
+                error_text = (
+                    f"pid {pid} exited on a hard billing/quota wall "
+                    f"(insufficient balance or account limit) — auto-blocked; "
+                    f"resolve billing/credits then unblock the task"
+                )
+                event_kind = "crashed"
+                event_payload = {
+                    "pid": pid,
+                    "claimer": row["claim_lock"],
+                    "exit_kind": kind,
                     "exit_code": code,
                 }
             else:
@@ -5586,7 +5668,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     crashed.append(row["id"])
                     crash_details.append(
                         (row["id"], pid, row["claim_lock"],
-                         protocol_violation, error_text)
+                         protocol_violation, error_text, billing_blocked)
                     )
     # Outside the main txn: increment the unified failure counter for
     # each crashed task. If the breaker trips, the task transitions
@@ -5597,25 +5679,31 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # because clean-exit-without-transition is deterministic: the next
     # respawn will do exactly the same thing. Better to surface to a
     # human with a clear reason than to loop ``DEFAULT_FAILURE_LIMIT``
-    # times first.
+    # times first. Hard billing/quota walls (``billing_blocked``) force the
+    # same immediate trip for the same reason — a depleted balance won't
+    # clear on its own and retrying just burns money (#41805).
     auto_blocked: list[str] = []
     if crash_details:
         # Fingerprint errors to detect systemic failures.
         _fp_counts: dict[str, int] = {}
-        for _, _, _, _, err_text in crash_details:
+        for _, _, _, _, err_text, _ in crash_details:
             fp = _error_fingerprint(err_text)
             _fp_counts[fp] = _fp_counts.get(fp, 0) + 1
-        for tid, pid, claimer, protocol_violation, error_text in crash_details:
+        for tid, pid, claimer, protocol_violation, error_text, billing_blocked in crash_details:
             fp = _error_fingerprint(error_text)
             is_systemic = (
                 not protocol_violation
+                and not billing_blocked
                 and _fp_counts.get(fp, 0) >= 3
             )
             tripped = _record_task_failure(
                 conn, tid,
                 error=error_text,
                 outcome="crashed",
-                failure_limit=1 if (protocol_violation or is_systemic) else None,
+                failure_limit=(
+                    1 if (protocol_violation or is_systemic or billing_blocked)
+                    else None
+                ),
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "claimer": claimer},

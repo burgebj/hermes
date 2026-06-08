@@ -277,6 +277,48 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.rate_limit
         assert result.retryable is True
 
+    # ── 429 billing wall vs transient throttle (#41805) ──
+
+    def test_429_insufficient_balance_classified_as_billing(self):
+        """A 429 carrying hard billing vocabulary is billing, not a transient
+        throttle — otherwise a kanban worker probes a depleted balance on a
+        cooldown forever (#41805). Mirrors the 402/403 billing carve-outs."""
+        e = MockAPIError(
+            "HTTP 429: Insufficient balance or no resource package. "
+            "Please recharge.",
+            status_code=429,
+        )
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.billing
+        assert result.retryable is False
+
+    def test_429_credits_exhausted_classified_as_billing(self):
+        e = MockAPIError("credits have been exhausted", status_code=429)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.billing
+        assert result.retryable is False
+
+    def test_429_plain_throttle_stays_rate_limit(self):
+        """An ordinary 429 with no billing vocabulary stays a transient rate
+        limit — the common case must be unchanged."""
+        e = MockAPIError("Too Many Requests", status_code=429)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.rate_limit
+        assert result.retryable is True
+
+    def test_429_usage_limit_with_reset_stays_rate_limit(self):
+        """A time-windowed usage limit ('resets at ...') is transient — it WILL
+        clear, so it stays rate_limit and is cheap-probed on a cooldown rather
+        than hard-blocked (#41805). Only explicit billing vocabulary blocks."""
+        e = MockAPIError(
+            "HTTP 429: Usage limit reached for 5 hour. Your limit will reset "
+            "at 2026-05-30 22:00:45",
+            status_code=429,
+        )
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.rate_limit
+        assert result.retryable is True
+
     def test_403_plan_entitlement_billing(self):
         e = MockAPIError("This plan does not include the requested model", status_code=403)
         result = classify_api_error(e)
