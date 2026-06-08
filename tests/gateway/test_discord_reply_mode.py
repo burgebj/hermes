@@ -309,15 +309,16 @@ class FakeDMChannel(_DMChannelBase):
         self.name = name
 
 
-def _make_message(*, content: str = "hi", reference=None):
+def _make_message(*, content: str = "hi", reference=None, mentions=None, message_snapshots=None):
     """Build a mock Discord message for _handle_message tests."""
     author = SimpleNamespace(id=42, display_name="TestUser", name="TestUser")
     return SimpleNamespace(
         id=999,
         content=content,
-        mentions=[],
+        mentions=[] if mentions is None else mentions,
         attachments=[],
         reference=reference,
+        message_snapshots=[] if message_snapshots is None else message_snapshots,
         created_at=datetime.now(timezone.utc),
         channel=FakeDMChannel(),
         author=author,
@@ -396,6 +397,42 @@ class TestReplyToText:
         event = reply_text_adapter.handle_message.await_args.args[0]
         assert event.reply_to_message_id == "555"
         assert event.reply_to_text is None
+
+
+class TestDiscordMessageSnapshots:
+    """Tests for Discord native message reference snapshots."""
+
+    @pytest.mark.asyncio
+    async def test_mention_only_message_uses_snapshot_text(self, reply_text_adapter):
+        bot = reply_text_adapter._client.user
+        snapshot = SimpleNamespace(content="这是马后炮吗？", attachments=[])
+        message = _make_message(
+            content="<@999>",
+            mentions=[bot],
+            message_snapshots=[snapshot],
+        )
+
+        await reply_text_adapter._handle_message(message)
+
+        event = reply_text_adapter.handle_message.await_args.args[0]
+        assert "Referenced Discord message" in event.text
+        assert "这是马后炮吗？" in event.text
+        assert "no text content" not in event.text
+
+    @pytest.mark.asyncio
+    async def test_user_text_keeps_snapshot_context(self, reply_text_adapter):
+        snapshot = SimpleNamespace(content="原消息内容", attachments=[])
+        message = _make_message(
+            content="帮我看这个",
+            message_snapshots=[snapshot],
+        )
+
+        await reply_text_adapter._handle_message(message)
+
+        event = reply_text_adapter.handle_message.await_args.args[0]
+        assert event.text.startswith("帮我看这个")
+        assert "Referenced Discord message" in event.text
+        assert "原消息内容" in event.text
 
 
 class TestYamlConfigLoading:
