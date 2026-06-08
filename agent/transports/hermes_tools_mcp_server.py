@@ -24,18 +24,23 @@ Scope (what we expose):
     heartbeat/show/list/create/            handoff (stateless: read env var,
     unblock/link)                          write ~/.hermes/kanban.db)
 
+Stateless agent-loop tools we DO expose:
+  - memory, session_search               — local wrappers read/write the same
+                                           profile-scoped HERMES_HOME as the
+                                           spawned MCP process, without needing
+                                           the parent AIAgent loop.
+
 What we DO NOT expose:
   - terminal / shell                     — codex's own shell tool
   - read_file / write_file / patch       — codex's apply_patch + shell
   - search_files / process               — codex's shell
   - clarify                              — codex's own UX
-  - delegate_task / memory /             — `_AGENT_LOOP_TOOLS` in Hermes
-    session_search / todo                  (model_tools.py). They require
-                                           the running AIAgent context to
-                                           dispatch (mid-loop state), so a
-                                           stateless MCP callback can't
-                                           drive them. See the inline
-                                           comment on EXPOSED_TOOLS below.
+  - delegate_task / todo                 — `_AGENT_LOOP_TOOLS` in Hermes
+                                           (model_tools.py). They require
+                                           running AIAgent/TodoStore state, so
+                                           a stateless MCP callback can't drive
+                                           them. See the inline comment on
+                                           EXPOSED_TOOLS below.
 
 Run with: python -m agent.transports.hermes_tools_mcp_server
 Spawned by: CodexAppServerSession.ensure_started() when the runtime is
@@ -60,11 +65,16 @@ logger = logging.getLogger(__name__)
 #   - terminal / shell / read_file / write_file / patch / search_files /
 #     process — codex's built-ins cover these and approval routes through
 #     codex's own UI.
-#   - delegate_task / memory / session_search / todo — these are
-#     `_AGENT_LOOP_TOOLS` in Hermes (model_tools.py:493). They require
-#     the running AIAgent context to dispatch (mid-loop state), so a
-#     stateless MCP callback can't drive them. Hermes' default runtime
-#     keeps these working; the codex_app_server runtime cannot.
+#   - delegate_task / todo — these are `_AGENT_LOOP_TOOLS` in Hermes
+#     (model_tools.py:493) and require running AIAgent/TodoStore state.
+#     Hermes' default runtime keeps these working; the codex_app_server
+#     runtime cannot drive them through a stateless MCP callback.
+#
+# memory and session_search are also agent-loop tools in the default
+# dispatcher, but they have file/DB-backed implementations that can be
+# invoked statelessly from this subprocess. We expose them through the
+# _STATELESS_AGENT_LOOP_DISPATCHERS map below instead of
+# model_tools.handle_function_call(), which intentionally blocks them.
 EXPOSED_TOOLS: tuple[str, ...] = (
     "web_search",
     "web_extract",
@@ -82,6 +92,8 @@ EXPOSED_TOOLS: tuple[str, ...] = (
     "image_generate",
     "skill_view",
     "skills_list",
+    "memory",
+    "session_search",
     "text_to_speech",
     # Kanban worker handoff tools — gated on HERMES_KANBAN_TASK env var
     # (set by the kanban dispatcher when spawning a worker). Without these
@@ -103,6 +115,80 @@ EXPOSED_TOOLS: tuple[str, ...] = (
     "kanban_unblock",
     "kanban_link",
 )
+
+
+def _dispatch_memory_stateless(**kwargs: Any) -> str:
+    """Run the file-backed memory tool without a parent AIAgent.
+
+    The normal Hermes loop injects a MemoryStore instance into the tool
+    handler. The codex_app_server MCP subprocess has the same profile-scoped
+    HERMES_HOME but no parent AIAgent object, so create a short-lived store,
+    load the current MEMORY.md/USER.md contents, and let MemoryStore's
+    process-wide file locks + atomic replace handle concurrent writes.
+    """
+    from tools.memory_tool import MemoryStore, memory_tool
+
+    store = MemoryStore()
+    store.load_from_disk()
+    return memory_tool(
+        action=kwargs.get("action", ""),
+        target=kwargs.get("target", "memory"),
+        content=kwargs.get("content"),  # type: ignore[arg-type]
+        old_text=kwargs.get("old_text"),  # type: ignore[arg-type]
+        store=store,
+    )
+
+
+def _coerce_session_search_limit(value: Any) -> int:
+    """Normalize MCP-provided session_search limit values before dispatch."""
+    if isinstance(value, bool):
+        return 3
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return 3
+    return max(1, min(limit, 5))
+
+
+def _dispatch_session_search_stateless(**kwargs: Any) -> str:
+    """Run session_search against the profile-scoped SessionDB.
+
+    SessionDB resolves its path from HERMES_HOME, which CodexAppServerSession
+    already passes into this subprocess. SQLite supports concurrent readers;
+    the existing tool handles DB-unavailable and summarizer-unavailable cases.
+    """
+    from tools.session_search_tool import session_search
+
+    return session_search(
+        query=kwargs.get("query", ""),
+        role_filter=kwargs.get("role_filter"),  # type: ignore[arg-type]
+        limit=_coerce_session_search_limit(kwargs.get("limit", 3)),
+        current_session_id=kwargs.get("current_session_id"),  # type: ignore[arg-type]
+    )
+
+
+_STATELESS_AGENT_LOOP_DISPATCHERS = {
+    "memory": _dispatch_memory_stateless,
+    "session_search": _dispatch_session_search_stateless,
+}
+
+
+def _set_registered_tool_schema(mcp: Any, name: str, params_schema: dict[str, Any]) -> None:
+    """Attach Hermes' JSON schema to a FastMCP-registered tool when possible.
+
+    FastMCP 1.x derives schemas from Python signatures and does not accept an
+    ``input_schema`` argument on ``add_tool()``. Our handlers are deliberately
+    generic ``**kwargs`` closures around Hermes' runtime tool registry, so
+    signature introspection would otherwise expose every tool as an unhelpful
+    variadic object instead of the authoritative Hermes parameter schema.
+    """
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(tool_manager, "_tools", None)
+    if not isinstance(tools, dict):
+        return
+    tool = tools.get(name)
+    if tool is not None and hasattr(tool, "parameters"):
+        tool.parameters = params_schema
 
 
 def _build_server() -> Any:
@@ -155,13 +241,16 @@ def _build_server() -> Any:
         params_schema = spec.get("parameters") or {"type": "object", "properties": {}}
 
         # FastMCP wants a Python callable. Build a closure that takes the
-        # arguments dict, dispatches via handle_function_call, and returns
-        # the result string. We use add_tool() for full control over the
-        # input schema (FastMCP's @tool() decorator inspects type hints,
-        # which we can't get from a JSON schema at runtime).
+        # keyword arguments, dispatches via handle_function_call or a local
+        # stateless wrapper, and returns the result string. The generic
+        # **kwargs signature keeps registration simple; after registration we
+        # patch the FastMCP tool object with Hermes' authoritative JSON schema
+        # so clients do not see an unhelpful variadic schema.
         def _make_handler(tool_name: str):
             def _dispatch(**kwargs: Any) -> str:
                 try:
+                    if tool_name in _STATELESS_AGENT_LOOP_DISPATCHERS:
+                        return _STATELESS_AGENT_LOOP_DISPATCHERS[tool_name](**(kwargs or {}))
                     return handle_function_call(tool_name, kwargs or {})
                 except Exception as exc:
                     logger.exception("tool %s raised", tool_name)
@@ -175,14 +264,13 @@ def _build_server() -> Any:
                 _make_handler(name),
                 name=name,
                 description=description,
-                # FastMCP accepts JSON schema directly via the
-                # input_schema parameter on newer versions; older
-                # versions use parameters_schema. Try both for compat.
             )
         except TypeError:
             # Older mcp SDK signature — fall back to decorator-style.
             handler = _make_handler(name)
             handler = mcp.tool(name=name, description=description)(handler)
+
+        _set_registered_tool_schema(mcp, name, params_schema)
 
         exposed_count += 1
 

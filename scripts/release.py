@@ -64,6 +64,7 @@ AUTHOR_MAP = {
     "834740219@qq.com": "ViewWay",
     "harjoth.khara@gmail.com": "harjothkhara",
     "129007007+HeLLGURD@users.noreply.github.com": "HeLLGURD",
+    "hermes-agent@users.noreply.github.com": "BROCCOLO1D",
     "290859878+synapsesx@users.noreply.github.com": "synapsesx",
     "dirtyren@users.noreply.github.com": "dirtyren",
     "adityamalik2833@gmail.com": "alarcritty",

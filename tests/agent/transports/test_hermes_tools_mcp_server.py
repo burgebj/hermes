@@ -8,7 +8,11 @@ build helper assembles a server when the SDK is present.
 
 from __future__ import annotations
 
+import json
+import sys
+import types
 
+import pytest
 
 
 class TestModuleSurface:
@@ -46,19 +50,274 @@ class TestModuleSurface:
             "vision_analyze",
             "image_generate",
             "skill_view",
+            "memory",
+            "session_search",
         ):
             assert required in EXPOSED_TOOLS, f"missing {required!r}"
 
-    def test_agent_loop_tools_not_exposed(self):
-        """delegate_task / memory / session_search / todo require the
-        running AIAgent context to dispatch, so a stateless MCP callback
-        can't drive them. They must NOT be in EXPOSED_TOOLS."""
+    def test_stateful_agent_loop_tools_not_exposed(self):
+        """delegate_task / todo require running AIAgent/TodoStore state,
+        so a stateless MCP callback can't drive them. They must NOT be in
+        EXPOSED_TOOLS."""
         from agent.transports.hermes_tools_mcp_server import EXPOSED_TOOLS
-        for agent_loop_tool in ("delegate_task", "memory", "session_search", "todo"):
+        for agent_loop_tool in ("delegate_task", "todo"):
             assert agent_loop_tool not in EXPOSED_TOOLS, (
                 f"{agent_loop_tool!r} requires the agent loop context "
                 "and can't be reached through a stateless MCP callback"
             )
+
+    def test_stateless_agent_loop_dispatchers_cover_memory_and_session_search(self):
+        """memory/session_search are blocked by model_tools.handle_function_call,
+        so the MCP server must route them through its local wrappers."""
+        from agent.transports.hermes_tools_mcp_server import (
+            _STATELESS_AGENT_LOOP_DISPATCHERS,
+        )
+
+        assert set(_STATELESS_AGENT_LOOP_DISPATCHERS) == {
+            "memory",
+            "session_search",
+        }
+
+    def test_memory_stateless_dispatch_uses_profile_memory_store(self, tmp_path, monkeypatch):
+        """The codex MCP subprocess has no parent AIAgent, but it does inherit
+        HERMES_HOME. Its memory wrapper should load and mutate that store."""
+        from agent.transports.hermes_tools_mcp_server import _dispatch_memory_stateless
+
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+        result = _dispatch_memory_stateless(
+            action="add",
+            target="memory",
+            content="Codex runtime can write profile memory.",
+        )
+
+        assert '"success": true' in result
+        memory_file = home / "memories" / "MEMORY.md"
+        assert "Codex runtime can write profile memory." in memory_file.read_text()
+
+    def test_session_search_stateless_dispatch_forwards_args(self, monkeypatch):
+        from agent.transports import hermes_tools_mcp_server as m
+
+        calls = []
+
+        def fake_session_search(**kwargs):
+            calls.append(kwargs)
+            return '{"success": true}'
+
+        import tools.session_search_tool as session_search_tool
+
+        monkeypatch.setattr(session_search_tool, "session_search", fake_session_search)
+
+        assert m._dispatch_session_search_stateless(
+            query="oauth",
+            role_filter="assistant",
+            limit="2",
+            current_session_id="sid-123",
+        ) == '{"success": true}'
+        assert calls == [{
+            "query": "oauth",
+            "role_filter": "assistant",
+            "limit": 2,
+            "current_session_id": "sid-123",
+        }]
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (None, 3),
+            ("2", 2),
+            (10, 5),
+            (0, 1),
+            ("not-an-int", 3),
+            (True, 3),
+        ],
+    )
+    def test_session_search_limit_is_normalized_before_stateless_dispatch(
+        self,
+        raw,
+        expected,
+        monkeypatch,
+    ):
+        from agent.transports import hermes_tools_mcp_server as m
+        import tools.session_search_tool as session_search_tool
+
+        calls = []
+
+        def fake_session_search(**kwargs):
+            calls.append(kwargs)
+            return '{"success": true}'
+
+        monkeypatch.setattr(session_search_tool, "session_search", fake_session_search)
+
+        assert (
+            m._dispatch_session_search_stateless(query="oauth", limit=raw)
+            == '{"success": true}'
+        )
+        assert calls[0]["limit"] == expected
+
+    def test_build_server_routes_stateless_agent_loop_tools_without_handle_function_call(self, monkeypatch):
+        """_build_server must route memory/session_search through local wrappers.
+
+        The normal Hermes dispatcher intentionally blocks agent-loop tools outside
+        AIAgent. Codex MCP handlers for memory/session_search should therefore
+        bypass handle_function_call while ordinary exposed tools still use it.
+        """
+        from agent.transports import hermes_tools_mcp_server as m
+        import model_tools
+
+        class FakeFastMCP:
+            def __init__(self, *args, **kwargs):
+                self.tools = {}
+
+            def add_tool(self, fn, name, description):
+                self.tools[name] = fn
+
+        fastmcp_mod = types.ModuleType("mcp.server.fastmcp")
+        setattr(fastmcp_mod, "FastMCP", FakeFastMCP)
+        server_mod = types.ModuleType("mcp.server")
+        setattr(server_mod, "fastmcp", fastmcp_mod)
+        mcp_mod = types.ModuleType("mcp")
+        setattr(mcp_mod, "server", server_mod)
+        monkeypatch.setitem(sys.modules, "mcp", mcp_mod)
+        monkeypatch.setitem(sys.modules, "mcp.server", server_mod)
+        monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp_mod)
+
+        monkeypatch.setattr(
+            model_tools,
+            "get_tool_definitions",
+            lambda quiet_mode=True: [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": f"{name} description",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+                for name in ("memory", "session_search", "web_search")
+            ],
+        )
+
+        handle_calls = []
+        monkeypatch.setattr(
+            model_tools,
+            "handle_function_call",
+            lambda name, args: handle_calls.append((name, args)) or "handled",
+        )
+        monkeypatch.setitem(
+            m._STATELESS_AGENT_LOOP_DISPATCHERS,
+            "memory",
+            lambda **kwargs: f"memory:{kwargs['action']}",
+        )
+        monkeypatch.setitem(
+            m._STATELESS_AGENT_LOOP_DISPATCHERS,
+            "session_search",
+            lambda **kwargs: f"search:{kwargs['query']}",
+        )
+
+        server = m._build_server()
+
+        assert server.tools["memory"](action="list") == "memory:list"
+        assert server.tools["session_search"](query="oauth") == "search:oauth"
+        assert server.tools["web_search"](query="hermes") == "handled"
+        assert handle_calls == [("web_search", {"query": "hermes"})]
+
+    def test_build_server_wraps_stateless_dispatcher_errors_as_json(self, monkeypatch):
+        """MCP handlers should return structured errors instead of crashing.
+
+        The stateless wrappers touch profile files/SQLite; if those are
+        unavailable in the spawned subprocess, the MCP call should fail as a
+        tool result that Codex can read rather than tearing down the server.
+        """
+        from agent.transports import hermes_tools_mcp_server as m
+        import model_tools
+
+        class FakeFastMCP:
+            def __init__(self, *args, **kwargs):
+                self.tools = {}
+
+            def add_tool(self, fn, name, description):
+                self.tools[name] = fn
+
+        fastmcp_mod = types.ModuleType("mcp.server.fastmcp")
+        setattr(fastmcp_mod, "FastMCP", FakeFastMCP)
+        server_mod = types.ModuleType("mcp.server")
+        setattr(server_mod, "fastmcp", fastmcp_mod)
+        mcp_mod = types.ModuleType("mcp")
+        setattr(mcp_mod, "server", server_mod)
+        monkeypatch.setitem(sys.modules, "mcp", mcp_mod)
+        monkeypatch.setitem(sys.modules, "mcp.server", server_mod)
+        monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp_mod)
+        monkeypatch.setattr(m, "EXPOSED_TOOLS", ("memory",))
+        monkeypatch.setattr(
+            model_tools,
+            "get_tool_definitions",
+            lambda quiet_mode=True: [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "memory",
+                        "description": "Manage memory",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        )
+
+        def broken_dispatcher(**kwargs):
+            raise RuntimeError("memory store unavailable")
+
+        monkeypatch.setitem(
+            m._STATELESS_AGENT_LOOP_DISPATCHERS,
+            "memory",
+            broken_dispatcher,
+        )
+
+        server = m._build_server()
+        payload = json.loads(server.tools["memory"](action="list"))
+
+        assert payload == {"error": "memory store unavailable", "tool": "memory"}
+
+    def test_build_server_preserves_hermes_parameter_schema(self, monkeypatch):
+        """Codex should see Hermes' tool JSON schema, not FastMCP's **kwargs schema."""
+        from agent.transports import hermes_tools_mcp_server as m
+        import model_tools
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "limit": {"type": "integer", "default": 5},
+            },
+            "required": ["query"],
+        }
+
+        monkeypatch.setattr(m, "EXPOSED_TOOLS", ("web_search",))
+        monkeypatch.setattr(
+            model_tools,
+            "get_tool_definitions",
+            lambda quiet_mode=True: [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "description": "Search the web",
+                        "parameters": schema,
+                    },
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            model_tools,
+            "handle_function_call",
+            lambda name, args: "handled",
+        )
+
+        server = m._build_server()
+
+        assert server._tool_manager._tools["web_search"].parameters == schema
 
     def test_kanban_worker_tools_exposed(self):
         """Kanban workers run as `hermes chat -q` subprocesses; if they
