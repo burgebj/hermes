@@ -340,6 +340,45 @@ class TestItalicNewlineBug:
 
 
 # =========================================================================
+# format_message - dash list markers → bullet conversion
+# =========================================================================
+
+
+class TestDashListMarkerConversion:
+    """Dash list markers (- item) must be converted to bullet (• item)
+    so MarkdownV2 escaping does not produce \\- artifacts."""
+
+    def test_simple_dash_list(self, adapter):
+        text = "- First item\n- Second item\n- Third item"
+        result = adapter.format_message(text)
+        assert "\\-" not in result
+        assert "• First item" in result or "•" in result
+        assert "First item" in result
+        assert "Second item" in result
+
+    def test_indented_dash_list(self, adapter):
+        text = "  - Nested item\n    - Deeper item"
+        result = adapter.format_message(text)
+        assert "\\-" not in result
+        assert "Nested item" in result
+        assert "Deeper item" in result
+
+    def test_dash_in_middle_of_text_not_converted(self, adapter):
+        """A dash inside a word or sentence should NOT become a bullet."""
+        text = "This is a well-known fact"
+        result = adapter.format_message(text)
+        # The dash in 'well-known' should be escaped, not converted to bullet
+        assert "•" not in result
+
+    def test_mixed_content_with_list(self, adapter):
+        text = "Here is a list:\n- Alpha\n- Beta\n\nAnd some text."
+        result = adapter.format_message(text)
+        assert "Alpha" in result
+        assert "Beta" in result
+        assert "\\-" not in result
+
+
+# =========================================================================
 # format_message - strikethrough
 # =========================================================================
 

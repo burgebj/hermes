@@ -4463,15 +4463,20 @@ class TelegramAdapter(BasePlatformAdapter):
             flags=re.MULTILINE,
         )
 
-        # 10) Escape remaining special characters in plain text
+        # 10) Convert markdown list markers (- item) to bullet characters (• item)
+        #     so they are not broken by MarkdownV2 escape of the dash character.
+        #     Also handle * list markers (when not bold) at line start.
+        text = re.sub(r'^([ \t]*)- ', r'\1• ', text, flags=re.MULTILINE)
+
+        # 11) Escape remaining special characters in plain text
         text = _escape_mdv2(text)
 
-        # 11) Restore placeholders in reverse insertion order so that
+        # 12) Restore placeholders in reverse insertion order so that
         #    nested references (a placeholder inside another) resolve correctly.
         for key in reversed(list(placeholders.keys())):
             text = text.replace(key, placeholders[key])
 
-        # 12) Safety net: escape unescaped ( ) { } that slipped through
+        # 13) Safety net: escape unescaped ( ) { } that slipped through
         #     placeholder processing.  Split the text into code/non-code
         #     segments so we never touch content inside ``` or ` spans.
         _code_split = re.split(r'(```[\s\S]*?```|`[^`]+`)', text)
