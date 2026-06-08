@@ -1700,6 +1700,23 @@ DEFAULT_CONFIG = {
         # Flip to true only if you trust delegated work to run dangerous cmds
         # without human review (cron pipelines, batch automation, etc.).
         "subagent_auto_approve": False,
+        # Named first-class delegation profiles. A profile can route one
+        # delegate_task call (or one task in a batch) to another provider/model
+        # and constrain the child's tools without changing global delegation
+        # defaults. Select with delegate_task(..., delegation_profile="name").
+        "profiles": {
+            # Cheap read-only scout profile for DeepSeek and similar aux models.
+            # Requires DEEPSEEK_API_KEY when selected. It deliberately cannot
+            # write files, run terminal commands, send messages, or delegate.
+            "deepseek_aux": {
+                "provider": "deepseek",
+                "model": "deepseek-v4-pro",
+                "toolsets": ["file_readonly", "web", "session_search"],
+                "allowed_toolsets": ["file_readonly", "web", "session_search"],
+                "max_iterations": 30,
+                "reasoning_effort": "low",
+            },
+        },
     },
 
     # Ephemeral prefill messages file — JSON list of {role, content} dicts
