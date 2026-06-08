@@ -471,6 +471,13 @@ prompt_caching:
 #                           # reasoning controls:
 #                           # extra_body:
 #                           #   enable_thinking: false
+#
+#   # Automatic session titles — names a session from its first exchange
+#   title_generation:
+#     enabled: true         # set false to turn off automatic titling entirely
+#                           # (manual /title still works)
+#     provider: "auto"
+#     model: ""
 
 # =============================================================================
 # Persistent Memory
