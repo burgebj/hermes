@@ -949,6 +949,63 @@ class TestRunJobSessionPersistence:
         assert "IMPORTANT" not in title
         assert title.startswith("Morning digest")
 
+    def test_run_job_persists_clean_cron_summary_not_synthetic_skill_prompt(self, tmp_path):
+        job = {
+            "id": "poison-job",
+            "name": "Journal runtime",
+            "prompt": "Summarize durable Journal work.",
+            "schedule": "20 * * * *",
+            "skills": ["leaky-skill"],
+        }
+        fake_db = MagicMock()
+        skill_payload = json.dumps({
+            "success": True,
+            "content": "---\nname: leaky-skill\n---\n# Leaky skill body\nDo lots of work.",
+        })
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("tools.skills_tool.skill_view", return_value=skill_payload), \
+             patch("tools.skill_usage.bump_use"), \
+             patch("agent.skill_bundles.resolve_bundle_command_key", return_value=None), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "test-key",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+
+            success, _output, final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert final_response == "ok"
+
+        api_prompt = mock_agent.run_conversation.call_args.args[0]
+        assert "[IMPORTANT: The user has invoked" in api_prompt
+        assert "# Leaky skill body" in api_prompt
+
+        persisted = mock_agent.run_conversation.call_args.kwargs["persist_user_message"]
+        assert "Cron job: Journal runtime" in persisted
+        assert "Job ID: poison-job" in persisted
+        assert "Schedule: 20 * * * *" in persisted
+        assert "Skills: leaky-skill" in persisted
+        assert "Summarize durable Journal work." in persisted
+        assert "[IMPORTANT:" not in persisted
+        assert "The user has invoked" not in persisted
+        assert "full skill content" not in persisted
+        assert "# Leaky skill body" not in persisted
+        assert "name: leaky-skill" not in persisted
+
     def test_run_job_closes_agent_on_failure_to_prevent_fd_leak(self, tmp_path):
         # Regression: if ``run_conversation`` raises, the ephemeral cron
         # agent was previously leaked — over days of ticks this accumulated
@@ -1690,7 +1747,7 @@ class TestRunJobSkillBacked:
             register_env_passthrough(["NOTION_API_KEY"])
             return json.dumps({"success": True, "content": "# notion\nUse Notion."})
 
-        def _run_conversation(prompt):
+        def _run_conversation(prompt, **_kwargs):
             from tools.env_passthrough import get_all_passthrough
 
             assert "NOTION_API_KEY" in get_all_passthrough()
@@ -1747,7 +1804,7 @@ class TestRunJobSkillBacked:
             register_credential_file("credentials/google_token.json")
             return json.dumps({"success": True, "content": "# google-workspace\nUse Google."})
 
-        def _run_conversation(prompt):
+        def _run_conversation(prompt, **_kwargs):
             from tools.credential_files import _get_registered
 
             registered = _get_registered()

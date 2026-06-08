@@ -1294,6 +1294,48 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
     return _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
 
 
+def _build_job_persist_user_message(job: dict) -> str:
+    """Build the transcript-safe user message for a cron agent run.
+
+    The API prompt for skill-backed cron jobs intentionally contains runtime
+    control scaffolding plus full skill bodies. Persisting that assembled
+    prompt as the session's user message makes Desktop/session_search/Journal
+    projections treat synthetic skill text as if the human typed it. Store a
+    compact cron receipt instead; the full assembled prompt still goes only to
+    the model for this run.
+    """
+
+    job_id = str(job.get("id") or "").strip() or "<unknown>"
+    job_name = str(
+        job.get("name") or job.get("prompt") or job_id or "cron job"
+    ).strip()
+    lines = [f"Cron job: {job_name}", f"Job ID: {job_id}"]
+
+    schedule = str(job.get("schedule") or "").strip()
+    if schedule:
+        lines.append(f"Schedule: {schedule}")
+
+    skills = job.get("skills")
+    if skills is None:
+        legacy = job.get("skill")
+        skills = [legacy] if legacy else []
+    elif isinstance(skills, str):
+        skills = [skills]
+    skill_names = [str(name).strip() for name in skills if str(name).strip()]
+    if skill_names:
+        lines.append(f"Skills: {', '.join(skill_names)}")
+
+    script_path = str(job.get("script") or "").strip()
+    if script_path:
+        lines.append(f"Script: {script_path}")
+
+    prompt = str(job.get("prompt") or "").strip()
+    lines.append("")
+    lines.append("Instruction:")
+    lines.append(prompt or "(none)")
+    return "\n".join(lines)
+
+
 def _scan_assembled_cron_prompt(assembled: str, job: dict, *, has_skills: bool = False) -> str:
     """Scan the fully-assembled cron prompt for injection patterns. Raises
     ``CronPromptInjectionBlocked`` when a match fires so ``run_job`` can
@@ -1829,7 +1871,13 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # env passthrough registrations) when the cron run hops into the worker
         # thread used for inactivity timeout monitoring.
         _cron_context = contextvars.copy_context()
-        _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
+        persist_user_message = _build_job_persist_user_message(job)
+        _cron_future = _cron_pool.submit(
+            _cron_context.run,
+            agent.run_conversation,
+            prompt,
+            persist_user_message=persist_user_message,
+        )
         _inactivity_timeout = False
         try:
             if _cron_inactivity_limit is None:
