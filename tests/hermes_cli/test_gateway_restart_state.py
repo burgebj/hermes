@@ -1150,3 +1150,244 @@ class TestLeasePublishRollback:
         stored = read_intent("default", rid)
         assert stored is not None
         assert stored["state"] == "scheduled"
+
+
+# ---------------------------------------------------------------------------
+# GC tests (P1-1, P1-2)
+# ---------------------------------------------------------------------------
+
+class TestGCOrphanClaimLock:
+    """P1-1: orphan claim.lock with status=scheduled should be GC'd."""
+
+    def test_orphan_claim_lock_with_scheduled_status_gc(self, tmp_path, monkeypatch):
+        """status=scheduled + old claim.lock + dead worker_pid → GC deletes."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import hermes_cli.config as config_mod
+        monkeypatch.setattr(config_mod, "get_hermes_home", lambda: str(tmp_path))
+        import hermes_cli.gateway_restart_state as state_mod
+
+        profile = "default"
+        profile_dir = tmp_path / "run" / "gateway-restart" / profile
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create a request directory with scheduled status + claim.lock
+        rid = "orphan-claim-test"
+        req_dir = profile_dir / rid
+        req_dir.mkdir(parents=True, exist_ok=True)
+
+        # status.json with state=scheduled (Coordinator wrote this before Worker crashed)
+        (req_dir / "status.json").write_text(json.dumps({
+            "state": "scheduled",
+            "request_id": rid,
+            "updated_at": "2020-01-01T00:00:00+00:00",
+        }), encoding="utf-8")
+
+        # claim.lock with dead PID and old timestamp
+        (req_dir / "claim.lock").write_text(json.dumps({
+            "request_id": rid,
+            "worker_pid": 99999,  # Dead PID
+            "created_at": time.time() - 7200,  # 2 hours ago
+        }), encoding="utf-8")
+
+        # intent.json
+        (req_dir / "intent.json").write_text(json.dumps({
+            "schema_version": 1,
+            "request_id": rid,
+            "nonce": "test",
+            "profile": profile,
+            "hermes_home": str(tmp_path),
+            "target_pid": 100,
+            "origin": "test",
+            "state": "scheduled",
+            "created_at": "2020-01-01T00:00:00+00:00",
+            "expires_at": 0,
+        }), encoding="utf-8")
+
+        # No lease.json (Worker crashed before publishing)
+
+        removed = state_mod.gc_expired_request_dirs(
+            profile=profile, max_age_s=3600)
+        assert removed == 1
+        assert not req_dir.exists()
+
+    def test_orphan_claim_lock_live_worker_skipped(self, tmp_path, monkeypatch):
+        """claim.lock with live worker_pid → GC skips."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import hermes_cli.config as config_mod
+        monkeypatch.setattr(config_mod, "get_hermes_home", lambda: str(tmp_path))
+        import hermes_cli.gateway_restart_state as state_mod
+        import os
+
+        profile = "default"
+        profile_dir = tmp_path / "run" / "gateway-restart" / profile
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        rid = "live-worker-test"
+        req_dir = profile_dir / rid
+        req_dir.mkdir(parents=True, exist_ok=True)
+
+        (req_dir / "claim.lock").write_text(json.dumps({
+            "request_id": rid,
+            "worker_pid": os.getpid(),  # Current process — alive
+            "created_at": time.time() - 7200,
+        }), encoding="utf-8")
+
+        removed = state_mod.gc_expired_request_dirs(
+            profile=profile, max_age_s=3600)
+        assert removed == 0
+        assert req_dir.exists()
+
+    def test_orphan_claim_lock_recent_skipped(self, tmp_path, monkeypatch):
+        """claim.lock too recent → GC skips."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import hermes_cli.config as config_mod
+        monkeypatch.setattr(config_mod, "get_hermes_home", lambda: str(tmp_path))
+        import hermes_cli.gateway_restart_state as state_mod
+
+        profile = "default"
+        profile_dir = tmp_path / "run" / "gateway-restart" / profile
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        rid = "recent-claim-test"
+        req_dir = profile_dir / rid
+        req_dir.mkdir(parents=True, exist_ok=True)
+
+        (req_dir / "claim.lock").write_text(json.dumps({
+            "request_id": rid,
+            "worker_pid": 99999,
+            "created_at": time.time() - 10,  # Only 10 seconds ago
+        }), encoding="utf-8")
+
+        removed = state_mod.gc_expired_request_dirs(
+            profile=profile, max_age_s=3600)
+        assert removed == 0
+        assert req_dir.exists()
+
+
+class TestGCOrphanLeaseJson:
+    """P1-2: orphan lease.json should be GC'd when worker is dead."""
+
+    def test_orphan_lease_json_gc(self, tmp_path, monkeypatch):
+        """old lease.json + dead worker_pid + terminal status → GC deletes."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import hermes_cli.config as config_mod
+        monkeypatch.setattr(config_mod, "get_hermes_home", lambda: str(tmp_path))
+        import hermes_cli.gateway_restart_state as state_mod
+
+        profile = "default"
+        profile_dir = tmp_path / "run" / "gateway-restart" / profile
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        rid = "orphan-lease-test"
+        req_dir = profile_dir / rid
+        req_dir.mkdir(parents=True, exist_ok=True)
+
+        # status.json with terminal state
+        (req_dir / "status.json").write_text(json.dumps({
+            "state": "failed",
+            "request_id": rid,
+            "updated_at": "2020-01-01T00:00:00+00:00",
+        }), encoding="utf-8")
+
+        # lease.json with dead PID and old timestamp
+        (req_dir / "lease.json").write_text(json.dumps({
+            "request_id": rid,
+            "owner_token": "test-token",
+            "worker_pid": 99999,  # Dead PID
+            "claimed_at": time.time() - 7200,  # 2 hours ago
+        }), encoding="utf-8")
+
+        # claim.lock
+        (req_dir / "claim.lock").write_text(json.dumps({
+            "request_id": rid,
+            "worker_pid": 99999,
+            "created_at": time.time() - 7200,
+        }), encoding="utf-8")
+
+        removed = state_mod.gc_expired_request_dirs(
+            profile=profile, max_age_s=3600)
+        assert removed == 1
+        assert not req_dir.exists()
+
+    def test_orphan_lease_json_live_worker_skipped(self, tmp_path, monkeypatch):
+        """lease.json with live worker → GC skips."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import hermes_cli.config as config_mod
+        monkeypatch.setattr(config_mod, "get_hermes_home", lambda: str(tmp_path))
+        import hermes_cli.gateway_restart_state as state_mod
+        import os
+
+        profile = "default"
+        profile_dir = tmp_path / "run" / "gateway-restart" / profile
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        rid = "live-lease-test"
+        req_dir = profile_dir / rid
+        req_dir.mkdir(parents=True, exist_ok=True)
+
+        (req_dir / "lease.json").write_text(json.dumps({
+            "request_id": rid,
+            "owner_token": "test-token",
+            "worker_pid": os.getpid(),  # Alive
+            "claimed_at": time.time() - 7200,
+        }), encoding="utf-8")
+
+        removed = state_mod.gc_expired_request_dirs(
+            profile=profile, max_age_s=3600)
+        assert removed == 0
+        assert req_dir.exists()
+
+    def test_orphan_lease_json_recent_skipped(self, tmp_path, monkeypatch):
+        """lease.json too recent → GC skips."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import hermes_cli.config as config_mod
+        monkeypatch.setattr(config_mod, "get_hermes_home", lambda: str(tmp_path))
+        import hermes_cli.gateway_restart_state as state_mod
+
+        profile = "default"
+        profile_dir = tmp_path / "run" / "gateway-restart" / profile
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        rid = "recent-lease-test"
+        req_dir = profile_dir / rid
+        req_dir.mkdir(parents=True, exist_ok=True)
+
+        (req_dir / "lease.json").write_text(json.dumps({
+            "request_id": rid,
+            "owner_token": "test-token",
+            "worker_pid": 99999,
+            "claimed_at": time.time() - 10,  # Only 10s ago
+        }), encoding="utf-8")
+
+        removed = state_mod.gc_expired_request_dirs(
+            profile=profile, max_age_s=3600)
+        assert removed == 0
+        assert req_dir.exists()
+
+    def test_active_request_dir_preserved(self, tmp_path, monkeypatch):
+        """active.lock指向的request目录不会被GC删除。"""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import hermes_cli.config as config_mod
+        monkeypatch.setattr(config_mod, "get_hermes_home", lambda: str(tmp_path))
+        import hermes_cli.gateway_restart_state as state_mod
+
+        profile = "default"
+        profile_dir = tmp_path / "run" / "gateway-restart" / profile
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        rid = "active-request-test"
+        req_dir = profile_dir / rid
+        req_dir.mkdir(parents=True, exist_ok=True)
+
+        (req_dir / "lease.json").write_text(json.dumps({
+            "request_id": rid,
+            "owner_token": "test-token",
+            "worker_pid": 99999,
+            "claimed_at": time.time() - 7200,
+        }), encoding="utf-8")
+
+        removed = state_mod.gc_expired_request_dirs(
+            profile=profile, max_age_s=3600,
+            active_request_id=rid)
+        assert removed == 0
+        assert req_dir.exists()

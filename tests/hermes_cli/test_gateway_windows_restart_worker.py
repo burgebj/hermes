@@ -2159,3 +2159,60 @@ class TestSchtasksFailClosedStrict:
         with pytest.raises(RuntimeError, match="Will NOT direct-spawn"):
             _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway")
         direct_spawn_mock.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# P2-1: psutil ImportError fallback tests
+# ---------------------------------------------------------------------------
+
+class TestPsutilImportErrorFallback:
+    """P2-1: When psutil is not installed, functions must use fallback
+    without raising UnboundLocalError."""
+
+    def test_is_port_in_use_socket_fallback(self, worker_env, monkeypatch):
+        """_is_port_in_use() uses socket fallback when psutil unavailable."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        monkeypatch.setattr(mod, "_psutil_mod", None)
+
+        # Should not raise UnboundLocalError
+        # Port 1 (unlikely to be in use) → False via socket.bind
+        result = mod._is_port_in_use(1)
+        assert isinstance(result, bool)
+
+    def test_get_pids_on_port_returns_empty(self, worker_env, monkeypatch):
+        """_get_pids_on_port() returns [] when psutil unavailable."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        monkeypatch.setattr(mod, "_psutil_mod", None)
+
+        result = mod._get_pids_on_port(8080)
+        assert result == []
+
+    def test_is_hermes_gateway_pid_returns_false(self, worker_env, monkeypatch):
+        """_is_hermes_gateway_pid() returns False when psutil unavailable."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        monkeypatch.setattr(mod, "_psutil_mod", None)
+
+        result = mod._is_hermes_gateway_pid(12345)
+        assert result is False
+
+    def test_is_ancestor_uses_platform_fallback(self, worker_env, monkeypatch):
+        """_is_ancestor() uses platform fallback when psutil unavailable."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        monkeypatch.setattr(mod, "_psutil_mod", None)
+
+        # Should not raise UnboundLocalError
+        # Checking a non-existent PID should return False
+        result = mod._is_ancestor(99999)
+        assert isinstance(result, bool)
+
+    def test_no_unbound_local_error_any_function(self, worker_env, monkeypatch):
+        """All 4 functions must not raise UnboundLocalError when psutil=None."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+        monkeypatch.setattr(mod, "_psutil_mod", None)
+
+        # Exercise all 4 functions
+        mod._is_port_in_use(55555)
+        mod._get_pids_on_port(55555)
+        mod._is_hermes_gateway_pid(99999)
+        mod._is_ancestor(99999)
+        # If we got here, no UnboundLocalError was raised

@@ -39,7 +39,8 @@ _LOCK_TTL_S = 120     # 2 minutes
 #     {request_id}/
 #       intent.json                  ← restart intent (signed with nonce)
 #       status.json                  ← current state
-#       lease.lock                   ← O_EXCL worker lease (atomic claim)
+#       claim.lock                   ← O_EXCL race exclusion marker
+#       lease.json                   ← atomic lease publication (Coordinator → Worker handoff)
 # ---------------------------------------------------------------------------
 
 def _get_restart_base() -> Path:
@@ -295,36 +296,75 @@ def gc_expired_request_dirs(profile: str = "default",
             # Never delete the active request
             if d.name == active_request_id:
                 continue
-            # Check for orphan claim.lock
-            clp = d / "claim.lock"
+            # Check for orphan lease.json and claim.lock
             ljp = d / "lease.json"
+            clp = d / "claim.lock"
+            # Track whether we determined this dir is an orphan
+            _orphan_lease = False
+            _orphan_claim = False
+
+            # P1-2: Check lease.json — if old + dead worker → orphan
             if ljp.exists():
-                # Active lease — skip
-                continue
-            if clp.exists():
-                # Check if claim.lock is orphaned
                 try:
-                    import json as _json
-                    cl_data = _json.loads(clp.read_text(encoding="utf-8"))
-                    if isinstance(cl_data, dict):
-                        cl_age = now - cl_data.get("created_at", d.stat().st_mtime)
-                        cl_pid = cl_data.get("worker_pid", 0)
-                        # Only GC if claim is old enough AND worker is dead
-                        if cl_age < max_age_s:
+                    import json as _lj
+                    lj_data = _lj.loads(ljp.read_text(encoding="utf-8"))
+                    if isinstance(lj_data, dict):
+                        lj_age = now - lj_data.get("claimed_at", ljp.stat().st_mtime)
+                        lj_pid = lj_data.get("worker_pid", 0)
+                        if lj_age < max_age_s:
+                            continue  # Lease too recent — skip
+                        if lj_pid > 0 and _pid_exists(lj_pid):
+                            continue  # Worker still alive — skip
+                        _orphan_lease = True
+                    else:
+                        # Malformed lease.json — check file age
+                        if now - ljp.stat().st_mtime < max_age_s:
                             continue
-                        if cl_pid > 0 and _pid_exists(cl_pid):
-                            continue
-                    # Orphaned claim.lock — allow GC
+                        _orphan_lease = True
                 except (OSError, ValueError, json.JSONDecodeError):
-                    # Can't parse claim.lock — check mtime
                     try:
-                        if now - d.stat().st_mtime < max_age_s:
+                        if now - ljp.stat().st_mtime < max_age_s:
                             continue
+                        _orphan_lease = True
                     except OSError:
                         continue
+
+            # P1-1: Check claim.lock — if old + dead worker → orphan
+            # (only reached if lease.json absent or already determined orphan)
+            if clp.exists() and not _orphan_lease:
+                try:
+                    import json as _cl
+                    cl_data = _cl.loads(clp.read_text(encoding="utf-8"))
+                    if isinstance(cl_data, dict):
+                        cl_age = now - cl_data.get("created_at", clp.stat().st_mtime)
+                        cl_pid = cl_data.get("worker_pid", 0)
+                        if cl_age < max_age_s:
+                            continue  # Claim too recent — skip
+                        if cl_pid > 0 and _pid_exists(cl_pid):
+                            continue  # Worker still alive — skip
+                        _orphan_claim = True
+                    else:
+                        if now - clp.stat().st_mtime < max_age_s:
+                            continue
+                        _orphan_claim = True
+                except (OSError, ValueError, json.JSONDecodeError):
+                    try:
+                        if now - clp.stat().st_mtime < max_age_s:
+                            continue
+                        _orphan_claim = True
+                    except OSError:
+                        continue
+
+            # If we found an orphan (lease or claim), delete the directory
+            if _orphan_lease or _orphan_claim:
+                import shutil
+                shutil.rmtree(d, ignore_errors=True)
+                removed += 1
+                continue
+
+            # No lease/claim — check status.json for terminal state
             sp = d / "status.json"
             if not sp.exists():
-                # No status = stale/orphaned, check age by directory mtime
                 try:
                     age = now - d.stat().st_mtime
                     if age > max_age_s:
@@ -337,7 +377,6 @@ def gc_expired_request_dirs(profile: str = "default",
             try:
                 data = json.loads(sp.read_text(encoding="utf-8"))
                 state = data.get("state", "")
-                # Only GC terminal states
                 if state not in _TERMINAL_STATES:
                     continue
                 ts_str = data.get("updated_at", "")

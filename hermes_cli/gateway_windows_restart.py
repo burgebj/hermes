@@ -123,7 +123,7 @@ def schedule_restart_handoff(
     """Schedule a transactional restart.
 
     Correct ordering: acquire lock → write intent → spawn worker →
-    worker claims lease → coordinator releases its hold.
+    worker claims lease → hand off active.lock ownership to worker.
 
     Returns a result dict with keys:
     - request_id: str
@@ -384,8 +384,7 @@ def _spawn_worker(intent: dict[str, Any], profile: str, request_id: str) -> int:
     Worker reads intent from the per-request directory (no CLI arg exposure).
     """
     import subprocess
-    from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
-    from hermes_cli.gateway_windows import _build_gateway_argv, _derive_venv_pythonw
+    from hermes_cli.gateway_windows import _derive_venv_pythonw
 
     python_exe = sys.executable
     pythonw = _derive_venv_pythonw(python_exe) or python_exe

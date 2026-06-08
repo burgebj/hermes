@@ -363,16 +363,22 @@ def _detect_gateway_port() -> int:
     return 0
 
 
+try:
+    import psutil as _psutil_mod
+except ImportError:
+    _psutil_mod = None  # type: ignore[assignment]
+
+
 def _is_port_in_use(port: int) -> bool:
     """Check if a TCP port is in use."""
-    try:
-        import psutil
-        for conn in psutil.net_connections(kind="inet"):
-            if conn.laddr.port == port and conn.status == "LISTEN":
-                return True
-        return False
-    except (ImportError, psutil.AccessDenied):
-        pass
+    if _psutil_mod is not None:
+        try:
+            for conn in _psutil_mod.net_connections(kind="inet"):
+                if conn.laddr.port == port and conn.status == "LISTEN":
+                    return True
+            return False
+        except _psutil_mod.AccessDenied:
+            pass
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -384,34 +390,36 @@ def _is_port_in_use(port: int) -> bool:
 
 def _get_pids_on_port(port: int) -> list[int]:
     """Get PIDs listening on a port."""
-    try:
-        import psutil
-        pids = []
-        for conn in psutil.net_connections(kind="inet"):
-            if conn.laddr.port == port and conn.status == "LISTEN" and conn.pid:
-                pids.append(conn.pid)
-        return pids
-    except (ImportError, psutil.AccessDenied):
-        return []
+    if _psutil_mod is not None:
+        try:
+            pids = []
+            for conn in _psutil_mod.net_connections(kind="inet"):
+                if conn.laddr.port == port and conn.status == "LISTEN" and conn.pid:
+                    pids.append(conn.pid)
+            return pids
+        except _psutil_mod.AccessDenied:
+            pass
+    return []
 
 
 def _is_hermes_gateway_pid(pid: int) -> bool:
     """Check if a PID is a Hermes Gateway process."""
-    try:
-        import psutil
-        proc = psutil.Process(pid)
-        cmdline = " ".join(proc.cmdline())
-        return any(
-            pattern in cmdline
-            for pattern in (
-                "hermes_cli.main gateway",
-                "hermes_cli/main.py gateway",
-                "hermes gateway",
-                "gateway/run.py",
+    if _psutil_mod is not None:
+        try:
+            proc = _psutil_mod.Process(pid)
+            cmdline = " ".join(proc.cmdline())
+            return any(
+                pattern in cmdline
+                for pattern in (
+                    "hermes_cli.main gateway",
+                    "hermes_cli/main.py gateway",
+                    "hermes gateway",
+                    "gateway/run.py",
+                )
             )
-        )
-    except (ImportError, psutil.NoSuchProcess, psutil.AccessDenied):
-        return False
+        except (_psutil_mod.NoSuchProcess, _psutil_mod.AccessDenied):
+            pass
+    return False
 
 
 def _wait_for_port_release(
@@ -749,15 +757,15 @@ def _pid_wait(pid: int, timeout: float = 10.0) -> bool:
 def _is_ancestor(pid: int) -> bool:
     """Check if pid is an ancestor of the current process."""
     current = os.getpid()
-    try:
-        import psutil
-        proc = psutil.Process(current)
-        for parent in proc.parents():
-            if parent.pid == pid:
-                return True
-        return False
-    except (ImportError, psutil.NoSuchProcess):
-        pass
+    if _psutil_mod is not None:
+        try:
+            proc = _psutil_mod.Process(current)
+            for parent in proc.parents():
+                if parent.pid == pid:
+                    return True
+            return False
+        except _psutil_mod.NoSuchProcess:
+            pass
 
     # Fallback: walk ppid chain
     try:
