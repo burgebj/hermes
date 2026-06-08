@@ -2787,7 +2787,7 @@ def _retry_same_provider_sync(
     temperature: Optional[float],
     max_tokens: Optional[int],
     tools: Optional[list],
-    effective_timeout: float,
+    effective_timeout: Optional[float],
     effective_extra_body: dict,
 ) -> Any:
     if task == "vision":
@@ -2844,7 +2844,7 @@ async def _retry_same_provider_async(
     temperature: Optional[float],
     max_tokens: Optional[int],
     tools: Optional[list],
-    effective_timeout: float,
+    effective_timeout: Optional[float],
     effective_extra_body: dict,
 ) -> Any:
     if task == "vision":
@@ -4746,6 +4746,27 @@ def _resolve_task_provider_model(
 _DEFAULT_AUX_TIMEOUT = 30.0
 
 
+def _normalize_aux_timeout(value: Any) -> Optional[float]:
+    """Normalize auxiliary request timeouts.
+
+    Hermes config uses ``0`` to mean "no per-request timeout override" for
+    auxiliary tasks.  The OpenAI/httpx stack treats a raw ``timeout=0`` as
+    an already-expired deadline, which makes context compression fail fast
+    with a misleading ``Connection error``.  Keep positive timeouts unchanged
+    and convert zero/negative values to ``None`` before request kwargs are
+    assembled.
+    """
+    if value is None:
+        return None
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return None
+    if timeout <= 0:
+        return None
+    return timeout
+
+
 def _get_auxiliary_task_config(task: str) -> Dict[str, Any]:
     """Return the config dict for auxiliary.<task>, or {} when unavailable.
 
@@ -4790,18 +4811,22 @@ def _get_auxiliary_task_config(task: str) -> Dict[str, Any]:
     return task_config
 
 
-def _get_task_timeout(task: str, default: float = _DEFAULT_AUX_TIMEOUT) -> float:
+def _get_task_timeout(task: str, default: float = _DEFAULT_AUX_TIMEOUT) -> Optional[float]:
     """Read timeout from auxiliary.{task}.timeout in config, falling back to *default*."""
     if not task:
-        return default
+        return _normalize_aux_timeout(default)
     task_config = _get_auxiliary_task_config(task)
     raw = task_config.get("timeout")
     if raw is not None:
+        normalized = _normalize_aux_timeout(raw)
+        if normalized is not None or str(raw).strip() in {"0", "0.0", "-0", "-0.0"}:
+            return normalized
         try:
-            return float(raw)
-        except (ValueError, TypeError):
+            if float(raw) <= 0:
+                return None
+        except (TypeError, ValueError):
             pass
-    return default
+    return _normalize_aux_timeout(default)
 
 
 def _get_task_extra_body(task: str) -> Dict[str, Any]:
@@ -4926,7 +4951,7 @@ def _build_call_kwargs(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     tools: Optional[list] = None,
-    timeout: float = 30.0,
+    timeout: Optional[float] = 30.0,
     extra_body: Optional[dict] = None,
     base_url: Optional[str] = None,
 ) -> dict:
@@ -4934,8 +4959,11 @@ def _build_call_kwargs(
     kwargs: Dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "timeout": timeout,
     }
+
+    normalized_timeout = _normalize_aux_timeout(timeout)
+    if normalized_timeout is not None:
+        kwargs["timeout"] = normalized_timeout
 
     fixed_temperature = _fixed_temperature_for_model(model, base_url)
     if fixed_temperature is OMIT_TEMPERATURE:
