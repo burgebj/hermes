@@ -69,10 +69,18 @@ def generate_preview(content: str, max_chars: int = DEFAULT_PREVIEW_SIZE_CHARS) 
 
 
 def _heredoc_marker(content: str) -> str:
-    """Return a heredoc delimiter that doesn't collide with content."""
-    if HEREDOC_MARKER not in content:
-        return HEREDOC_MARKER
-    return f"HERMES_PERSIST_{uuid.uuid4().hex[:8]}"
+    """Return a heredoc delimiter that doesn't collide with content.
+
+    Loops until a marker absent from *content* is found.  The default
+    marker (``HERMES_PERSIST_EOF``) is tried first; on collision, a
+    random 8-hex suffix is generated and also checked before use.
+    This avoids premature heredoc termination when tool output happens
+    to contain the fallback marker string.
+    """
+    marker = HEREDOC_MARKER
+    while marker in content:
+        marker = f"HERMES_PERSIST_{uuid.uuid4().hex[:8]}"
+    return marker
 
 
 def _write_to_sandbox(content: str, remote_path: str, env) -> bool:

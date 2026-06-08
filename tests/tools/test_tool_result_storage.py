@@ -77,6 +77,38 @@ class TestHeredocMarker:
         assert marker.startswith("HERMES_PERSIST_")
         assert marker not in content
 
+    def test_uuid_fallback_marker_also_checked_against_content(self):
+        """Fallback UUID marker must be absent from content — loop until safe.
+
+        Regression: original code returned the first random marker without
+        re-checking it against content. If content happened to contain the
+        generated marker, _write_to_sandbox produced a heredoc that terminated
+        early, silently truncating the stored output.
+        """
+        # Make the first UUID candidate also collide with content.
+        first_hex  = "aabbccdd" + "0" * 24   # uuid4().hex is 32 chars; [:8] → "aabbccdd"
+        second_hex = "11223344" + "0" * 24   # safe candidate
+
+        first_marker  = "HERMES_PERSIST_aabbccdd"
+        second_marker = "HERMES_PERSIST_11223344"
+
+        content = f"body {HEREDOC_MARKER} mid {first_marker} end"
+
+        call_count = 0
+        def controlled_uuid4():
+            nonlocal call_count
+            call_count += 1
+            m = MagicMock()
+            m.hex = first_hex if call_count == 1 else second_hex
+            return m
+
+        with patch("tools.tool_result_storage.uuid.uuid4", side_effect=controlled_uuid4):
+            marker = _heredoc_marker(content)
+
+        assert call_count >= 2, "must retry when first UUID also collides"
+        assert marker == second_marker
+        assert marker not in content
+
 
 # ── _write_to_sandbox ─────────────────────────────────────────────────
 
