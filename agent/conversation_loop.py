@@ -330,6 +330,23 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             )
 
 
+def _compression_made_progress(
+    orig_len: int, new_len: int, orig_tokens: int, new_tokens: int
+) -> bool:
+    """Return ``True`` if a compression pass materially reduced the request.
+
+    Compression can succeed by summarising message contents — reducing the
+    estimated request token count — without reducing the message row
+    count.  Treating row count as the sole progress signal false-positives
+    on size-only wins and surfaces a misleading "Cannot compress further"
+    failure even when post-compression tokens are well below the model
+    context window.  See issue #39548 for an observed case: 220 → 220
+    messages, ~288k → ~183k tokens on a 1M-context model still triggered
+    auto-reset.
+    """
+    return new_len < orig_len or new_tokens < orig_tokens
+
+
 def _get_continuation_prompt(is_partial_stub: bool, dropped_tools: Optional[List[str]] = None) -> str:
     if is_partial_stub and dropped_tools:
         tool_list = ", ".join(dropped_tools[:3])
@@ -689,12 +706,24 @@ def run_conversation(
             # context windows (each pass summarises the middle N turns).
             for _pass in range(3):
                 _orig_len = len(messages)
+                _orig_tokens = _preflight_tokens
                 messages, active_system_prompt = agent._compress_context(
                     messages, system_message, approx_tokens=_preflight_tokens,
                     task_id=effective_task_id,
                 )
-                if len(messages) >= _orig_len:
-                    break  # Cannot compress further
+                # Re-estimate now so size-only compression (same row count,
+                # lower token count — e.g. summarising tool outputs) is
+                # recognised as progress instead of being misread as
+                # "Cannot compress further". Fixes #39548.
+                _preflight_tokens = estimate_request_tokens_rough(
+                    messages,
+                    system_prompt=active_system_prompt or "",
+                    tools=agent.tools or None,
+                )
+                if not _compression_made_progress(
+                    _orig_len, len(messages), _orig_tokens, _preflight_tokens
+                ):
+                    break  # Cannot compress further: neither rows nor tokens moved
                 # Compression created a new session — clear the history
                 # reference so _flush_messages_to_session_db writes ALL
                 # compressed messages to the new session's SQLite, not
@@ -711,12 +740,6 @@ def run_conversation(
                 agent._last_content_with_tools = None
                 agent._last_content_tools_all_housekeeping = False
                 agent._mute_post_response = False
-                # Re-estimate after compression
-                _preflight_tokens = estimate_request_tokens_rough(
-                    messages,
-                    system_prompt=active_system_prompt or "",
-                    tools=agent.tools or None,
-                )
                 if not _compressor.should_compress(_preflight_tokens):
                     break  # Under threshold or anti-thrash guard stopped it
 
