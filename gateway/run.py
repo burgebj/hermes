@@ -2110,6 +2110,13 @@ class GatewayRunner:
         # Protects against the same utterance being emitted twice by the voice
         # capture / STT pipeline, which otherwise produces a second delayed reply.
         self._recent_voice_transcripts: Dict[tuple[int, int], List[tuple[float, str]]] = {}
+        # Bot-initiated Discord thread renames can echo back through
+        # on_thread_update after a newer /title or manual thread rename has
+        # already changed the DB. Track expected echoes so stale bot echoes do
+        # not overwrite the current title. Multiple bot renames can be in
+        # flight for the same thread, so keep a small per-thread queue instead
+        # of a single most-recent echo.
+        self._discord_thread_rename_echoes: Dict[str, list[tuple[str, str]]] = {}
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
@@ -4585,6 +4592,7 @@ class GatewayRunner:
             adapter.set_message_handler(self._handle_message)
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
+            adapter.set_thread_title_handler(self._handle_platform_thread_title_change)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
             adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
             adapter._busy_text_mode = self._busy_text_mode
@@ -6337,6 +6345,7 @@ class GatewayRunner:
                     adapter.set_message_handler(self._handle_message)
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
                     adapter.set_session_store(self.session_store)
+                    adapter.set_thread_title_handler(self._handle_platform_thread_title_change)
                     adapter.set_busy_session_handler(self._handle_active_session_busy_message)
                     adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
                     adapter._busy_text_mode = self._busy_text_mode
@@ -13650,6 +13659,304 @@ class GatewayRunner:
 
         future.add_done_callback(_log_rename_failure)
 
+    def _discord_platform_extra(self) -> dict:
+        """Return Discord platform extra config, if available."""
+        try:
+            platform_cfg = self.config.platforms.get(Platform.DISCORD)
+            extra = getattr(platform_cfg, "extra", None)
+        except Exception:
+            return {}
+        return extra if isinstance(extra, dict) else {}
+
+    def _discord_auto_thread_name_mode(self) -> str:
+        """Return how auto-created Discord threads should be named."""
+        raw = os.getenv("DISCORD_AUTO_THREAD_NAME_MODE")
+        if raw is None:
+            raw = self._discord_platform_extra().get("auto_thread_name_mode")
+        mode = str(raw or "summary").strip().lower()
+        return mode if mode in {"summary", "message"} else "summary"
+
+    def _discord_auto_thread_summary_max_chars(self) -> int:
+        """Return the Discord thread-title cap for summary-generated names."""
+        raw = os.getenv("DISCORD_AUTO_THREAD_SUMMARY_MAX_CHARS")
+        if raw is None:
+            raw = self._discord_platform_extra().get("auto_thread_summary_max_chars")
+        try:
+            max_chars = int(raw) if raw is not None else 70
+        except (TypeError, ValueError):
+            max_chars = 70
+        if max_chars <= 0:
+            return 70
+        # Discord thread names are capped at 100 characters. Keep invalid large
+        # values safe while still allowing users to choose shorter summaries.
+        return min(max_chars, 100)
+
+    def _sanitize_discord_thread_title(self, title: str, *, max_chars: int | None = None) -> str:
+        """Return a Discord-safe thread name.
+
+        Summary-generated titles use ``discord.auto_thread_summary_max_chars``.
+        Explicit/manual titles may use Discord's full 100-character limit.
+        """
+        if max_chars is None:
+            max_chars = self._discord_auto_thread_summary_max_chars()
+        max_chars = max(1, min(int(max_chars), 100))
+        cleaned = re.sub(r"\s+", " ", str(title or "")).strip() or "Hermes Chat"
+        if len(cleaned) <= max_chars:
+            return cleaned
+        if max_chars <= 3:
+            return cleaned[:max_chars]
+        return cleaned[: max_chars - 3].rstrip() + "..."
+
+    def _is_useful_discord_auto_thread_title(self, title: str) -> bool:
+        """Return False for low-information generated titles like the bot name.
+
+        Auto-title generation can occasionally return only the product/bot name
+        (for example, "Hermes").  That is worse than the initial message-derived
+        Discord thread name, so summary-mode auto-renames skip those generic
+        titles.  Explicit `/title` renames still bypass this guard.
+        """
+        cleaned = re.sub(r"\s+", " ", str(title or "")).strip()
+        if not cleaned:
+            return False
+        normalized = re.sub(r"[^a-z0-9]+", " ", cleaned.lower()).strip()
+        generic_titles = {
+            "hermes",
+            "hermes chat",
+            "hermes agent",
+            "new chat",
+            "new conversation",
+            "new thread",
+            "untitled",
+            "untitled chat",
+            "conversation",
+        }
+        return normalized not in generic_titles
+
+    def _is_discord_thread_source(self, source: SessionSource) -> bool:
+        """True when a source maps to a Discord thread."""
+        return (
+            getattr(source, "platform", None) == Platform.DISCORD
+            and bool(getattr(source, "thread_id", None))
+        )
+
+    def _is_discord_summary_thread_rename_enabled(self, source: SessionSource) -> bool:
+        """True when an auto-created Discord thread can be renamed from a generated title."""
+        return (
+            self._is_discord_thread_source(source)
+            and self._discord_auto_thread_name_mode() == "summary"
+            and bool(getattr(source, "thread_initial_name", None))
+        )
+
+    async def _rename_discord_thread_for_session_title(
+        self,
+        source: SessionSource,
+        session_id: str,
+        title: str,
+        *,
+        require_initial_name_match: bool = True,
+    ) -> None:
+        """Best-effort rename of a Discord thread when Hermes titles a session."""
+        if require_initial_name_match:
+            if not self._is_discord_summary_thread_rename_enabled(source):
+                return
+        elif not self._is_discord_thread_source(source):
+            return
+        adapter = self.adapters.get(Platform.DISCORD) if getattr(self, "adapters", None) else None
+        if adapter is None:
+            return
+        rename_thread = getattr(adapter, "rename_thread", None)
+        if rename_thread is None:
+            return
+        thread_id = str(getattr(source, "thread_id", "") or "")
+        if not thread_id:
+            return
+        session_store = getattr(self, "session_store", None)
+        finder = getattr(session_store, "find_session_by_thread", None) if session_store is not None else None
+        if not callable(finder):
+            return
+        try:
+            current_entry = finder(Platform.DISCORD, thread_id)
+        except Exception:
+            logger.debug("Failed to verify Discord thread session binding before rename", exc_info=True)
+            return
+        if current_entry is None or str(getattr(current_entry, "session_id", "") or "") != str(session_id):
+            return
+        expected_name = None
+        if require_initial_name_match:
+            expected_name = str(getattr(source, "thread_initial_name", "") or "")
+            if not expected_name:
+                return
+            if not self._is_useful_discord_auto_thread_title(title):
+                logger.debug(
+                    "Skipping Discord thread auto-rename for low-information generated title %r",
+                    title,
+                )
+                return
+        session_db = getattr(self, "_session_db", None)
+        if session_db is not None:
+            try:
+                expected_db_title = session_db.sanitize_title(title)
+                current_db_title = session_db.get_session_title(session_id)
+            except Exception:
+                logger.debug("Failed to verify session title before Discord thread rename", exc_info=True)
+                return
+            if not expected_db_title or current_db_title != expected_db_title:
+                return
+        thread_name = self._sanitize_discord_thread_title(
+            title,
+            max_chars=None if require_initial_name_match else 100,
+        )
+        try:
+            renamed = await rename_thread(
+                thread_id=thread_id,
+                name=thread_name,
+                expected_current_name=expected_name,
+            )
+            if renamed:
+                echoes = getattr(self, "_discord_thread_rename_echoes", None)
+                if echoes is None:
+                    echoes = {}
+                    setattr(self, "_discord_thread_rename_echoes", echoes)
+                pending_echoes = echoes.get(thread_id)
+                if not isinstance(pending_echoes, list):
+                    pending_echoes = [pending_echoes] if pending_echoes is not None else []
+                pending_echoes.append((str(session_id), thread_name))
+                # Bound memory even if Discord never emits a matching update.
+                echoes[thread_id] = pending_echoes[-8:]
+        except Exception:
+            logger.debug(
+                "Failed to rename Discord thread %s for session title %s",
+                thread_id,
+                session_id,
+                exc_info=True,
+            )
+
+    async def _handle_platform_thread_title_change(
+        self,
+        platform: Platform,
+        thread_id: str,
+        title: str,
+    ) -> None:
+        """Sync an externally renamed platform thread back to the Hermes session title."""
+        if not title or not self._session_db:
+            return
+        try:
+            sanitized = self._session_db.sanitize_title(title)
+        except ValueError:
+            logger.debug("Ignoring invalid platform thread title %r from %s", title, platform.value)
+            return
+        if not sanitized:
+            return
+        finder = getattr(self.session_store, "find_session_by_thread", None)
+        if finder is None:
+            return
+        entry = finder(platform, thread_id)
+        if entry is None:
+            return
+        if platform == Platform.DISCORD:
+            echoes = getattr(self, "_discord_thread_rename_echoes", None)
+            pending_echoes = echoes.get(str(thread_id)) if isinstance(echoes, dict) else None
+            if isinstance(pending_echoes, tuple):
+                pending_echoes = [pending_echoes]
+            elif not isinstance(pending_echoes, list):
+                pending_echoes = []
+            match_index = next(
+                (
+                    idx
+                    for idx, echo in enumerate(pending_echoes)
+                    if isinstance(echo, tuple) and len(echo) >= 2 and echo[1] == sanitized
+                ),
+                None,
+            )
+            if match_index is not None:
+                echo = pending_echoes.pop(match_index)
+                if isinstance(echoes, dict):
+                    if pending_echoes:
+                        echoes[str(thread_id)] = pending_echoes
+                    else:
+                        echoes.pop(str(thread_id), None)
+                try:
+                    current_title = self._session_db.get_session_title(entry.session_id)
+                except Exception:
+                    current_title = None
+                # This is the echo of a bot-initiated rename. If the thread was
+                # rebound before Discord delivered the echo, or if the DB has
+                # moved on, ignore it instead of rewriting the current
+                # user/workflow title. If it has not moved on, the DB is already
+                # correct and no write is needed.
+                if str(echo[0]) != str(entry.session_id) or current_title != sanitized:
+                    logger.debug(
+                        "Ignoring stale Discord thread rename echo %r for session %s",
+                        sanitized,
+                        entry.session_id,
+                    )
+                return
+        try:
+            self._session_db.set_session_title(entry.session_id, sanitized)
+        except ValueError:
+            logger.debug(
+                "Ignoring platform thread title %r for session %s",
+                sanitized,
+                entry.session_id,
+                exc_info=True,
+            )
+        except Exception:
+            logger.debug(
+                "Failed to sync platform thread title %r for %s thread %s",
+                sanitized,
+                platform.value,
+                thread_id,
+                exc_info=True,
+            )
+
+    def _schedule_discord_thread_title_rename(
+        self,
+        source: SessionSource,
+        session_id: str,
+        title: str,
+        *,
+        require_initial_name_match: bool = True,
+    ) -> None:
+        """Schedule a Discord thread rename from the gateway loop."""
+        if not title:
+            return
+        if require_initial_name_match:
+            if not self._is_discord_summary_thread_rename_enabled(source):
+                return
+        elif not self._is_discord_thread_source(source):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = getattr(self, "_gateway_loop", None)
+        if loop is None or loop.is_closed():
+            return
+        try:
+            copied_source = dataclasses.replace(source)
+        except Exception:
+            copied_source = source
+        future = safe_schedule_threadsafe(
+            self._rename_discord_thread_for_session_title(
+                copied_source,
+                session_id,
+                title,
+                require_initial_name_match=require_initial_name_match,
+            ),
+            loop,
+            logger=logger,
+            log_message="Discord thread title rename failed to schedule",
+        )
+        if future is None:
+            return
+
+        def _log_rename_failure(fut) -> None:
+            try:
+                fut.result()
+            except Exception:
+                logger.debug("Discord thread title rename failed", exc_info=True)
+
+        future.add_done_callback(_log_rename_failure)
+
     _TELEGRAM_CAPABILITY_HINT_COOLDOWN_S = 300.0
 
     def _should_send_telegram_capability_hint(self, source: SessionSource) -> bool:
@@ -13954,6 +14261,12 @@ class GatewayRunner:
             # Set the title
             try:
                 if self._session_db.set_session_title(session_id, sanitized):
+                    self._schedule_discord_thread_title_rename(
+                        source,
+                        session_id,
+                        sanitized,
+                        require_initial_name_match=False,
+                    )
                     return t("gateway.title.set_to", title=sanitized)
                 else:
                     return t("gateway.title.not_found")
@@ -18704,6 +19017,12 @@ class GatewayRunner:
                     }
                     if self._is_telegram_topic_lane(source):
                         maybe_auto_title_kwargs["title_callback"] = lambda title: self._schedule_telegram_topic_title_rename(
+                            source,
+                            effective_session_id,
+                            title,
+                        )
+                    elif self._is_discord_summary_thread_rename_enabled(source):
+                        maybe_auto_title_kwargs["title_callback"] = lambda title: self._schedule_discord_thread_title_rename(
                             source,
                             effective_session_id,
                             title,

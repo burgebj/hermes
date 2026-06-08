@@ -381,6 +381,70 @@ async def test_discord_auto_thread_enabled_by_default(adapter, monkeypatch):
     event = adapter.handle_message.await_args.args[0]
     assert event.source.chat_type == "thread"
     assert event.source.thread_id == "999"
+    assert event.source.thread_initial_name == "auto-thread"
+
+
+@pytest.mark.asyncio
+async def test_discord_auto_thread_uses_message_default_before_summary_rename(adapter):
+    """Auto-thread naming starts from the default message title, then summary rename can replace it."""
+    fake_thread = FakeThread(channel_id=999, name="please investigate why the build dashboard is timing out for everyone")
+    message = make_message(
+        channel=FakeTextChannel(channel_id=123),
+        content="<@999> please investigate why the build dashboard is timing out for everyone",
+        mentions=[adapter._client.user],
+    )
+    message.create_thread = AsyncMock(return_value=fake_thread)
+
+    thread = await adapter._auto_create_thread(message)
+
+    assert thread is fake_thread
+    message.create_thread.assert_awaited_once()
+    kwargs = message.create_thread.await_args.kwargs
+    assert kwargs["name"] == "please investigate why the build dashboard is timing out for everyone"
+
+
+@pytest.mark.asyncio
+async def test_discord_summary_rename_skips_when_thread_name_changed(adapter):
+    """Summary auto-rename must not overwrite workflow/user thread titles."""
+    thread = SimpleNamespace(name="sample-repo ExampleOrg#1000001", edit=AsyncMock())
+    adapter._client = SimpleNamespace(
+        user=SimpleNamespace(id=999),
+        get_channel=lambda channel_id: thread,
+        fetch_channel=AsyncMock(return_value=thread),
+    )
+
+    renamed = await adapter.rename_thread(
+        thread_id="999",
+        name="Generated Summary Title",
+        expected_current_name="Hermes",
+    )
+
+    assert renamed is False
+    thread.edit.assert_not_awaited()
+    adapter._client.fetch_channel.assert_awaited_once_with(999)
+
+
+@pytest.mark.asyncio
+async def test_discord_summary_rename_uses_fresh_thread_name_for_guard(adapter):
+    """A stale cache entry must not let summary auto-rename overwrite manual titles."""
+    cached_thread = SimpleNamespace(name="Hermes", edit=AsyncMock())
+    fresh_thread = SimpleNamespace(name="sample-repo ExampleOrg#1000001", edit=AsyncMock())
+    adapter._client = SimpleNamespace(
+        user=SimpleNamespace(id=999),
+        get_channel=lambda channel_id: cached_thread,
+        fetch_channel=AsyncMock(return_value=fresh_thread),
+    )
+
+    renamed = await adapter.rename_thread(
+        thread_id="999",
+        name="Generated Summary Title",
+        expected_current_name="Hermes",
+    )
+
+    assert renamed is False
+    adapter._client.fetch_channel.assert_awaited_once_with(999)
+    cached_thread.edit.assert_not_awaited()
+    fresh_thread.edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
