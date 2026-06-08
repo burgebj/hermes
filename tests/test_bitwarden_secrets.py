@@ -880,3 +880,96 @@ def test_reset_cache_for_tests_deletes_disk_file(tmp_path):
     assert not cache_path.exists()
     # Idempotent
     bw._reset_cache_for_tests(home)
+
+
+# ---------------------------------------------------------------------------
+# Regression: _APPLIED_HOMES premature add (issue #40597)
+# ---------------------------------------------------------------------------
+
+
+def test_applied_homes_not_set_before_successful_load(tmp_path, monkeypatch):
+    """Home path must NOT be marked as applied if secret loading fails.
+
+    Before the fix, _APPLIED_HOMES.add(home_key) ran before config loading.
+    If loading raised, the home stayed permanently marked — all future calls
+    were no-ops even after the user fixed the config.  See issue #40597.
+    """
+    home = tmp_path / ".hermes"
+    home.mkdir()
+
+    # Write a config.yaml that will cause _load_secrets_config to raise
+    (home / "config.yaml").write_text("secrets:\n  bitwarden:\n    enabled: true\n")
+
+    from hermes_cli.env_loader import (
+        _apply_external_secret_sources,
+        _APPLIED_HOMES,
+        reset_secret_source_cache,
+    )
+
+    reset_secret_source_cache()
+    _APPLIED_HOMES.clear()
+
+    # Monkey-patch _load_secrets_config to raise
+    import hermes_cli.env_loader as env_mod
+
+    call_count = {"n": 0}
+
+    def broken_config(*a, **kw):
+        call_count["n"] += 1
+        raise RuntimeError("config parse error")
+
+    monkeypatch.setattr(env_mod, "_load_secrets_config", broken_config)
+
+    # First call: should fail without marking home as applied
+    _apply_external_secret_sources(home)
+    assert call_count["n"] == 1
+
+    home_key = str(Path(home).resolve())
+    assert home_key not in _APPLIED_HOMES, (
+        "Home must NOT be in _APPLIED_HOMES after a failed config load"
+    )
+
+    # Second call: should retry (not skip)
+    _apply_external_secret_sources(home)
+    assert call_count["n"] == 2, "Second call should also invoke _load_secrets_config"
+
+
+def test_applied_homes_set_after_successful_load(tmp_path, monkeypatch):
+    """Home path MUST be marked as applied after secrets are loaded."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "secrets:\n"
+        "  bitwarden:\n"
+        "    enabled: true\n"
+        "    project_id: 'proj-1'\n"
+        "    access_token_env: 'BWS_ACCESS_TOKEN'\n"
+        "    cache_ttl_seconds: 0\n"
+        "    override_existing: false\n"
+        "    auto_install: false\n"
+    )
+    monkeypatch.setenv("BWS_ACCESS_TOKEN", "0.t")
+
+    import agent.secret_sources.bitwarden as bw
+    from hermes_cli.env_loader import (
+        _apply_external_secret_sources,
+        _APPLIED_HOMES,
+        reset_secret_source_cache,
+    )
+
+    reset_secret_source_cache()
+    _APPLIED_HOMES.clear()
+
+    def fake_apply(**kwargs):
+        return bw.FetchResult(secrets={"K": "v"}, applied=["K"])
+
+    monkeypatch.setattr(
+        "agent.secret_sources.bitwarden.apply_bitwarden_secrets", fake_apply
+    )
+
+    _apply_external_secret_sources(home)
+    home_key = str(Path(home).resolve())
+    assert home_key in _APPLIED_HOMES, (
+        "Home must be in _APPLIED_HOMES after successful secret load"
+    )
+

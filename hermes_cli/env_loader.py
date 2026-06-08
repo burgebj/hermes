@@ -267,7 +267,6 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     home_key = str(Path(home_path).resolve())
     if home_key in _APPLIED_HOMES:
         return
-    _APPLIED_HOMES.add(home_key)
 
     try:
         cfg = _load_secrets_config(home_path)
@@ -282,6 +281,11 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         from agent.secret_sources.bitwarden import apply_bitwarden_secrets
     except ImportError:
         return
+
+    # Mark as applied only after all early-return guards pass.
+    # If any guard returns early the home stays un-marked so a
+    # future call (after the user fixes the config) can retry.
+    _APPLIED_HOMES.add(home_key)
 
     result = apply_bitwarden_secrets(
         enabled=True,
