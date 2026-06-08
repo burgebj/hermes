@@ -40,6 +40,7 @@ import sys
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
+from tools.approval import _YOLO_MODE_FROZEN, is_current_session_yolo_enabled
 from tools.computer_use.backend import (
     ActionResult,
     CaptureResult,
@@ -264,6 +265,10 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
 def _request_approval(action: str, args: Dict[str, Any]) -> Optional[str]:
     """Return None if approved, or a JSON error string if denied."""
     global _session_auto_approve, _always_allow
+    # Honor YOLO mode — same check tools/approval.py uses for shell commands.
+    # Hardline blocklists (keys/type patterns) were already checked above.
+    if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled():
+        return None
     if _session_auto_approve:
         return None
     if action in _always_allow:
