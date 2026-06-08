@@ -858,6 +858,7 @@ export function DesktopController() {
         onActivateFile={composer.attachContextFilePath}
         onActivateFolder={composer.attachContextFolderPath}
         onChangeCwd={changeSessionCwd}
+        requestGateway={requestGateway}
       />
     </Pane>
   )
