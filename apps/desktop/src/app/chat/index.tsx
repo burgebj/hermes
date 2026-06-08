@@ -346,6 +346,7 @@ export function ChatView({
       >
         <AssistantRuntimeProvider runtime={runtime}>
           <Thread
+            key={threadKey}
             clampToComposer={showChatBar}
             cwd={currentCwd}
             gateway={gateway}
