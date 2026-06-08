@@ -80,6 +80,21 @@ def _error(message: str) -> dict:
     return {"error": _sanitize_error_text(message)}
 
 
+def _telegram_private_topic_standalone_error(chat_id, thread_id) -> dict | None:
+    """Fail closed for Telegram private DM-topic sends without router metadata."""
+
+    try:
+        from gateway.delivery import is_telegram_private_topic_target
+    except Exception:
+        return None
+    if not is_telegram_private_topic_target("telegram", str(chat_id), str(thread_id) if thread_id is not None else None):
+        return None
+    return _error(
+        f"Telegram private DM topic thread_id '{thread_id}' for chat {chat_id} "
+        "requires a reply anchor; use a named Telegram topic target routed through the gateway"
+    )
+
+
 def _telegram_retry_delay(exc: Exception, attempt: int) -> float | None:
     retry_after = getattr(exc, "retry_after", None)
     if retry_after is not None:
@@ -653,6 +668,10 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
 
     # --- Telegram: special handling for media attachments ---
     if platform == Platform.TELEGRAM:
+        private_topic_error = _telegram_private_topic_standalone_error(chat_id, thread_id)
+        if private_topic_error is not None:
+            return private_topic_error
+
         last_result = None
         disable_link_previews = bool(getattr(pconfig, "extra", {}) and pconfig.extra.get("disable_link_previews"))
         for i, chunk in enumerate(chunks):
@@ -845,6 +864,10 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
     already contains HTML tags, it is sent with ``parse_mode='HTML'``
     instead, bypassing MarkdownV2 conversion.
     """
+    private_topic_error = _telegram_private_topic_standalone_error(chat_id, thread_id)
+    if private_topic_error is not None:
+        return private_topic_error
+
     try:
         from telegram import Bot
         from telegram.constants import ParseMode

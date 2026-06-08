@@ -430,6 +430,33 @@ def _get_home_target_thread_id(platform_name: str) -> Optional[str]:
     return value or None
 
 
+def _parse_telegram_named_private_topic_target(rest: str) -> Optional[tuple[str, str]]:
+    """Parse ``<private_chat_id>:<topic name>`` cron targets.
+
+    ``tools.send_message_tool._parse_target_ref`` intentionally only accepts
+    numeric Telegram thread IDs. Cron must preserve named private-chat topics
+    so the gateway delivery layer can resolve/create the current
+    ``message_thread_id`` through ``TelegramAdapter.ensure_dm_topic()``.
+    """
+
+    if ":" not in str(rest):
+        return None
+    chat_id, topic_name = str(rest).split(":", 1)
+    chat_id = chat_id.strip()
+    topic_name = topic_name.strip()
+    if not chat_id or not topic_name:
+        return None
+
+    try:
+        from gateway.delivery import is_named_telegram_private_topic_target
+    except Exception:
+        return None
+
+    if not is_named_telegram_private_topic_target("telegram", chat_id, topic_name):
+        return None
+    return chat_id, topic_name
+
+
 def _iter_home_target_platforms():
     """Iterate built-in + plugin platform names that expose a home channel.
 
@@ -524,6 +551,17 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
     if ":" in deliver_value:
         platform_name, rest = deliver_value.split(":", 1)
         platform_key = platform_name.lower()
+
+        named_telegram_private_topic = None
+        if platform_key == "telegram":
+            named_telegram_private_topic = _parse_telegram_named_private_topic_target(rest)
+        if named_telegram_private_topic:
+            chat_id, topic_name = named_telegram_private_topic
+            return {
+                "platform": platform_name,
+                "chat_id": chat_id,
+                "thread_id": topic_name,
+            }
 
         from tools.send_message_tool import _parse_target_ref
 
@@ -673,52 +711,97 @@ def _send_media_via_adapter(
     loop,
     job: dict,
     platform=None,
-) -> None:
+    *,
+    named_telegram_private_topic: bool = False,
+    delivery_target=None,
+    prepared_send=None,
+) -> Optional[str]:
     """Send extracted MEDIA files as native platform attachments via a live adapter.
 
     Routes each file to the appropriate adapter method (send_voice, send_image_file,
     send_video, send_document) based on file extension — mirroring the routing logic
     in ``BasePlatformAdapter._process_message_background``.
+
+    Returns an error string only for fail-closed delivery paths. Existing
+    non-critical media behavior is preserved for other targets: failed
+    attachments are logged, while the text delivery can still count as delivered.
     """
     from pathlib import Path
 
+    from agent.async_utils import safe_schedule_threadsafe
+    from gateway.delivery import (
+        is_thread_not_found_delivery_error,
+        refresh_named_telegram_private_topic_metadata,
+        send_result_error,
+        send_result_failed,
+    )
     from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
 
-    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
-
-    for media_path, _is_voice in media_files:
+    def wait_for_media_coro(coro, timeout: int = 30):
+        future = safe_schedule_threadsafe(coro, loop)
+        if future is None:
+            raise RuntimeError("gateway loop unavailable")
         try:
-            ext = Path(media_path).suffix.lower()
-            route_platform = platform if platform is not None else getattr(adapter, "platform", None)
-            if should_send_media_as_audio(route_platform, ext, is_voice=_is_voice):
-                coro = adapter.send_voice(chat_id=chat_id, audio_path=media_path, metadata=metadata)
-            elif ext in _VIDEO_EXTS:
-                coro = adapter.send_video(chat_id=chat_id, video_path=media_path, metadata=metadata)
-            elif ext in _IMAGE_EXTS:
-                coro = adapter.send_image_file(chat_id=chat_id, image_path=media_path, metadata=metadata)
-            else:
-                coro = adapter.send_document(chat_id=chat_id, file_path=media_path, metadata=metadata)
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
 
-            from agent.async_utils import safe_schedule_threadsafe
-            future = safe_schedule_threadsafe(coro, loop)
-            if future is None:
-                logger.warning(
-                    "Job '%s': cannot send media %s, gateway loop unavailable",
-                    job.get("id", "?"), media_path,
-                )
-                return
-            try:
-                result = future.result(timeout=30)
-            except TimeoutError:
-                future.cancel()
-                raise
-            if result and not getattr(result, "success", True):
-                logger.warning(
-                    "Job '%s': media send failed for %s: %s",
-                    job.get("id", "?"), media_path, getattr(result, "error", "unknown"),
-                )
+    def build_media_coro(media_path: str, is_voice: bool, send_metadata: dict | None):
+        ext = Path(media_path).suffix.lower()
+        route_platform = platform if platform is not None else getattr(adapter, "platform", None)
+        if should_send_media_as_audio(route_platform, ext, is_voice=is_voice):
+            return adapter.send_voice(chat_id=chat_id, audio_path=media_path, metadata=send_metadata)
+        if ext in _VIDEO_EXTS:
+            return adapter.send_video(chat_id=chat_id, video_path=media_path, metadata=send_metadata)
+        if ext in _IMAGE_EXTS:
+            return adapter.send_image_file(chat_id=chat_id, image_path=media_path, metadata=send_metadata)
+        return adapter.send_document(chat_id=chat_id, file_path=media_path, metadata=send_metadata)
+
+    media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+    send_metadata = metadata
+
+    for media_path, is_voice in media_files:
+        try:
+            result = wait_for_media_coro(
+                build_media_coro(str(media_path), is_voice, send_metadata),
+            )
+            if result and send_result_failed(result):
+                if (
+                    named_telegram_private_topic
+                    and prepared_send is not None
+                    and delivery_target is not None
+                    and is_thread_not_found_delivery_error(result)
+                ):
+                    prepared_send = wait_for_media_coro(
+                        refresh_named_telegram_private_topic_metadata(
+                            adapter,
+                            delivery_target,
+                            prepared_send,
+                        ),
+                        timeout=60,
+                    )
+                    send_metadata = prepared_send.metadata
+                    result = wait_for_media_coro(
+                        build_media_coro(str(media_path), is_voice, send_metadata),
+                    )
+
+                if result and send_result_failed(result):
+                    err = send_result_error(result) or "unknown"
+                    logger.warning(
+                        "Job '%s': media send failed for %s: %s",
+                        job.get("id", "?"), media_path, err,
+                    )
+                    if named_telegram_private_topic:
+                        topic_name = getattr(prepared_send, "named_telegram_private_topic_name", None) or "?"
+                        return f"Telegram named private DM topic '{topic_name}' media delivery failed: {err}"
         except Exception as e:
             logger.warning("Job '%s': failed to send media %s: %s", job.get("id", "?"), media_path, e)
+            if named_telegram_private_topic:
+                topic_name = getattr(prepared_send, "named_telegram_private_topic_name", None) or "?"
+                return f"Telegram named private DM topic '{topic_name}' media delivery failed: {e}"
+
+    return None
 
 
 def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Optional[str]:
@@ -820,51 +903,135 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         # Prefer the live adapter when the gateway is running — this supports E2EE
         # rooms (e.g. Matrix) where the standalone HTTP path cannot encrypt.
         runtime_adapter = (adapters or {}).get(platform)
+        live_loop_running = runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)()
+
+        from gateway.delivery import (
+            DeliveryTarget,
+            is_named_telegram_private_topic_target,
+            is_telegram_private_topic_target,
+            is_thread_not_found_delivery_error,
+            prepare_platform_send_metadata,
+            refresh_named_telegram_private_topic_metadata,
+            send_result_error,
+            send_result_failed,
+        )
+
+        delivery_target = DeliveryTarget(
+            platform=platform,
+            chat_id=str(chat_id),
+            thread_id=str(thread_id) if thread_id is not None else None,
+            is_explicit=True,
+        )
+        named_telegram_private_topic = is_named_telegram_private_topic_target(
+            platform,
+            str(chat_id),
+            str(thread_id) if thread_id is not None else None,
+        )
+        telegram_private_topic = is_telegram_private_topic_target(
+            platform,
+            str(chat_id),
+            str(thread_id) if thread_id is not None else None,
+        )
+        if telegram_private_topic and not named_telegram_private_topic:
+            msg = (
+                f"Telegram private DM topic thread_id '{thread_id}' for chat {chat_id} "
+                "requires a reply anchor; use a named Telegram topic target"
+            )
+            logger.error("Job '%s': %s", job["id"], msg)
+            delivery_errors.append(msg)
+            continue
+        if named_telegram_private_topic and not live_loop_running:
+            msg = (
+                f"Telegram named private DM topic '{thread_id}' for chat {chat_id} "
+                "requires a live Telegram adapter"
+            )
+            logger.error("Job '%s': %s", job["id"], msg)
+            delivery_errors.append(msg)
+            continue
+
         delivered = False
-        if runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)():
-            send_metadata = {"thread_id": thread_id} if thread_id else None
+        if live_loop_running:
+            assert runtime_adapter is not None
+            send_metadata = None
             try:
+                from agent.async_utils import safe_schedule_threadsafe
+
+                def wait_for_adapter_coro(coro, timeout: int = 60):
+                    future = safe_schedule_threadsafe(coro, loop)
+                    if future is None:
+                        raise RuntimeError("gateway loop unavailable")
+                    try:
+                        return future.result(timeout=timeout)
+                    except TimeoutError:
+                        future.cancel()
+                        raise
+
+                prepared_send = None
+                if thread_id:
+                    if named_telegram_private_topic:
+                        prepared_send = wait_for_adapter_coro(
+                            prepare_platform_send_metadata(runtime_adapter, delivery_target),
+                        )
+                        send_metadata = prepared_send.metadata
+                    else:
+                        send_metadata = {"thread_id": thread_id}
+
                 # Send cleaned text (MEDIA tags stripped) — not the raw content
                 text_to_send = cleaned_delivery_content.strip()
                 adapter_ok = True
                 if text_to_send:
-                    from agent.async_utils import safe_schedule_threadsafe
-                    future = safe_schedule_threadsafe(
+                    send_result = wait_for_adapter_coro(
                         runtime_adapter.send(chat_id, text_to_send, metadata=send_metadata),
-                        loop,
                     )
-                    if future is None:
-                        adapter_ok = False
-                    else:
-                        try:
-                            send_result = future.result(timeout=60)
-                        except TimeoutError:
-                            future.cancel()
-                            raise
-                        if send_result and not getattr(send_result, "success", True):
-                            err = getattr(send_result, "error", "unknown")
+                    raw_response = None
+                    if send_result and send_result_failed(send_result):
+                        if (
+                            named_telegram_private_topic
+                            and prepared_send is not None
+                            and is_thread_not_found_delivery_error(send_result)
+                        ):
+                            prepared_send = wait_for_adapter_coro(
+                                refresh_named_telegram_private_topic_metadata(
+                                    runtime_adapter,
+                                    delivery_target,
+                                    prepared_send,
+                                ),
+                            )
+                            send_metadata = prepared_send.metadata
+                            send_result = wait_for_adapter_coro(
+                                runtime_adapter.send(chat_id, text_to_send, metadata=send_metadata),
+                            )
+
+                        if send_result and send_result_failed(send_result):
+                            err = send_result_error(send_result) or "unknown"
+                            if named_telegram_private_topic:
+                                msg = f"Telegram named private DM topic '{thread_id}' delivery failed: {err}"
+                                logger.error("Job '%s': %s", job["id"], msg)
+                                delivery_errors.append(msg)
+                                continue
                             logger.warning(
                                 "Job '%s': live adapter send to %s:%s failed (%s), falling back to standalone",
                                 job["id"], platform_name, chat_id, err,
                             )
                             adapter_ok = False  # fall through to standalone path
-                        elif (
-                            send_result
-                            and thread_id
-                            and getattr(send_result, "raw_response", None)
-                            and send_result.raw_response.get("thread_fallback")
-                        ):
-                            requested_thread_id = send_result.raw_response.get("requested_thread_id") or thread_id
-                            msg = (
-                                f"configured thread_id {requested_thread_id} for "
-                                f"{platform_name}:{chat_id} was not found; delivered without thread_id"
-                            )
-                            logger.warning("Job '%s': %s", job["id"], msg)
-                            delivery_errors.append(msg)
+                    raw_response = getattr(send_result, "raw_response", None)
+                    if (
+                        send_result
+                        and thread_id
+                        and isinstance(raw_response, dict)
+                        and raw_response.get("thread_fallback")
+                    ):
+                        requested_thread_id = raw_response.get("requested_thread_id") or thread_id
+                        msg = (
+                            f"configured thread_id {requested_thread_id} for "
+                            f"{platform_name}:{chat_id} was not found; delivered without thread_id"
+                        )
+                        logger.warning("Job '%s': %s", job["id"], msg)
+                        delivery_errors.append(msg)
 
                 # Send extracted media files as native attachments via the live adapter
                 if adapter_ok and media_files:
-                    _send_media_via_adapter(
+                    media_error = _send_media_via_adapter(
                         runtime_adapter,
                         chat_id,
                         media_files,
@@ -872,12 +1039,23 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                         loop,
                         job,
                         platform=platform,
+                        named_telegram_private_topic=named_telegram_private_topic,
+                        delivery_target=delivery_target,
+                        prepared_send=prepared_send,
                     )
+                    if media_error:
+                        delivery_errors.append(media_error)
+                        continue
 
                 if adapter_ok:
                     logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
                     delivered = True
             except Exception as e:
+                if named_telegram_private_topic:
+                    msg = f"Telegram named private DM topic '{thread_id}' delivery failed: {e}"
+                    logger.error("Job '%s': %s", job["id"], msg)
+                    delivery_errors.append(msg)
+                    continue
                 logger.warning(
                     "Job '%s': live adapter delivery to %s:%s failed (%s), falling back to standalone",
                     job["id"], platform_name, chat_id, e,

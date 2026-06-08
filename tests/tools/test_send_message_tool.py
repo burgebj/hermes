@@ -210,15 +210,8 @@ class TestSendMessageTool:
         config, _telegram_cfg = _make_config()
         config.get_home_channel = lambda _platform: home
 
-        with patch.dict(
-            os.environ,
-            {
-                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "telegram",
-                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "-1001",
-            },
-            clear=False,
-        ), \
-             patch("gateway.config.load_gateway_config", return_value=config), \
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.send_message_tool._get_cron_auto_delivery_target", return_value={"platform": "telegram", "chat_id": "-1001", "thread_id": None}), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
              patch("model_tools._run_async", side_effect=_run_async_immediately), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
@@ -454,6 +447,54 @@ class TestSendMessageTool:
             media_files=[],
             force_document=False,
         )
+
+    def test_telegram_private_numeric_thread_target_fails_closed_before_send(self):
+        _config, telegram_cfg = _make_config()
+
+        with patch("tools.send_message_tool._send_telegram", new=AsyncMock(return_value={"success": True})) as send_mock:
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.TELEGRAM,
+                    telegram_cfg,
+                    "722341991",
+                    "hello",
+                    thread_id="32343",
+                )
+            )
+
+        assert "error" in result
+        assert "use a named Telegram topic target" in result["error"]
+        send_mock.assert_not_awaited()
+
+    def test_telegram_group_numeric_thread_target_still_sends(self):
+        _config, telegram_cfg = _make_config()
+
+        with patch("tools.send_message_tool._send_telegram", new=AsyncMock(return_value={"success": True})) as send_mock:
+            result = asyncio.run(
+                _send_to_platform(
+                    Platform.TELEGRAM,
+                    telegram_cfg,
+                    "-100722341991",
+                    "hello",
+                    thread_id="32343",
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once()
+        assert send_mock.await_args is not None
+        assert send_mock.await_args.kwargs["thread_id"] == "32343"
+
+    def test_send_telegram_private_numeric_thread_target_fails_before_bot_send(self, monkeypatch):
+        bot = MagicMock()
+        bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=1))
+        _install_telegram_mock(monkeypatch, bot)
+
+        result = asyncio.run(_send_telegram("tok", "722341991", "hello", thread_id="32343"))
+
+        assert "error" in result
+        assert "use a named Telegram topic target" in result["error"]
+        bot.send_message.assert_not_awaited()
 
     def test_top_level_send_failure_redacts_query_token(self):
         config, _telegram_cfg = _make_config()

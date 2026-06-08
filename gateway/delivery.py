@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 
 from hermes_cli.config import get_hermes_home
 
@@ -72,13 +72,17 @@ def _looks_like_int(value: Optional[str]) -> bool:
         return False
 
 
-def _send_result_failed(result: Any) -> bool:
+def send_result_failed(result: Any) -> bool:
     if isinstance(result, dict):
         return result.get("success") is False
     return getattr(result, "success", True) is False
 
 
-def _send_result_error(result: Any) -> Optional[str]:
+# Backward-compatible private alias for existing internal call sites.
+_send_result_failed = send_result_failed
+
+
+def send_result_error(result: Any) -> Optional[str]:
     if isinstance(result, dict):
         error = result.get("error")
     else:
@@ -86,9 +90,175 @@ def _send_result_error(result: Any) -> Optional[str]:
     return str(error) if error else None
 
 
-def _is_thread_not_found_delivery_error(result: Any) -> bool:
-    error = _send_result_error(result)
+# Backward-compatible private alias for existing internal call sites.
+_send_result_error = send_result_error
+
+
+def is_thread_not_found_delivery_error(result: Any) -> bool:
+    error = send_result_error(result)
     return bool(error and "thread not found" in error.lower())
+
+
+# Backward-compatible private alias for existing internal call sites.
+_is_thread_not_found_delivery_error = is_thread_not_found_delivery_error
+
+
+def _has_explicit_telegram_direct_topic(send_metadata: Dict[str, Any]) -> bool:
+    return (
+        "direct_messages_topic_id" in send_metadata
+        or "telegram_direct_messages_topic_id" in send_metadata
+    )
+
+
+def _platform_value(platform: Union["Platform", str]) -> str:
+    return getattr(platform, "value", str(platform)).lower()
+
+
+def is_telegram_private_topic_target(
+    platform: Union["Platform", str],
+    chat_id: Optional[str],
+    thread_id: Optional[str],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Return True when a target addresses a Telegram private-chat topic lane."""
+
+    if not thread_id:
+        return False
+    send_metadata = dict(metadata or {})
+    return (
+        _platform_value(platform) == Platform.TELEGRAM.value
+        and _looks_like_telegram_private_chat_id(str(chat_id) if chat_id is not None else None)
+        and "thread_id" not in send_metadata
+        and "message_thread_id" not in send_metadata
+        and not _has_explicit_telegram_direct_topic(send_metadata)
+    )
+
+
+def is_named_telegram_private_topic_target(
+    platform: Union["Platform", str],
+    chat_id: Optional[str],
+    thread_id: Optional[str],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Return True for a Telegram private-chat topic addressed by stable name.
+
+    Named private topics must be resolved through ``TelegramAdapter.ensure_dm_topic()``
+    before sending; a raw Bot API standalone send cannot safely create, refresh,
+    or fail closed for these lanes.
+    """
+
+    if not thread_id:
+        return False
+    return (
+        is_telegram_private_topic_target(platform, chat_id, thread_id, metadata)
+        and not _looks_like_int(str(thread_id))
+    )
+
+
+@dataclass
+class PreparedPlatformSend:
+    metadata: Optional[Dict[str, Any]]
+    named_telegram_private_topic_name: Optional[str] = None
+
+
+async def prepare_platform_send_metadata(
+    adapter: Any,
+    target: "DeliveryTarget",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> PreparedPlatformSend:
+    """Build adapter metadata for a delivery target.
+
+    This is the central place for Telegram private DM-topic semantics.  Both
+    ``DeliveryRouter`` and cron's live-adapter path use it so named topics are
+    always resolved/created through ``ensure_dm_topic()`` and numeric private
+    lanes remain fail-closed unless they have a reply anchor or explicit true
+    Direct Messages-topic metadata.
+    """
+
+    send_metadata = dict(metadata or {})
+    named_topic_name: Optional[str] = None
+
+    if target.thread_id:
+        target_thread_id = target.thread_id
+        has_explicit_direct_topic = _has_explicit_telegram_direct_topic(send_metadata)
+        if is_named_telegram_private_topic_target(
+            target.platform,
+            target.chat_id,
+            target_thread_id,
+            send_metadata,
+        ):
+            named_topic_name = target_thread_id
+            ensure_dm_topic = getattr(adapter, "ensure_dm_topic", None)
+            if ensure_dm_topic is None:
+                raise RuntimeError(
+                    "Telegram adapter cannot create named private DM topics"
+                )
+            created_thread_id = await ensure_dm_topic(target.chat_id, target_thread_id)
+            if not created_thread_id:
+                raise RuntimeError(
+                    f"Failed to create Telegram private DM topic '{target_thread_id}'"
+                )
+            send_metadata["thread_id"] = str(created_thread_id)
+            send_metadata["telegram_dm_topic_created_for_send"] = True
+        elif (
+            target.platform == Platform.TELEGRAM
+            and _looks_like_telegram_private_chat_id(target.chat_id)
+            and "thread_id" not in send_metadata
+            and "message_thread_id" not in send_metadata
+            and not has_explicit_direct_topic
+        ):
+            # Legacy private topic/thread ids that were not created by this
+            # send path may still need a reply anchor to stay visible in the
+            # requested lane. Named targets are created above via
+            # createForumTopic and can use message_thread_id directly.
+            reply_anchor = send_metadata.get("telegram_reply_to_message_id")
+            if reply_anchor is None:
+                raise RuntimeError(
+                    "Telegram private DM topic delivery requires telegram_reply_to_message_id; "
+                    "send to the bare chat or provide a reply anchor"
+                )
+            send_metadata["thread_id"] = target_thread_id
+            send_metadata["telegram_dm_topic_reply_fallback"] = True
+        elif (
+            "thread_id" not in send_metadata
+            and "message_thread_id" not in send_metadata
+            and not has_explicit_direct_topic
+        ):
+            send_metadata["thread_id"] = target_thread_id
+
+    return PreparedPlatformSend(
+        metadata=send_metadata or None,
+        named_telegram_private_topic_name=named_topic_name,
+    )
+
+
+async def refresh_named_telegram_private_topic_metadata(
+    adapter: Any,
+    target: "DeliveryTarget",
+    prepared: PreparedPlatformSend,
+) -> PreparedPlatformSend:
+    """Force-create a replacement Telegram private topic and update metadata."""
+
+    topic_name = prepared.named_telegram_private_topic_name
+    if not topic_name:
+        return prepared
+    ensure_dm_topic = getattr(adapter, "ensure_dm_topic", None)
+    if ensure_dm_topic is None:
+        raise RuntimeError("Telegram adapter cannot refresh named private DM topics")
+    refreshed_thread_id = await ensure_dm_topic(
+        target.chat_id,
+        topic_name,
+        force_create=True,
+    )
+    if not refreshed_thread_id:
+        raise RuntimeError(f"Failed to refresh Telegram private DM topic '{topic_name}'")
+    send_metadata = dict(prepared.metadata or {})
+    send_metadata["thread_id"] = str(refreshed_thread_id)
+    send_metadata["telegram_dm_topic_created_for_send"] = True
+    return PreparedPlatformSend(
+        metadata=send_metadata,
+        named_telegram_private_topic_name=topic_name,
+    )
 
 
 @dataclass
@@ -347,83 +517,19 @@ class DeliveryRouter:
                 "delivered": False,
             }
 
-        send_metadata = dict(metadata or {})
-        is_named_telegram_private_topic = False
-        named_telegram_private_topic_name: Optional[str] = None
-        if target.thread_id:
-            has_explicit_direct_topic = (
-                "direct_messages_topic_id" in send_metadata
-                or "telegram_direct_messages_topic_id" in send_metadata
-            )
-            target_thread_id = target.thread_id
-            is_named_telegram_private_topic = (
-                target.platform == Platform.TELEGRAM
-                and _looks_like_telegram_private_chat_id(target.chat_id)
-                and not _looks_like_int(target_thread_id)
-                and "thread_id" not in send_metadata
-                and "message_thread_id" not in send_metadata
-                and not has_explicit_direct_topic
-            )
-            if is_named_telegram_private_topic:
-                named_telegram_private_topic_name = target_thread_id
-                ensure_dm_topic = getattr(adapter, "ensure_dm_topic", None)
-                if ensure_dm_topic is None:
-                    raise RuntimeError(
-                        "Telegram adapter cannot create named private DM topics"
-                    )
-                created_thread_id = await ensure_dm_topic(target.chat_id, target_thread_id)
-                if not created_thread_id:
-                    raise RuntimeError(
-                        f"Failed to create Telegram private DM topic '{target_thread_id}'"
-                    )
-                target_thread_id = str(created_thread_id)
-                send_metadata["thread_id"] = target_thread_id
-                send_metadata["telegram_dm_topic_created_for_send"] = True
-            elif (
-                target.platform == Platform.TELEGRAM
-                and _looks_like_telegram_private_chat_id(target.chat_id)
-                and "thread_id" not in send_metadata
-                and "message_thread_id" not in send_metadata
-                and not has_explicit_direct_topic
-            ):
-                # Legacy private topic/thread ids that were not created by this
-                # send path may still need a reply anchor to stay visible in the
-                # requested lane. Named targets are created above via
-                # createForumTopic and can use message_thread_id directly.
-                reply_anchor = send_metadata.get("telegram_reply_to_message_id")
-                if reply_anchor is None:
-                    raise RuntimeError(
-                        "Telegram private DM topic delivery requires telegram_reply_to_message_id; "
-                        "send to the bare chat or provide a reply anchor"
-                    )
-                send_metadata["thread_id"] = target_thread_id
-                send_metadata["telegram_dm_topic_reply_fallback"] = True
-            elif "thread_id" not in send_metadata and "message_thread_id" not in send_metadata and not has_explicit_direct_topic:
-                send_metadata["thread_id"] = target_thread_id
-        result = await adapter.send(target.chat_id, content, metadata=send_metadata or None)
+        prepared = await prepare_platform_send_metadata(adapter, target, metadata)
+        result = await adapter.send(target.chat_id, content, metadata=prepared.metadata)
         if _send_result_failed(result):
             if (
-                is_named_telegram_private_topic
-                and named_telegram_private_topic_name
-                and _is_thread_not_found_delivery_error(result)
+                prepared.named_telegram_private_topic_name
+                and is_thread_not_found_delivery_error(result)
             ):
-                ensure_dm_topic = getattr(adapter, "ensure_dm_topic", None)
-                if ensure_dm_topic is None:
-                    raise RuntimeError(
-                        "Telegram adapter cannot refresh named private DM topics"
-                    )
-                refreshed_thread_id = await ensure_dm_topic(
-                    target.chat_id,
-                    named_telegram_private_topic_name,
-                    force_create=True,
+                prepared = await refresh_named_telegram_private_topic_metadata(
+                    adapter,
+                    target,
+                    prepared,
                 )
-                if not refreshed_thread_id:
-                    raise RuntimeError(
-                        f"Failed to refresh Telegram private DM topic '{named_telegram_private_topic_name}'"
-                    )
-                send_metadata["thread_id"] = str(refreshed_thread_id)
-                send_metadata["telegram_dm_topic_created_for_send"] = True
-                result = await adapter.send(target.chat_id, content, metadata=send_metadata or None)
+                result = await adapter.send(target.chat_id, content, metadata=prepared.metadata)
             if _send_result_failed(result):
                 raise RuntimeError(_send_result_error(result) or f"{target.platform.value} delivery failed")
         return result
