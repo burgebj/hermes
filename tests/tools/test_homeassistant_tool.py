@@ -1,10 +1,12 @@
 """Tests for the Home Assistant tool module.
 
 Tests real logic: entity filtering, payload building, response parsing,
-handler validation, and availability gating.
+handler validation, availability gating, and async bridge lifecycle.
 """
 
+import asyncio
 import json
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -323,6 +325,7 @@ class TestCallServiceStringData:
             "data": '{"hvac_mode": "heat"}',
         })
         call_args = mock_run.call_args[0][0]  # the coroutine arg
+        call_args.close()
         # _run_async was called, meaning we got past validation
 
     @patch("tools.homeassistant_tool._run_async", return_value={"success": True})
@@ -335,6 +338,7 @@ class TestCallServiceStringData:
             "data": {"brightness": 255},
         })
         mock_run.assert_called_once()
+        mock_run.call_args[0][0].close()
 
     def test_invalid_json_string_returns_error(self):
         """Malformed JSON string in data returns a clear error."""
@@ -357,6 +361,7 @@ class TestCallServiceStringData:
             "data": "   ",
         })
         mock_run.assert_called_once()
+        mock_run.call_args[0][0].close()
 
 
 # ---------------------------------------------------------------------------
@@ -516,3 +521,128 @@ class TestRegistration:
         invalidate_check_fn_cache()
         defs = registry.get_definitions({"ha_list_entities", "ha_get_state", "ha_call_service"})
         assert len(defs) == 3
+
+
+# ---------------------------------------------------------------------------
+# Async bridge lifecycle regression tests
+# ---------------------------------------------------------------------------
+
+
+async def _get_current_loop():
+    """Return the running event loop from inside a coroutine."""
+    return asyncio.get_event_loop()
+
+
+class TestRunAsyncLoopLifecycle:
+    """Verify homeassistant_tool._run_async keeps loops alive."""
+
+    def test_loop_not_closed_after_run_async(self):
+        from tools.homeassistant_tool import _run_async
+
+        loop = _run_async(_get_current_loop())
+
+        assert not loop.is_closed(), (
+            "homeassistant_tool._run_async() closed the event loop — "
+            "aiohttp clients can emit unclosed session/connector warnings"
+        )
+
+    def test_same_loop_reused_across_calls(self):
+        from tools.homeassistant_tool import _run_async
+
+        loop1 = _run_async(_get_current_loop())
+        loop2 = _run_async(_get_current_loop())
+
+        assert loop1 is loop2, (
+            "homeassistant_tool._run_async() created a new loop on the "
+            "second call instead of reusing a persistent loop"
+        )
+
+    def test_running_loop_calls_use_persistent_background_loop(self):
+        from tools.homeassistant_tool import _run_async
+
+        async def _run_twice_inside_running_loop():
+            loop1 = _run_async(_get_current_loop())
+            loop2 = _run_async(_get_current_loop())
+            return loop1, loop2
+
+        loop1, loop2 = asyncio.run(_run_twice_inside_running_loop())
+
+        assert loop1 is loop2, (
+            "Calls from inside a running event loop should reuse the same "
+            "persistent background loop"
+        )
+        assert not loop1.is_closed(), (
+            "Background loop used for running-loop calls was closed after "
+            "_run_async returned"
+        )
+
+    def test_running_loop_scheduler_failure_is_reported(self):
+        from tools.homeassistant_tool import _submit_to_async_context_loop
+
+        with patch(
+            "asyncio.run_coroutine_threadsafe",
+            side_effect=RuntimeError("scheduler down"),
+        ):
+            with pytest.raises(
+                RuntimeError,
+                match="Failed to schedule Home Assistant coroutine",
+            ):
+                _submit_to_async_context_loop(_get_current_loop())
+
+
+class TestRunAsyncWorkerThread:
+    """Verify worker threads also keep a persistent loop."""
+
+    def test_worker_thread_loop_not_closed(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from tools.homeassistant_tool import _run_async
+
+        def _run_on_worker():
+            loop = _run_async(_get_current_loop())
+            still_open = not loop.is_closed()
+            return loop, still_open
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            _loop, still_open = pool.submit(_run_on_worker).result()
+
+        assert still_open, (
+            "Worker thread event loop was closed after _run_async returned"
+        )
+
+    def test_worker_thread_reuses_loop_across_calls(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from tools.homeassistant_tool import _run_async
+
+        def _run_twice_on_worker():
+            loop1 = _run_async(_get_current_loop())
+            loop2 = _run_async(_get_current_loop())
+            return loop1, loop2
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            loop1, loop2 = pool.submit(_run_twice_on_worker).result()
+
+        assert loop1 is loop2, (
+            "Worker thread created different loops for consecutive calls"
+        )
+        assert not loop1.is_closed()
+
+    def test_parallel_workers_get_separate_loops(self):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from tools.homeassistant_tool import _run_async
+
+        barrier = threading.Barrier(3, timeout=5)
+
+        def _get_loop_id():
+            loop = _run_async(_get_current_loop())
+            barrier.wait()
+            return id(loop), not loop.is_closed(), threading.current_thread().ident
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(_get_loop_id) for _ in range(3)]
+            results = [f.result() for f in as_completed(futures)]
+
+        loop_ids = {result[0] for result in results}
+        thread_ids = {result[2] for result in results}
+        assert all(result[1] for result in results)
+        assert len(thread_ids) == 3
+        assert len(loop_ids) == 3
