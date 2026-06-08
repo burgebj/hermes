@@ -82,6 +82,7 @@ export const ja: Translations = {
     },
     modelToolsSheetSubtitle: "とツール",
     modelToolsSheetTitle: "モデル",
+    newChat: "新しいチャット",
     navigation: "ナビゲーション",
     openDocumentation: "ドキュメントを新しいタブで開く",
     openNavigation: "ナビゲーションを開く",
