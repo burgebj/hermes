@@ -77,6 +77,30 @@ class ProfileGatewayProcess:
     pid: int
 
 
+def _launchd_pid_from_list_output(output: str, label: str) -> int | None:
+    """Parse `launchctl list <label>` output for the managed process PID."""
+    import re
+
+    # Modern macOS prints an old-style plist-ish dictionary:
+    #   "PID" = 41231;
+    match = re.search(r'"?PID"?\s*=\s*(\d+)\s*;', output or "")
+    if match:
+        pid = int(match.group(1))
+        return pid if pid > 0 else None
+
+    # Older/table output fallback: PID<TAB>Status<TAB>Label.
+    for line in (output or "").strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2] == label:
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            if pid > 0:
+                return pid
+    return None
+
+
 def _get_service_pids() -> set:
     """Return PIDs currently managed by systemd or launchd gateway services.
 
@@ -127,24 +151,21 @@ def _get_service_pids() -> set:
     # --- launchd (macOS) ---
     if is_macos():
         try:
-            label = get_launchd_label()
-            result = subprocess.run(
-                ["launchctl", "list", label],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                # Output: "PID\tStatus\tLabel" header, then one data line
-                for line in result.stdout.strip().splitlines():
-                    parts = line.split()
-                    if len(parts) >= 3 and parts[2] == label:
-                        try:
-                            pid = int(parts[0])
-                            if pid > 0:
-                                pids.add(pid)
-                        except ValueError:
-                            pass
+            labels = _discover_loaded_launchd_gateway_labels()
+            if not labels:
+                labels = [get_launchd_label()]
+            for label in labels:
+                result = subprocess.run(
+                    ["launchctl", "list", label],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.returncode != 0:
+                    continue
+                pid = _launchd_pid_from_list_output(result.stdout, label)
+                if pid:
+                    pids.add(pid)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
@@ -467,8 +488,13 @@ def _scan_gateway_pids(exclude_pids: set[int], all_profiles: bool = False) -> li
                     pass
 
             if not _found_via_proc:
+                ps_cmd = (
+                    ["ps", "-A", "-ww", "-o", "pid=,command="]
+                    if is_macos()
+                    else ["ps", "-A", "eww", "-o", "pid=,command="]
+                )
                 result = subprocess.run(
-                    ["ps", "-A", "eww", "-o", "pid=,command="],
+                    ps_cmd,
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -3076,6 +3102,235 @@ def _launchctl_domain_unsupported(returncode: int) -> bool:
     return returncode in _LAUNCHCTL_DOMAIN_UNSUPPORTED_CODES
 
 
+def _launchd_service_is_loaded(label: str | None = None, domain: str | None = None) -> bool:
+    """Return True when launchd currently knows about the service.
+
+    macOS can return bootstrap exit 5 for an already-registered LaunchAgent,
+    especially while backgroundtaskmanagementd is updating legacy items. Before
+    falling back to an unsupervised detached gateway, re-probe launchd directly
+    so a transient bootstrap race does not create a duplicate process or a false
+    "will not auto-start" warning.
+    """
+    label = label or get_launchd_label()
+    domain = domain or _launchd_domain()
+    target = f"{domain}/{label}"
+    probes = [
+        ["launchctl", "print", target],
+        # Legacy lookup still works on hosts where `print user/<uid>/<label>`
+        # is unavailable or the job was loaded into another compatible domain.
+        ["launchctl", "list", label],
+    ]
+    for cmd in probes:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
+            return True
+    return False
+
+
+def _launchd_loaded_after_bootstrap_failure(label: str, domain: str) -> bool:
+    if not _launchd_service_is_loaded(label=label, domain=domain):
+        return False
+    print("↻ launchd bootstrap reported an error, but the service is already loaded")
+    return True
+
+
+def _discover_loaded_launchd_gateway_labels() -> list[str]:
+    """Return loaded Hermes gateway LaunchAgent labels across all profiles."""
+    try:
+        result = subprocess.run(
+            ["launchctl", "list"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    labels: list[str] = []
+    for line in (result.stdout or "").splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        label = parts[-1]
+        if label == "ai.hermes.gateway" or label.startswith("ai.hermes.gateway-"):
+            if label not in labels:
+                labels.append(label)
+    return labels
+
+
+def _launchd_plist_path_for_label(label: str) -> Path:
+    return _launchd_user_home() / "Library" / "LaunchAgents" / f"{label}.plist"
+
+
+def _launchd_home_from_label(label: str) -> Path | None:
+    from hermes_constants import get_default_hermes_root
+
+    if label == "ai.hermes.gateway":
+        return get_default_hermes_root()
+    prefix = "ai.hermes.gateway-"
+    if label.startswith(prefix):
+        suffix = label[len(prefix) :]
+        if suffix:
+            return get_default_hermes_root() / "profiles" / suffix
+    return None
+
+
+def _launchd_hermes_home_from_plist(plist_path: Path) -> Path | None:
+    import plistlib
+
+    try:
+        with plist_path.open("rb") as handle:
+            data = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        return None
+    env = data.get("EnvironmentVariables") if isinstance(data, dict) else None
+    if not isinstance(env, dict):
+        return None
+    raw_home = str(env.get("HERMES_HOME") or "").strip()
+    return Path(raw_home).expanduser() if raw_home else None
+
+
+def _generate_launchd_plist_for_home(hermes_home: Path) -> str:
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(hermes_home)
+    try:
+        return generate_launchd_plist()
+    finally:
+        reset_hermes_home_override(token)
+
+
+def refresh_launchd_plist_for_label_if_needed(label: str) -> bool:
+    plist_path = _launchd_plist_path_for_label(label)
+    if not plist_path.exists():
+        return False
+    hermes_home = _launchd_hermes_home_from_plist(plist_path) or _launchd_home_from_label(label)
+    if hermes_home is None:
+        return False
+    expected = _generate_launchd_plist_for_home(hermes_home)
+    installed = plist_path.read_text(encoding="utf-8")
+    if _normalize_launchd_plist_for_comparison(
+        installed
+    ) == _normalize_launchd_plist_for_comparison(expected):
+        return False
+
+    plist_path.write_text(expected, encoding="utf-8")
+    domain = _launchd_domain()
+    subprocess.run(
+        ["launchctl", "bootout", f"{domain}/{label}"],
+        check=False,
+        timeout=90,
+    )
+    try:
+        subprocess.run(
+            ["launchctl", "bootstrap", domain, str(plist_path)],
+            check=True,
+            timeout=30,
+        )
+    except subprocess.CalledProcessError as exc:
+        if not _launchd_loaded_after_bootstrap_failure(label, domain):
+            raise
+        if not _launchctl_domain_unsupported(exc.returncode):
+            raise
+    print(
+        f"↻ Updated gateway launchd service definition for {label} to match the current Hermes install"
+    )
+    return True
+
+
+def _launchd_pid_for_label(label: str) -> int | None:
+    try:
+        result = subprocess.run(
+            ["launchctl", "list", label],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return _launchd_pid_from_list_output(result.stdout, label)
+
+
+def launchd_restart_loaded_gateways() -> list[str]:
+    """Restart every loaded Hermes launchd gateway and verify it stayed loaded.
+
+    `hermes update` changes one shared checkout used by default and named
+    profile gateways. Restarting only the active profile leaves the other
+    LaunchAgents running old code until the user notices. This helper works by
+    label, so it does not depend on mutating HERMES_HOME for each profile.
+    """
+    domain = _launchd_domain()
+    restarted: list[str] = []
+    for label in _discover_loaded_launchd_gateway_labels():
+        target = f"{domain}/{label}"
+        try:
+            refresh_launchd_plist_for_label_if_needed(label)
+        except subprocess.CalledProcessError as exc:
+            stderr = (getattr(exc, "stderr", "") or "").strip()
+            print(f"  ⚠ Failed to refresh {label}: {stderr or exc}")
+        before_pid = _launchd_pid_for_label(label)
+        restart_proven = False
+        try:
+            subprocess.run(
+                ["launchctl", "kickstart", "-k", target],
+                check=True,
+                timeout=90,
+            )
+            restart_proven = True
+        except subprocess.CalledProcessError as exc:
+            plist_path = _launchd_plist_path_for_label(label)
+            if _launchd_error_indicates_unloaded(exc) and plist_path.exists():
+                try:
+                    subprocess.run(
+                        ["launchctl", "bootstrap", domain, str(plist_path)],
+                        check=True,
+                        timeout=30,
+                    )
+                    subprocess.run(
+                        ["launchctl", "kickstart", target],
+                        check=True,
+                        timeout=30,
+                    )
+                    restart_proven = True
+                except subprocess.CalledProcessError as boot_exc:
+                    if not _launchd_loaded_after_bootstrap_failure(label, domain):
+                        stderr = (getattr(boot_exc, "stderr", "") or "").strip()
+                        print(f"  ⚠ Failed to restart {label}: {stderr or boot_exc}")
+                        continue
+            elif _launchctl_domain_unsupported(exc.returncode):
+                if not _launchd_loaded_after_bootstrap_failure(label, domain):
+                    stderr = (getattr(exc, "stderr", "") or "").strip()
+                    print(f"  ⚠ Failed to restart {label}: {stderr or exc}")
+                    continue
+            else:
+                stderr = (getattr(exc, "stderr", "") or "").strip()
+                print(f"  ⚠ Failed to restart {label}: {stderr or exc}")
+                continue
+        after_pid = _launchd_pid_for_label(label)
+        if not after_pid:
+            print(f"  ⚠ {label} restart was attempted but the service is not loaded")
+            continue
+        if restart_proven or before_pid is None or before_pid != after_pid:
+            restarted.append(label)
+        else:
+            print(
+                f"  ⚠ {label} is loaded (pid {after_pid}) but restart was not proven"
+            )
+    return restarted
+
+
 def _gateway_run_command() -> list[str]:
     """Build the `python -m hermes_cli.main [--profile X] gateway run --replace` argv.
 
@@ -3307,13 +3562,19 @@ def launchd_install(force: bool = False):
     print(f"Installing launchd service to: {plist_path}")
     plist_path.write_text(generate_launchd_plist())
 
+    domain = _launchd_domain()
+    label = get_launchd_label()
     try:
         subprocess.run(
-            ["launchctl", "bootstrap", _launchd_domain(), str(plist_path)],
+            ["launchctl", "bootstrap", domain, str(plist_path)],
             check=True,
             timeout=30,
         )
     except subprocess.CalledProcessError as e:
+        if _launchd_loaded_after_bootstrap_failure(label, domain):
+            print()
+            print("✓ Service installed and loaded!")
+            return
         if not _launchctl_domain_unsupported(e.returncode):
             raise
         _launchd_fallback_to_detached(f"launchctl bootstrap exit {e.returncode}")
@@ -3354,18 +3615,22 @@ def launchd_start():
         print("↻ launchd plist missing; regenerating service definition")
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         plist_path.write_text(generate_launchd_plist(), encoding="utf-8")
+        domain = _launchd_domain()
         try:
             subprocess.run(
-                ["launchctl", "bootstrap", _launchd_domain(), str(plist_path)],
+                ["launchctl", "bootstrap", domain, str(plist_path)],
                 check=True,
                 timeout=30,
             )
             subprocess.run(
-                ["launchctl", "kickstart", f"{_launchd_domain()}/{label}"],
+                ["launchctl", "kickstart", f"{domain}/{label}"],
                 check=True,
                 timeout=30,
             )
         except subprocess.CalledProcessError as e:
+            if _launchd_loaded_after_bootstrap_failure(label, domain):
+                print("✓ Service started")
+                return
             if not _launchctl_domain_unsupported(e.returncode):
                 raise
             _launchd_fallback_to_detached(f"launchctl exit {e.returncode}")
@@ -3385,20 +3650,25 @@ def launchd_start():
             raise
         # Job not loaded in this domain — re-bootstrap the plist and retry.
         print("↻ launchd job was unloaded; reloading service definition")
+        domain = _launchd_domain()
         try:
             subprocess.run(
-                ["launchctl", "bootstrap", _launchd_domain(), str(plist_path)],
+                ["launchctl", "bootstrap", domain, str(plist_path)],
                 check=True,
                 timeout=30,
             )
             subprocess.run(
-                ["launchctl", "kickstart", f"{_launchd_domain()}/{label}"],
+                ["launchctl", "kickstart", f"{domain}/{label}"],
                 check=True,
                 timeout=30,
             )
         except subprocess.CalledProcessError as e2:
             # Even a fresh bootstrap can't manage the domain on this host —
-            # degrade to a detached background process (issue #23387).
+            # degrade to a detached background process (issue #23387), unless
+            # launchd reports the service is already loaded after a race.
+            if _launchd_loaded_after_bootstrap_failure(label, domain):
+                print("✓ Service started")
+                return
             if not _launchctl_domain_unsupported(e2.returncode):
                 raise
             _launchd_fallback_to_detached(f"launchctl exit {e2.returncode}")
@@ -3516,23 +3786,30 @@ def launchd_restart():
     except subprocess.CalledProcessError as e:
         if not _launchd_error_indicates_unloaded(e):
             # Not a "job unloaded" code. If the domain is fundamentally
-            # unmanageable (error 5), degrade to detached; the old process was
-            # already drained/terminated above. Otherwise re-raise.
+            # unmanageable (error 5), degrade to detached unless launchd now
+            # reports the service is already loaded. Otherwise re-raise.
             if _launchctl_domain_unsupported(e.returncode):
+                if _launchd_loaded_after_bootstrap_failure(label, _launchd_domain()):
+                    print("✓ Service restarted")
+                    return
                 _launchd_fallback_to_detached(f"launchctl kickstart exit {e.returncode}")
                 return
             raise
         # Job not loaded — bootstrap and start fresh
         print("↻ launchd job was unloaded; reloading")
         plist_path = get_launchd_plist_path()
+        domain = _launchd_domain()
         try:
             subprocess.run(
-                ["launchctl", "bootstrap", _launchd_domain(), str(plist_path)],
+                ["launchctl", "bootstrap", domain, str(plist_path)],
                 check=True,
                 timeout=30,
             )
             subprocess.run(["launchctl", "kickstart", target], check=True, timeout=30)
         except subprocess.CalledProcessError as e2:
+            if _launchd_loaded_after_bootstrap_failure(label, domain):
+                print("✓ Service restarted")
+                return
             if not _launchctl_domain_unsupported(e2.returncode):
                 raise
             _launchd_fallback_to_detached(f"launchctl exit {e2.returncode}")
