@@ -256,6 +256,27 @@ class TestBuildSessionContextPrompt:
         assert "pin" in prompt.lower()
         assert "current message's slack block/attachment payload" in prompt.lower()
 
+    def test_shared_slack_prompt_warns_against_guessed_self_mentions(self):
+        config = GatewayConfig(
+            platforms={
+                Platform.SLACK: PlatformConfig(enabled=True, token="fake"),
+            },
+        )
+        source = SessionSource(
+            platform=Platform.SLACK,
+            chat_id="C123",
+            chat_name="team-channel",
+            chat_type="group",
+            user_id="U123",
+            user_name="Alice",
+            thread_id="171.000",
+        )
+        ctx = build_session_context(source, config)
+        prompt = build_session_context_prompt(ctx)
+
+        assert "current turn's sender prefix" in prompt
+        assert "Do not guess or reuse `<@U...>` mentions" in prompt
+
     def test_discord_prompt_with_channel_topic(self):
         """Channel topic should appear in the session context prompt."""
         config = GatewayConfig(

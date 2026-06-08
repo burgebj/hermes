@@ -68,3 +68,32 @@ async def test_preprocess_keeps_plain_text_for_default_group_sessions():
     )
 
     assert result == "hello"
+
+
+@pytest.mark.asyncio
+async def test_preprocess_includes_slack_author_mention_for_shared_thread():
+    runner = _make_runner(
+        GatewayConfig(
+            platforms={
+                Platform.SLACK: PlatformConfig(enabled=True, token="fake"),
+            },
+        )
+    )
+    source = SessionSource(
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_name="team-channel",
+        chat_type="group",
+        user_id="U123",
+        user_name="Alice",
+        thread_id="171.000",
+    )
+    event = MessageEvent(text="mention me again", source=source)
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert result == "[Alice | Slack user <@U123>] mention me again"
