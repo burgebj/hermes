@@ -1,6 +1,8 @@
 """Tests for secret exfiltration prevention in browser and web tools."""
 
 import json
+import sys
+import types
 from unittest.mock import patch, MagicMock
 import pytest
 
@@ -259,3 +261,64 @@ class TestCamofoxAnnotationRedaction:
         assert "ANTHROPICFAKEKEY123456789" not in result
         assert "OPENAIFAKEKEY99887766" not in result
         assert "PATH=/usr/local/bin" in result
+
+
+class TestCuaDriverSubprocessEnv:
+    """Verify cua-driver MCP subprocesses do not inherit provider secrets."""
+
+    @pytest.mark.asyncio
+    async def test_cua_driver_session_scrubs_provider_credentials(self, monkeypatch):
+        from tools.computer_use import cua_backend
+
+        captured = {}
+
+        class FakeStdioServerParameters:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        class FakeClientSession:
+            def __init__(self, read, write):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def initialize(self):
+                return None
+
+        class FakeStdioClient:
+            async def __aenter__(self):
+                return object(), object()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+        fake_mcp = types.ModuleType("mcp")
+        fake_mcp.ClientSession = FakeClientSession
+        fake_mcp.StdioServerParameters = FakeStdioServerParameters
+        fake_client = types.ModuleType("mcp.client")
+        fake_stdio = types.ModuleType("mcp.client.stdio")
+        fake_stdio.stdio_client = lambda params: FakeStdioClient()
+
+        monkeypatch.setitem(sys.modules, "mcp", fake_mcp)
+        monkeypatch.setitem(sys.modules, "mcp.client", fake_client)
+        monkeypatch.setitem(sys.modules, "mcp.client.stdio", fake_stdio)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-" + "x" * 30)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-" + "y" * 30)
+        monkeypatch.setenv("HERMES_CUA_DRIVER_CMD", "fake-cua-driver")
+        monkeypatch.setenv("HERMES_PROVIDER_SAFE_SETTING", "kept")
+        monkeypatch.setattr(cua_backend.shutil, "which", lambda command: f"/tmp/{command}")
+
+        session = cua_backend._CuaDriverSession(cua_backend._AsyncBridge())
+
+        await session._aenter()
+        try:
+            env = captured["env"]
+            assert "OPENAI_API_KEY" not in env
+            assert "ANTHROPIC_API_KEY" not in env
+            assert env["HERMES_PROVIDER_SAFE_SETTING"] == "kept"
+        finally:
+            await session._aexit()

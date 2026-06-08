@@ -34,6 +34,7 @@ from tools.computer_use.backend import (
     ComputerUseBackend,
     UIElement,
 )
+from tools.environments.local import _sanitize_subprocess_env
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +278,7 @@ class _CuaDriverSession:
         params = StdioServerParameters(
             command=_CUA_DRIVER_CMD,
             args=_CUA_DRIVER_ARGS,
-            env={**os.environ},
+            env=_sanitize_subprocess_env(os.environ),
         )
         stack = AsyncExitStack()
         read, write = await stack.enter_async_context(stdio_client(params))
