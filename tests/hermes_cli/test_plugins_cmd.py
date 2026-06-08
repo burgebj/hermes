@@ -127,6 +127,74 @@ class TestResolveGitUrl:
         with pytest.raises(ValueError, match="Invalid plugin identifier"):
             _resolve_git_url("a/b/c")
 
+    # ── Browser-pasted GitHub URLs ──────────────────────────────────────
+    # Cline parity port (cline/cline#10945). ``git clone`` only accepts the
+    # bare repo URL; users routinely paste ``tree/``, ``blob/``, ``pull/``,
+    # etc. URLs from a browser tab.  Those must be normalized down to
+    # ``https://github.com/{owner}/{repo}.git`` so install Just Works.
+
+    def test_github_tree_url_normalized_to_repo(self):
+        url = _resolve_git_url("https://github.com/owner/repo/tree/main")
+        assert url == "https://github.com/owner/repo.git"
+
+    def test_github_tree_with_subpath_normalized_to_repo(self):
+        url = _resolve_git_url(
+            "https://github.com/owner/repo/tree/main/plugins/foo"
+        )
+        assert url == "https://github.com/owner/repo.git"
+
+    def test_github_blob_url_normalized_to_repo(self):
+        url = _resolve_git_url(
+            "https://github.com/owner/repo/blob/main/README.md"
+        )
+        assert url == "https://github.com/owner/repo.git"
+
+    def test_github_pull_url_normalized_to_repo(self):
+        url = _resolve_git_url("https://github.com/owner/repo/pull/123")
+        assert url == "https://github.com/owner/repo.git"
+
+    def test_github_commit_url_normalized_to_repo(self):
+        url = _resolve_git_url(
+            "https://github.com/owner/repo/commit/abc123def"
+        )
+        assert url == "https://github.com/owner/repo.git"
+
+    def test_github_releases_url_normalized_to_repo(self):
+        url = _resolve_git_url(
+            "https://github.com/owner/repo/releases/tag/v1.0"
+        )
+        assert url == "https://github.com/owner/repo.git"
+
+    def test_github_issues_url_normalized_to_repo(self):
+        url = _resolve_git_url("https://github.com/owner/repo/issues/42")
+        assert url == "https://github.com/owner/repo.git"
+
+    def test_bare_github_url_unchanged(self):
+        # Already a cloneable repo URL — leave alone.
+        url = _resolve_git_url("https://github.com/owner/repo")
+        assert url == "https://github.com/owner/repo"
+
+    def test_canonical_github_dotgit_url_unchanged(self):
+        url = _resolve_git_url("https://github.com/owner/repo.git")
+        assert url == "https://github.com/owner/repo.git"
+
+    def test_non_github_host_passthrough_with_tree(self):
+        # gitlab, bitbucket, custom hosts — leave alone; their URL schemes
+        # differ and ``git clone`` may handle them correctly as-is.
+        url = _resolve_git_url("https://gitlab.com/owner/repo/tree/main")
+        assert url == "https://gitlab.com/owner/repo/tree/main"
+
+    def test_github_user_profile_url_unchanged(self):
+        # Single-segment path (no repo) — return unchanged so the caller's
+        # downstream git invocation surfaces the real error.
+        url = _resolve_git_url("https://github.com/owner")
+        assert url == "https://github.com/owner"
+
+    def test_github_url_with_unknown_segment_unchanged(self):
+        # Defensive: only normalize segments we explicitly recognize.
+        url = _resolve_git_url("https://github.com/owner/repo/branches")
+        assert url == "https://github.com/owner/repo/branches"
+
 
 # ── _resolve_git_executable ─────────────────────────────────────────────────
 

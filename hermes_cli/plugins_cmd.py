@@ -135,6 +135,51 @@ def _sanitize_plugin_name(
     return target
 
 
+def _normalize_github_browser_url(url: str) -> str:
+    """Strip browser-only GitHub path segments so ``git clone`` accepts the URL.
+
+    Users frequently paste URLs they copied from a browser tab, e.g.
+    ``https://github.com/owner/repo/tree/main/plugins/foo`` or
+    ``https://github.com/owner/repo/blob/main/README.md``.  ``git clone`` does
+    not understand those — it only accepts the bare repo URL.  Normalize the
+    common variants down to ``https://github.com/{owner}/{repo}.git`` so the
+    paste-from-address-bar workflow Just Works.
+
+    Recognized trailing segments (after ``owner/repo``):
+    ``tree/*``, ``blob/*``, ``commit/*``, ``commits/*``, ``pull/*``,
+    ``pulls/*``, ``issues/*``, ``releases/*``, ``actions/*``, ``wiki/*``.
+
+    Non-github.com hosts and URLs without a recognized segment are returned
+    unchanged — callers (and ``git clone``) will handle them as-is.
+    """
+    # Only normalize https://github.com/... URLs.  Leave gitlab, bitbucket,
+    # custom hosts, ssh URLs, and file:// alone.
+    prefix = "https://github.com/"
+    if not url.startswith(prefix):
+        return url
+    rest = url[len(prefix):].strip("/")
+    parts = rest.split("/")
+    if len(parts) < 2:
+        return url
+    owner, repo = parts[0], parts[1]
+    # Defensive: ensure owner/repo look sane before mutating.
+    if not owner or not repo or owner.startswith(".") or repo.startswith("."):
+        return url
+    # ``owner/repo.git`` is already canonical; leave that alone.
+    if len(parts) == 2 and repo.endswith(".git"):
+        return url
+    if len(parts) == 2:
+        # Bare repo URL with no trailing segment — git clone handles this.
+        return url
+    browser_segments = {
+        "tree", "blob", "commit", "commits", "pull", "pulls",
+        "issues", "releases", "actions", "wiki",
+    }
+    if parts[2] in browser_segments:
+        return f"https://github.com/{owner}/{repo}.git"
+    return url
+
+
 def _resolve_git_url(identifier: str) -> str:
     """Turn an identifier into a cloneable Git URL.
 
@@ -142,6 +187,9 @@ def _resolve_git_url(identifier: str) -> str:
     - Full URL: https://github.com/owner/repo.git
     - Full URL: git@github.com:owner/repo.git
     - Full URL: ssh://git@github.com/owner/repo.git
+    - Browser URL: https://github.com/owner/repo/tree/main/path/to/plugin
+      (and ``blob/``, ``commit/``, ``pull/``, etc. — normalized to the bare
+      repo URL so ``git clone`` accepts it)
     - Shorthand: owner/repo  →  https://github.com/owner/repo.git
 
     NOTE: ``http://`` and ``file://`` schemes are accepted but will trigger a
@@ -149,7 +197,7 @@ def _resolve_git_url(identifier: str) -> str:
     """
     # Already a URL
     if identifier.startswith(("https://", "http://", "git@", "ssh://", "file://")):
-        return identifier
+        return _normalize_github_browser_url(identifier)
 
     # owner/repo shorthand
     parts = identifier.strip("/").split("/")
