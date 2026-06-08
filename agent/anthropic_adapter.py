@@ -208,8 +208,16 @@ def _resolve_anthropic_messages_max_tokens(
 
 
 def _supports_adaptive_thinking(model: str) -> bool:
-    """Return True for Claude 4.6+ models that support adaptive thinking."""
-    return any(v in model for v in _ADAPTIVE_THINKING_SUBSTRINGS)
+    """Return True for models that support adaptive thinking.
+
+    Covers Claude 4.6+ plus MiniMax-M3 — an Anthropic Messages-compatible
+    model whose endpoint accepts the adaptive thinking format
+    (``thinking={"type":"adaptive"}`` + ``output_config.effort``) and
+    self-scales reasoning by prompt difficulty. The legacy MiniMax M2.x
+    family does not and stays on manual budget-based thinking.
+    """
+    m = model.lower()
+    return any(v in model for v in _ADAPTIVE_THINKING_SUBSTRINGS) or "minimax-m3" in m
 
 
 def _supports_xhigh_effort(model: str) -> bool:
