@@ -7389,6 +7389,9 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         if canonical == "debug":
             return await self._handle_debug_command(event)
 
+        if canonical == "council":
+            return await self._handle_council_command(event)
+
         if canonical == "title":
             return await self._handle_title_command(event)
 
@@ -11272,6 +11275,142 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 p.unlink(missing_ok=True)
             (_hermes_home / ".update_response").unlink(missing_ok=True)
             self._update_prompt_pending.pop(session_key, None)
+
+    # ── Council handlers ─────────────────────────────────────────────
+
+    async def _handle_council_command(self, event: MessageEvent) -> str:
+        """Handle /council command via gateway."""
+        import asyncio
+
+        args = event.get_command_args().strip()
+        if not args:
+            return "Usage: /council <task-description>\n       /council status"
+
+        # /council status subcommand
+        if args.lower() == "status":
+            from agent.council import CouncilOrchestrator
+            from hermes_cli.config import load_config
+            config = load_config()
+            council_config = config.get("council", {})
+            orc = CouncilOrchestrator(council_config)
+            s = orc.get_status()
+            lines = [
+                f"**Council Configuration**",
+                f"Enabled: {s['enabled']}",
+                f"Mode: {s['mode']}",
+                f"Peer review: {s['peer_review']}",
+                f"Anonymize: {s['anonymize']}",
+                f"Preflight: {s['preflight']}",
+                f"Pipeline timeout: {s.get('pipeline_timeout', 1800)}s",
+                f"Proposers: {', '.join(s.get('proposers', []))}",
+                f"Critic: {s.get('critic', '?')}",
+                f"Chairman: {s.get('chairman', '?')}",
+            ]
+            return "\n".join(lines)
+
+        # /council resume subcommand
+        if args.lower() == "resume" or args.lower().startswith("resume "):
+            return await self._handle_council_resume(event)
+
+        # Full council run
+        try:
+            from hermes_cli.config import load_config
+            config = load_config()
+            council_config = config.get("council", {})
+
+            # Resolve agent — check _running_agents (mid-turn) first,
+            # then _agent_cache (between turns) so subagent delegation
+            # works even when the user sends /council between turns.
+            session_key = self._session_key_for_source(event.source)
+            agent = None
+            if hasattr(self, "_running_agents") and session_key in self._running_agents:
+                agent = self._running_agents[session_key]
+            if agent is None and hasattr(self, "_agent_cache"):
+                cached = self._agent_cache.get(session_key, [])
+                if cached:
+                    agent = cached[0]
+
+            from agent.council import CouncilOrchestrator
+            orc = CouncilOrchestrator(
+                council_config,
+                parent_agent=agent,
+                delegation_config=config.get("delegation", {}),
+            )
+
+            # ── Emit task details before starting ─────────────────────
+            proposer_models = [p.get("model", "?") for p in council_config.get("proposers", [])]
+            critic_model = council_config.get("critic", {}).get("model", "?")
+            chairman_model = council_config.get("chairman", {}).get("model", "?")
+            mode_label = "subagent" if council_config.get("subagent_delegation", False) else "flat"
+            pipe_timeout = council_config.get("pipeline_timeout_seconds", 2400)
+
+            # Progress callback for interim diagnostic logging
+            task_text = args.strip()
+
+            result = await orc.run_plan(task_text)
+
+            if result.get("success"):
+                return (
+                    f"\u2705 *Council complete* \u2014 {result.get('processing_time', 0):.1f}s\n"
+                    f"*Models*: {', '.join(result.get('models_used', {}).get('proposers', []))}\n\n"
+                    f"{result['output']}"
+                )
+            else:
+                return (
+                    f"\u274c *Council failed*: {result.get('error', 'Unknown error')}\n"
+                    f"*Completed stages*: {result.get('stages', [])}"
+                )
+
+        except Exception as e:
+            import traceback
+            return f"**Council Error**: {e}\n```\n{traceback.format_exc()[:1000]}\n```"
+
+    async def _handle_council_resume(self, event: MessageEvent) -> str:
+        """Handle /council resume via gateway."""
+        import os
+
+        from agent.council import CouncilOrchestrator
+        from hermes_cli.config import load_config
+
+        args = event.get_command_args().strip()
+        parts = args.split(None, 1)
+        subcmd = parts[0].lower() if parts else ""
+        state_path_arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if not state_path_arg:
+            default_path = os.path.expanduser("~/.hermes/council_state.json")
+            if os.path.exists(default_path):
+                state_path_arg = default_path
+            else:
+                return "No state file specified and default not found. Usage: /council resume <path>"
+
+        config = load_config()
+        council_config = config.get("council", {})
+
+        session_key = self._session_key_for_source(event.source)
+        agent = None
+        if hasattr(self, "_running_agents") and session_key in self._running_agents:
+            agent = self._running_agents[session_key]
+        if agent is None and hasattr(self, "_agent_cache"):
+            cached = self._agent_cache.get(session_key, [])
+            if cached:
+                agent = cached[0]
+
+        orc = CouncilOrchestrator(
+            council_config,
+            parent_agent=agent,
+            delegation_config=config.get("delegation", {}),
+        )
+
+        result = await orc.run_resume(state_path_arg)
+
+        if result.get("success"):
+            return (
+                f"\u2705 *Resume complete* \u2014 {result.get('processing_time', 0):.1f}s\n\n"
+                f"{result['output']}"
+            )
+        else:
+            return f"\u274c *Resume failed*: {result.get('error', 'Unknown error')}"
 
     async def _send_update_notification(self) -> bool:
         """If an update finished, notify the user.

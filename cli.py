@@ -8763,6 +8763,188 @@ class HermesCLI:
         from hermes_cli.skills_hub import handle_skills_slash
         handle_skills_slash(cmd, ChatConsole())
 
+    # ── Council handlers ─────────────────────────────────────────────
+
+    def _handle_council_command(self, cmd: str):
+        """Handle /council command — multi-model deliberation for planning.
+
+        Usage:
+            /council plan <task>    — run council deliberation (default)
+            /council status         — show council configuration
+            /council resume         — resume failed council from saved state
+        """
+        import asyncio
+        import traceback
+        from cli import _cprint
+
+        parts = cmd.strip().split(None, 2)
+        subcmd = parts[1].lower() if len(parts) > 1 else ""
+        task_arg = parts[2] if len(parts) > 2 else ""
+
+        # 'plan' is the default; also accept bare /council <task>
+        if subcmd in ("plan", "plan "):
+            task = task_arg
+        elif subcmd == "status":
+            self._show_council_status()
+            return
+        elif subcmd == "resume":
+            self._handle_council_resume(task_arg)
+            return
+        else:
+            # Treat the first arg as the task (bare /council <task>)
+            task = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+        if not task:
+            _cprint("  Usage: /council <task-description>")
+            _cprint("         /council plan <task>")
+            _cprint("         /council status")
+            _cprint("         /council resume")
+            return
+
+        _cprint("\n  \u2696\ufe0f  Council convening...")
+        _cprint(f"  Task: {task[:120]}{'...' if len(task) > 120 else ''}")
+        _cprint("")
+
+        try:
+            from hermes_cli.config import load_config
+            config = load_config()
+
+            council_config = config.get("council", {})
+            from agent.council import CouncilOrchestrator
+
+            # ── Log task details before starting ──────────────────────
+            proposer_models = [p.get("model", "?") for p in council_config.get("proposers", [])]
+            critic_model = council_config.get("critic", {}).get("model", "?")
+            chairman_model = council_config.get("chairman", {}).get("model", "?")
+            mode_label = "subagent" if council_config.get("subagent_delegation", False) else "flat"
+            _cprint(f"  Models:")
+            _cprint(f"    Proposers ({len(proposer_models)}): {', '.join(proposer_models)}")
+            _cprint(f"    Critic: {critic_model}")
+            _cprint(f"    Chairman: {chairman_model}")
+            _cprint(f"    Mode: {mode_label}")
+            _cprint(f"    Pipeline timeout: {council_config.get('pipeline_timeout_seconds', 1800)}s")
+            _cprint("")
+
+            # Progress callback for live stage logging
+            def _progress(stage: str, msg: str):
+                icons = {"preflight": "\U0001f50d", "propose": "\U0001f4a1", "critique": "\U0001f50e", "chairman": "\U0001f4cb"}
+                arrow = "\u27a1"
+                _cprint(f"  {icons.get(stage, arrow)} {stage.capitalize()}: {msg}")
+
+            orc = CouncilOrchestrator(
+                council_config,
+                parent_agent=getattr(self, 'agent', None),
+                delegation_config=config.get("delegation", {}),
+            )
+
+            # Run council async — detect if we're inside prompt_toolkit's
+            # event loop (TUI mode).  asyncio.run() raises RuntimeError when
+            # a loop is already running (Python 3.12+), so offload to a
+            # background thread in that case.
+            try:
+                _running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                _running_loop = None
+
+            if _running_loop is not None:
+                import concurrent.futures as _futures
+                with _futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                    _fut = _pool.submit(
+                        asyncio.run,
+                        orc.run_plan(task, progress_callback=_progress),
+                    )
+                    result = _fut.result()
+            else:
+                result = asyncio.run(orc.run_plan(task, progress_callback=_progress))
+
+            if result.get("success"):
+                _cprint(f"  \u2705 Council complete — {result.get('processing_time', 0):.1f}s")
+                _cprint(f"  Models: {', '.join(result.get('models_used', {}).get('proposers', []))}")
+                _cprint("")
+                _cprint(result.get("output", ""))
+            else:
+                _cprint(f"  \u274c Council failed: {result.get('error', 'Unknown error')}")
+
+        except Exception as e:
+            _cprint(f"  \u274c Council error: {e}")
+            traceback.print_exc()
+
+    def _show_council_status(self):
+        """Show council configuration status."""
+        from hermes_cli.config import load_config
+        config = load_config()
+        cc = config.get("council", {})
+        from cli import _cprint
+
+        _cprint("  \u2696\ufe0f Council Configuration")
+        _cprint(f"  Enabled: {cc.get('enabled', True)}")
+        _cprint(f"  Mode: {'subagent' if cc.get('subagent_delegation', False) else 'flat'}")
+        _cprint(f"  Peer review: {cc.get('peer_review', True)}")
+        _cprint(f"  Anonymize: {cc.get('anonymize_reviews', True)}")
+        _cprint(f"  Preflight: {cc.get('preflight', {}).get('enabled', True)}")
+        _cprint("  Proposers:")
+        for p in cc.get("proposers", []):
+            _cprint(f"    - {p.get('model','?')} ({p.get('provider','?')})")
+        _cprint(f"  Critic: {cc.get('critic', {}).get('model', '?')}")
+        _cprint(f"  Chairman: {cc.get('chairman', {}).get('model', '?')}")
+        _cprint(f"  Pipeline timeout: {cc.get('pipeline_timeout_seconds', 1800)}s")
+
+    def _handle_council_resume(self, _state_path: str = ""):
+        """Resume a failed council from saved state."""
+        import asyncio
+        import traceback
+        from cli import _cprint
+
+        from hermes_cli.config import load_config
+
+        config = load_config()
+        council_config = config.get("council", {})
+        from agent.council import CouncilOrchestrator
+
+        if not _state_path:
+            import os
+            default_path = os.path.join(get_hermes_home(), "council_state.json")
+            if os.path.exists(default_path):
+                _state_path = default_path
+            else:
+                _cprint("  \u274c No state file specified and default not found.")
+                _cprint(f"  Usage: /council resume <path>")
+                return
+
+        _cprint(f"  \U0001f504 Resuming council from {_state_path}...")
+
+        try:
+            orc = CouncilOrchestrator(
+                council_config,
+                parent_agent=getattr(self, 'agent', None),
+                delegation_config=config.get("delegation", {}),
+            )
+
+            try:
+                _running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                _running_loop = None
+
+            if _running_loop is not None:
+                import concurrent.futures as _futures
+                with _futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                    _fut = _pool.submit(
+                        asyncio.run,
+                        orc.run_resume(_state_path),
+                    )
+                    result = _fut.result()
+            else:
+                result = asyncio.run(orc.run_resume(_state_path))
+
+            if result.get("success"):
+                _cprint(f"  \u2705 Resume complete — {result.get('processing_time', 0):.1f}s")
+                _cprint(result.get("output", ""))
+            else:
+                _cprint(f"  \u274c Resume failed: {result.get('error', 'Unknown error')}")
+        except Exception as e:
+            _cprint(f"  \u274c Resume error: {e}")
+            traceback.print_exc()
+
     def _show_gateway_status(self):
         """Show status of the gateway and connected messaging platforms."""
         from gateway.config import load_gateway_config, Platform

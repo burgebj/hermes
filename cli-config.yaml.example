@@ -473,6 +473,50 @@ prompt_caching:
 #                           #   enable_thinking: false
 
 # =============================================================================
+# Council — Multi-Model Deliberation Planner
+# =============================================================================
+# Runs a 3-stage pipeline (/council command): N proposers → critic → chairman.
+# Requires at least one LLM provider with access to the configured models.
+# See website/docs/user-guide/features/council.md for full usage.
+#
+# council:
+#   enabled: true
+#   default_mode: plan
+#   subagent_delegation: true
+#   max_concurrent_calls: 2
+#   pipeline_timeout_seconds: 2400
+#   max_retries: 2
+#   proposers:
+#     - provider: ollama-cloud
+#       model: glm-5.1:cloud
+#     - provider: ollama-cloud
+#       model: kimi-k2.6:cloud
+#     - provider: ollama-cloud
+#       model: minimax-m2.5:cloud
+#   subagents:
+#     fast:
+#       provider: ollama-cloud
+#       model: deepseek-v4-flash:cloud
+#     lightweight:
+#       provider: ollama-cloud
+#       model: gemma4:31b:cloud
+#   critic:
+#     provider: ollama-cloud
+#     model: minimax-m3:cloud
+#   chairman:
+#     provider: ollama-cloud
+#     model: minimax-m3:cloud
+#   peer_review: true
+#   anonymize_reviews: true
+#   preflight:
+#     enabled: true
+#     timeout_seconds: 30
+#     min_proposers: 2
+#     check_interval_hours: 24
+#   min_plan_lines: 15
+#   min_plan_chars: 500
+
+# =============================================================================
 # Persistent Memory
 # =============================================================================
 # Bounded curated memory injected into the system prompt every session.
