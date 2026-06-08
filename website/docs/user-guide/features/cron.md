@@ -327,6 +327,20 @@ cron:
   wrap_response: false
 ```
 
+### Session mirroring
+
+Cron jobs run in their own `cron_*` agent sessions. By default, delivering a cron response to Telegram, WhatsApp, Slack, etc. does **not** append that response to the target chat's normal gateway transcript; this keeps high-volume monitors from polluting conversational context.
+
+If you want follow-up replies in the same chat to naturally refer to the delivered cron message, enable mirroring globally:
+
+```yaml
+# ~/.hermes/config.yaml
+cron:
+  mirror_to_session: true
+```
+
+Individual jobs may override the global default with `mirror_to_session: true` or `mirror_to_session: false` in `jobs.json`. Use this for important DM digests and reminders; leave it off for noisy group monitors.
+
 ### Silent suppression
 
 If the agent's final response starts with `[SILENT]`, delivery is suppressed entirely. The output is still saved locally for audit (in `~/.hermes/cron/output/`), but no message is sent to the delivery target.

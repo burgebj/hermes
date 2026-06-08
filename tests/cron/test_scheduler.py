@@ -788,8 +788,8 @@ class TestDeliverResultWrapping:
         assert "MEDIA:" not in text_sent
         assert "Report" in text_sent
 
-    def test_no_mirror_to_session_call(self):
-        """Cron deliveries should NOT mirror into the gateway session."""
+    def test_no_mirror_to_session_call_by_default(self):
+        """Cron deliveries should not mirror into the gateway session by default."""
         from gateway.config import Platform
 
         pconfig = MagicMock()
@@ -798,11 +798,63 @@ class TestDeliverResultWrapping:
         mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
              patch("gateway.mirror.mirror_to_session") as mirror_mock:
             job = {
                 "id": "test-job",
                 "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+            }
+            _deliver_result(job, "Hello!")
+
+        mirror_mock.assert_not_called()
+
+    def test_mirror_to_session_call_when_global_config_enabled(self):
+        """Cron deliveries may be mirrored into the target session by global config."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False, "mirror_to_session": True}}), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
+             patch("gateway.mirror.mirror_to_session") as mirror_mock:
+            job = {
+                "id": "test-job",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123", "thread_id": "456"},
+            }
+            _deliver_result(job, "Hello!")
+
+        mirror_mock.assert_called_once_with(
+            "telegram",
+            "123",
+            "Hello!",
+            source_label="cron",
+            thread_id="456",
+        )
+
+    def test_job_mirror_to_session_overrides_global_config(self):
+        """A noisy job can opt out even when cron.mirror_to_session is enabled."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False, "mirror_to_session": True}}), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
+             patch("gateway.mirror.mirror_to_session") as mirror_mock:
+            job = {
+                "id": "test-job",
+                "deliver": "origin",
+                "mirror_to_session": False,
                 "origin": {"platform": "telegram", "chat_id": "123"},
             }
             _deliver_result(job, "Hello!")

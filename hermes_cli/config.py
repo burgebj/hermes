@@ -1999,6 +1999,11 @@ DEFAULT_CONFIG = {
         # 1 = serial (pre-v0.9 behaviour).
         # Also overridable via HERMES_CRON_MAX_PARALLEL env var.
         "max_parallel_jobs": None,
+        # Mirror successfully delivered cron output into the target gateway
+        # session transcript. Disabled by default so high-volume cron jobs do
+        # not unexpectedly pollute chat context. Individual jobs may override
+        # with mirror_to_session: true/false.
+        "mirror_to_session": False,
     },
 
     # Kanban multi-agent coordination — controls the dispatcher loop that

@@ -747,11 +747,16 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
     # in config.yaml for clean output.
     wrap_response = True
+    mirror_to_session_enabled = False
     try:
         user_cfg = load_config()
-        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
+        cron_cfg = user_cfg.get("cron", {}) if isinstance(user_cfg, dict) else {}
+        wrap_response = cron_cfg.get("wrap_response", True)
+        mirror_to_session_enabled = bool(cron_cfg.get("mirror_to_session", False))
     except Exception:
         pass
+    if "mirror_to_session" in job:
+        mirror_to_session_enabled = bool(job.get("mirror_to_session"))
 
     if wrap_response:
         task_name = job.get("name", job["id"])
@@ -876,6 +881,19 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
                 if adapter_ok:
                     logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
+                    if mirror_to_session_enabled:
+                        try:
+                            from gateway.mirror import mirror_to_session
+
+                            mirror_to_session(
+                                platform_name,
+                                chat_id,
+                                content,
+                                source_label="cron",
+                                thread_id=thread_id,
+                            )
+                        except Exception as e:
+                            logger.debug("Job '%s': cron delivery mirror failed: %s", job["id"], e)
                     delivered = True
             except Exception as e:
                 logger.warning(
@@ -910,6 +928,19 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 continue
 
             logger.info("Job '%s': delivered to %s:%s", job["id"], platform_name, chat_id)
+            if mirror_to_session_enabled:
+                try:
+                    from gateway.mirror import mirror_to_session
+
+                    mirror_to_session(
+                        platform_name,
+                        chat_id,
+                        content,
+                        source_label="cron",
+                        thread_id=thread_id,
+                    )
+                except Exception as e:
+                    logger.debug("Job '%s': cron delivery mirror failed: %s", job["id"], e)
 
     if delivery_errors:
         return "; ".join(delivery_errors)
