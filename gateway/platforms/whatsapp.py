@@ -27,7 +27,7 @@ import subprocess
 
 _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 
 from hermes_constants import get_hermes_dir
 
@@ -1134,7 +1134,106 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 pass
         except Exception:
             pass  # Ignore typing indicator failures
-    
+
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[list],
+        clarify_id: str,
+        session_key: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send interactive buttons or list messages for multi-choice prompts.
+
+        Delegates to the base class (text-list) for open-ended prompts or
+        when the bridge does not support interactive messages.
+        """
+        if not choices:
+            return await super().send_clarify(
+                chat_id, question, choices, clarify_id, session_key, metadata
+            )
+
+        try:
+            import aiohttp
+
+            WA_BUTTON_LABEL_LIMIT = 20  # WhatsApp hard limit per button
+
+            buttons: List[Dict[str, Any]] = []
+            for idx, choice in enumerate(choices):
+                label = str(choice)[:WA_BUTTON_LABEL_LIMIT]
+                buttons.append({
+                    "buttonId": f"{clarify_id}:{idx}",
+                    "buttonText": {"displayText": label},
+                    "type": 1,  # ButtonsMessage.Button.Type.RESPONSE
+                })
+            buttons.append({
+                "buttonId": f"{clarify_id}:other",
+                "buttonText": {"displayText": "\u270f\ufe0f Other"},
+                "type": 1,
+            })
+
+            use_list = len(buttons) > 3  # WhatsApp caps quick-reply at 3
+
+            if use_list:
+                interactive: Dict[str, Any] = {
+                    "listMessage": {
+                        "title": "",
+                        "description": question,
+                        "buttonText": "Select",
+                        "listType": 1,  # SINGLE_SELECT
+                        "sections": [{
+                            "title": "",
+                            "rows": [
+                                {
+                                    "title": b["buttonText"]["displayText"][:24],
+                                    "rowId": b["buttonId"],
+                                }
+                                for b in buttons
+                            ],
+                        }],
+                    }
+                }
+            else:
+                interactive = {
+                    "buttonsMessage": {
+                        "contentText": question,
+                        "footerText": "",
+                        "buttons": buttons,
+                        "headerType": 1,  # EMPTY
+                    }
+                }
+
+            payload = {"chatId": chat_id, "interactive": interactive}
+
+            async with self._http_session.post(
+                f"http://127.0.0.1:{self._bridge_port}/send-interactive",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    from tools.clarify_gateway import mark_awaiting_text
+                    mark_awaiting_text(clarify_id)
+                    return SendResult(
+                        success=True, message_id=data.get("messageId")
+                    )
+                logger.warning(
+                    "[whatsapp] /send-interactive returned %d, "
+                    "falling back to text list",
+                    resp.status,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[whatsapp] /send-interactive failed: %s, "
+                "falling back to text list",
+                exc,
+            )
+
+        return await super().send_clarify(
+            chat_id, question, choices, clarify_id, session_key, metadata
+        )
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Get information about a WhatsApp chat."""
         if not self._running or not self._http_session:
