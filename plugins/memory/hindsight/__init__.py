@@ -446,14 +446,37 @@ def _embedded_profile_env_path(config: dict[str, Any]):
 
 
 def _materialize_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | None = None):
-    """Write the profile-scoped env file that standalone hindsight-embed uses."""
+    """Write the profile-scoped env file that standalone hindsight-embed uses.
+
+    The file holds ``HINDSIGHT_API_LLM_API_KEY`` — the user's LLM provider
+    secret — so it must be owner-only. ``Path.write_text`` would create it
+    with the process umask (typically 0644 = world/group readable), leaking
+    the key to other local users on shared hosts. This path also runs
+    non-interactively on every ``local_embedded`` session start (see
+    ``_start_daemon``), so the leak recurs silently. We mirror the 0600
+    convention used for the sibling config.json / .env secret writes.
+    """
     profile_env = _embedded_profile_env_path(config)
     profile_env.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the profiles dir owner-only too — it never holds other users' data.
+    try:
+        os.chmod(profile_env.parent, 0o700)
+    except OSError:
+        pass
     env_values = _build_embedded_profile_env(config, llm_api_key=llm_api_key)
-    profile_env.write_text(
-        "".join(f"{key}={value}\n" for key, value in env_values.items()),
-        encoding="utf-8",
-    )
+    data = "".join(f"{key}={value}\n" for key, value in env_values.items())
+    # Create with 0600 so a brand-new file is never momentarily world-readable.
+    fd = os.open(profile_env, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data.encode("utf-8"))
+    finally:
+        os.close(fd)
+    # os.open's mode only applies on creation; enforce 0600 on a pre-existing
+    # (possibly already world-readable) file too.
+    try:
+        os.chmod(profile_env, 0o600)
+    except OSError:
+        pass
     return profile_env
 
 def _sanitize_bank_segment(value: str) -> str:

@@ -22,6 +22,8 @@ from plugins.memory.hindsight import (
     RETAIN_SCHEMA,
     _load_config,
     _build_embedded_profile_env,
+    _embedded_profile_env_path,
+    _materialize_embedded_profile_env,
     _normalize_retain_tags,
     _resolve_bank_id_template,
     _sanitize_bank_segment,
@@ -1628,4 +1630,54 @@ def test_save_config_sets_owner_only_permissions(tmp_path):
     config_file = tmp_path / "hindsight" / "config.json"
     assert config_file.exists()
     mode = stat.S_IMODE(config_file.stat().st_mode)
+    assert mode == 0o600, f"Expected 0o600 (owner-only), got {oct(mode)}"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits not enforced on Windows")
+def test_materialize_embedded_profile_env_is_owner_only(tmp_path, monkeypatch):
+    """The profile .env holds the LLM API key and must be written with 0o600.
+
+    It is materialized non-interactively on every local_embedded session
+    start, so a world-readable file would leak the key on shared hosts.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = {
+        "profile": "hermes",
+        "llm_provider": "openai",
+        "llm_api_key": "sk-secret-key",
+        "llm_model": "gpt-4o-mini",
+    }
+
+    profile_env = _materialize_embedded_profile_env(config)
+
+    assert profile_env == _embedded_profile_env_path(config)
+    assert profile_env.exists()
+    assert "HINDSIGHT_API_LLM_API_KEY=sk-secret-key" in profile_env.read_text()
+    mode = stat.S_IMODE(profile_env.stat().st_mode)
+    assert mode == 0o600, f"Expected 0o600 (owner-only), got {oct(mode)}"
+    parent_mode = stat.S_IMODE(profile_env.parent.stat().st_mode)
+    assert parent_mode == 0o700, f"Expected 0o700 dir, got {oct(parent_mode)}"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits not enforced on Windows")
+def test_materialize_embedded_profile_env_tightens_existing_file(tmp_path, monkeypatch):
+    """A pre-existing world-readable profile .env is re-secured to 0o600 on rewrite."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = {
+        "profile": "hermes",
+        "llm_provider": "openai",
+        "llm_api_key": "sk-secret-key",
+        "llm_model": "gpt-4o-mini",
+    }
+
+    # Simulate a file left world-readable by an older Hermes version.
+    profile_env = _embedded_profile_env_path(config)
+    profile_env.parent.mkdir(parents=True, exist_ok=True)
+    profile_env.write_text("HINDSIGHT_API_LLM_API_KEY=stale\n", encoding="utf-8")
+    os.chmod(profile_env, 0o644)
+    assert stat.S_IMODE(profile_env.stat().st_mode) == 0o644
+
+    _materialize_embedded_profile_env(config)
+
+    mode = stat.S_IMODE(profile_env.stat().st_mode)
     assert mode == 0o600, f"Expected 0o600 (owner-only), got {oct(mode)}"
