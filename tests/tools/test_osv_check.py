@@ -50,6 +50,14 @@ class TestParseNpmPackage:
     def test_latest_ignored(self):
         assert _parse_npm_package("react@latest") == ("react", None)
 
+    def test_trailing_at_no_version(self):
+        """Trailing '@' with no version is treated as no version specified.
+
+        Regression: prior behaviour returned ``('react', '')`` which then
+        propagated an empty string into the OSV query payload.
+        """
+        assert _parse_npm_package("react@") == ("react", None)
+
 
 class TestParsePypiPackage:
     def test_simple(self):

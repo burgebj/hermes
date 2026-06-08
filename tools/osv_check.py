@@ -128,7 +128,8 @@ def _parse_npm_package(token: str) -> Tuple[Optional[str], Optional[str]]:
     if "@" in token:
         parts = token.rsplit("@", 1)
         name = parts[0]
-        version = parts[1] if len(parts) > 1 and parts[1] != "latest" else None
+        raw_version = parts[1] if len(parts) > 1 else ""
+        version = raw_version if raw_version and raw_version != "latest" else None
         return name, version
     return token, None
 
