@@ -181,6 +181,88 @@ def _path_from_file_uri(uri: str) -> Path | None:
     return Path(path_text)
 
 
+def _resource_read_block_reason(path: Path, allowed_root: Path | str | None = None) -> str | None:
+    """Return a reason when an ACP resource link must not be read.
+
+    ACP resource links come from the editor/client boundary.  They should not
+    be allowed to make the Hermes process dereference arbitrary host paths or
+    symlinks outside the session workspace before normal file-tool guards can
+    run.
+    """
+    try:
+        resolved = path.expanduser().resolve(strict=True)
+    except OSError as exc:
+        return f"could not resolve resource path: {exc}"
+
+    if allowed_root is not None:
+        try:
+            root = Path(allowed_root).expanduser().resolve(strict=True)
+        except OSError as exc:
+            return f"could not resolve allowed workspace: {exc}"
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return "resolved path is outside allowed workspace"
+
+    home = Path.home().resolve()
+    try:
+        from hermes_constants import get_hermes_home
+        hermes_home = get_hermes_home().resolve()
+    except Exception:
+        hermes_home = Path(os.path.expanduser("~/.hermes")).resolve()
+
+    denied_paths = {
+        hermes_home / ".env",
+        home / ".netrc",
+        home / ".npmrc",
+        home / ".pypirc",
+        home / ".pgpass",
+        home / ".bashrc",
+        home / ".zshrc",
+        home / ".profile",
+        home / ".bash_profile",
+        home / ".zprofile",
+    }
+    if resolved in denied_paths:
+        return "sensitive local credential path"
+
+    denied_prefixes = (
+        home / ".ssh",
+        home / ".aws",
+        home / ".azure",
+        home / ".docker",
+        home / ".gnupg",
+        home / ".kube",
+        home / ".config" / "gh",
+    )
+    for prefix in denied_prefixes:
+        try:
+            resolved.relative_to(prefix.resolve())
+        except (ValueError, OSError):
+            continue
+        return "sensitive local credential path"
+
+    return None
+
+
+def _blocked_resource_part(
+    *,
+    uri: str,
+    name: str | None = None,
+    title: str | None = None,
+    reason: str,
+) -> dict[str, str]:
+    return {
+        "type": "text",
+        "text": _format_resource_text(
+            uri=uri,
+            name=name,
+            title=title,
+            body=f"[Resource file blocked: {reason}]",
+        ),
+    }
+
+
 def _decode_text_bytes(data: bytes, mime_type: str | None) -> str | None:
     """Decode resource bytes if they are probably text; return None for binary."""
     if b"\x00" in data and not _is_text_resource(mime_type):
@@ -208,7 +290,11 @@ def _format_resource_text(
     return f"{header}\nURI: {uri}\n\n{body}"
 
 
-def _resource_link_to_parts(block: ResourceContentBlock) -> list[dict[str, Any]]:
+def _resource_link_to_parts(
+    block: ResourceContentBlock,
+    *,
+    allowed_root: Path | str | None = None,
+) -> list[dict[str, Any]]:
     """Convert an ACP resource_link block to OpenAI content parts.
 
     Returns a list of {"type": "text", ...} and/or {"type": "image_url", ...}
@@ -235,6 +321,10 @@ def _resource_link_to_parts(block: ResourceContentBlock) -> list[dict[str, Any]]
                 body="[Resource link only; Hermes cannot read non-file ACP resource URIs directly.]",
             ),
         }]
+
+    block_reason = _resource_read_block_reason(path, allowed_root)
+    if block_reason:
+        return [_blocked_resource_part(uri=uri, name=name, title=title, reason=block_reason)]
 
     # Image files: emit a short text header + image_url data URL so vision
     # models can see the attachment instead of a "binary omitted" note.
@@ -399,6 +489,8 @@ def _content_blocks_to_openai_user_content(
         | ResourceContentBlock
         | EmbeddedResourceContentBlock
     ],
+    *,
+    allowed_root: Path | str | None = None,
 ) -> str | list[dict[str, Any]]:
     """Convert ACP prompt blocks into a Hermes/OpenAI-compatible user content payload."""
     parts: list[dict[str, Any]] = []
@@ -416,7 +508,7 @@ def _content_blocks_to_openai_user_content(
                 parts.append(image_part)
             continue
         if isinstance(block, ResourceContentBlock):
-            resource_parts = _resource_link_to_parts(block)
+            resource_parts = _resource_link_to_parts(block, allowed_root=allowed_root)
             for part in resource_parts:
                 parts.append(part)
                 if part.get("type") == "text":
@@ -1259,7 +1351,7 @@ class HermesACPAgent(acp.Agent):
             return PromptResponse(stop_reason="refusal")
 
         user_text = _extract_text(prompt).strip()
-        user_content = _content_blocks_to_openai_user_content(prompt)
+        user_content = _content_blocks_to_openai_user_content(prompt, allowed_root=state.cwd)
         text_only_prompt = all(isinstance(block, TextContentBlock) for block in prompt)
         has_content = bool(user_text) or (
             isinstance(user_content, list) and bool(user_content)

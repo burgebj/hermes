@@ -59,6 +59,78 @@ def test_acp_resource_link_file_is_inlined_as_text(tmp_path):
     )
 
 
+def test_acp_resource_link_outside_workspace_is_not_inlined(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    secret = tmp_path / "outside-secret.env"
+    secret.write_text("ACP_SECRET_MARKER=should-not-inline", encoding="utf-8")
+
+    content = _content_blocks_to_openai_user_content(
+        [
+            ResourceContentBlock(
+                type="resource_link",
+                name="outside-secret.env",
+                uri=secret.as_uri(),
+                mimeType="text/plain",
+            ),
+        ],
+        allowed_root=workspace,
+    )
+
+    assert "ACP_SECRET_MARKER" not in str(content)
+    assert "Resource file blocked" in str(content)
+    assert "outside allowed workspace" in str(content)
+
+
+def test_acp_resource_link_symlink_escape_is_not_inlined(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    secret = tmp_path / "outside-secret.env"
+    secret.write_text("ACP_SYMLINK_SECRET_MARKER=should-not-inline", encoding="utf-8")
+    link = workspace / "README.md"
+    link.symlink_to(secret)
+
+    content = _content_blocks_to_openai_user_content(
+        [
+            ResourceContentBlock(
+                type="resource_link",
+                name="README.md",
+                uri=link.as_uri(),
+                mimeType="text/markdown",
+            ),
+        ],
+        allowed_root=workspace,
+    )
+
+    assert "ACP_SYMLINK_SECRET_MARKER" not in str(content)
+    assert "Resource file blocked" in str(content)
+    assert "outside allowed workspace" in str(content)
+
+
+def test_acp_resource_link_sensitive_hermes_env_is_not_inlined(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    env_file = hermes_home / ".env"
+    env_file.write_text("HERMES_SECRET_MARKER=should-not-inline", encoding="utf-8")
+
+    content = _content_blocks_to_openai_user_content(
+        [
+            ResourceContentBlock(
+                type="resource_link",
+                name=".env",
+                uri=env_file.as_uri(),
+                mimeType="text/plain",
+            ),
+        ],
+        allowed_root=hermes_home,
+    )
+
+    assert "HERMES_SECRET_MARKER" not in str(content)
+    assert "Resource file blocked" in str(content)
+    assert "sensitive local credential path" in str(content)
+
+
 def test_acp_embedded_text_resource_is_inlined_as_text():
     content = _content_blocks_to_openai_user_content([
         EmbeddedResourceContentBlock(
