@@ -17312,8 +17312,8 @@ class GatewayRunner:
                 return
 
 
-            # Only act on tool.started events (ignore tool.completed, reasoning.available, etc.)
-            if event_type not in {"tool.started",}:
+            # Only act on visible progress events (ignore tool.completed, reasoning.available, etc.)
+            if event_type not in {"tool.started", "subagent.start"}:
                 return
 
             # Suppress tool-progress bubbles once the user has sent `stop`.
@@ -17337,6 +17337,21 @@ class GatewayRunner:
                 return
             last_tool[0] = tool_name
             
+            if event_type == "subagent.start":
+                subagent_label = "Subagent"
+                task_index = kwargs.get("task_index")
+                task_count = kwargs.get("task_count")
+                if isinstance(task_index, int) and isinstance(task_count, int) and task_count > 1:
+                    subagent_label = f"Subagent {task_index + 1}/{task_count}"
+                model = (kwargs.get("model") or "").strip()
+                msg = f"🤖 {subagent_label}"
+                if preview:
+                    msg += f": \"{preview}\""
+                if model:
+                    msg += f"\nModel: `{model}`"
+                progress_queue.put(msg)
+                return
+
             # Build progress message with primary argument preview
             from agent.display import get_tool_emoji
             emoji = get_tool_emoji(tool_name, default="⚙️")
