@@ -8,6 +8,7 @@ import {
   type DragEvent as ReactDragEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState
@@ -302,6 +303,23 @@ export function ChatBar({
       renderComposerContents(editor, draft)
     }
   }, [draft])
+
+  // Sync any pre-existing DOM content (e.g. browser autofill or content
+  // restoration) into the AUI composer state on mount. Without this the
+  // contentEditable may display text that the AUI state doesn't know about,
+  // so `hasComposerPayload` stays false and the send button stays hidden
+  // until a user-triggered input event fires `flushEditorToDraft` (#40556).
+  useLayoutEffect(() => {
+    const editor = editorRef.current
+    if (!editor) return
+
+    const text = composerPlainText(editor)
+    if (text && text !== draftRef.current) {
+      draftRef.current = text
+      aui.composer().setText(text)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only sync
+  }, [])
 
   useEffect(() => {
     if (urlOpen) {
