@@ -3539,13 +3539,26 @@ class HermesIndexSource(SkillSource):
                 return bundle
 
         # Fall back to identifier-based fetch via repo/path
-        repo = entry.get("repo", "")
-        path = entry.get("path", "")
+        repo = (entry.get("repo") or "").strip()
+        path = (entry.get("path") or "").strip()
+        source = entry.get("source", "")
         if repo and path:
             github_id = f"{repo}/{path}"
             bundle = self._get_github().fetch(github_id)
             if bundle:
-                bundle.source = entry.get("source", "hermes-index")
+                bundle.source = source
+                bundle.identifier = identifier
+                return bundle
+
+        # Fallback for official skills when the index has empty repo fields.
+        # The skills live at NousResearch/hermes-agent/optional-skills/<path>.
+        # When repo is empty but the source is "official" and a path is present,
+        # construct the GitHub ID from the canonical repo.
+        if not repo and source == "official" and path:
+            github_id = f"NousResearch/hermes-agent/optional-skills/{path}"
+            bundle = self._get_github().fetch(github_id)
+            if bundle:
+                bundle.source = source
                 bundle.identifier = identifier
                 return bundle
 
