@@ -1234,6 +1234,20 @@ DEFAULT_CONFIG = {
             "extra_body": {},      # OpenAI-compatible provider-specific request fields
             "download_timeout": 30,  # seconds — image HTTP download timeout; increase for slow connections
         },
+        # Separate backend for native video analysis (video_analyze tool).
+        # When provider/model/base_url are all unset (the default), video_analyze
+        # falls back to auxiliary.vision routing so existing configs are unaffected.
+        # Set an explicit provider/model here to route video to a video-capable
+        # backend (e.g. Gemini) while images continue to use auxiliary.vision.
+        "video": {
+            "provider": "auto",    # auto | openrouter | nous | codex | custom; falls back to auxiliary.vision when "auto" and no model/base_url set
+            "model": "",           # e.g. "google/gemini-3.1-flash-lite"; leave blank to inherit auxiliary.vision routing
+            "base_url": "",        # direct OpenAI-compatible endpoint (takes precedence over provider)
+            "api_key": "",         # API key for base_url (falls back to OPENAI_API_KEY)
+            "timeout": 180,        # seconds — video payloads need more time than images
+            "extra_body": {},      # OpenAI-compatible provider-specific request fields
+            "download_timeout": 60,  # seconds — video HTTP download timeout; increase for slow connections
+        },
         "web_extract": {
             "provider": "auto",
             "model": "",

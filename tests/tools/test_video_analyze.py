@@ -302,6 +302,82 @@ class TestVideoAnalyzeTool:
         assert "video_url" in content[1]
         assert content[1]["video_url"]["url"].startswith("data:video/mp4;base64,")
 
+    def test_uses_video_task(self, tmp_path):
+        """video_analyze_tool must pass task='video' to async_call_llm."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\x00" * 100)
+
+        captured_kwargs = {}
+
+        async def capture_llm(**kwargs):
+            captured_kwargs.update(kwargs)
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "ok"
+            return mock_response
+
+        with patch("tools.vision_tools.async_call_llm", side_effect=capture_llm):
+            with patch("tools.vision_tools.extract_content_or_reasoning", return_value="ok"):
+                self._run(video_analyze_tool(str(video), "test"))
+
+        assert captured_kwargs.get("task") == "video"
+
+    def test_video_timeout_from_config(self, tmp_path):
+        """auxiliary.video.timeout overrides the default 180 s floor."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\x00" * 100)
+
+        captured_kwargs = {}
+
+        async def capture_llm(**kwargs):
+            captured_kwargs.update(kwargs)
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "ok"
+            return mock_response
+
+        fake_cfg = {
+            "auxiliary": {
+                "video": {"timeout": 300},
+                "vision": {"timeout": 60},
+            }
+        }
+
+        with patch("tools.vision_tools.async_call_llm", side_effect=capture_llm):
+            with patch("tools.vision_tools.extract_content_or_reasoning", return_value="ok"):
+                with patch("hermes_cli.config.load_config", return_value=fake_cfg):
+                    self._run(video_analyze_tool(str(video), "test"))
+
+        assert captured_kwargs.get("timeout") == 300.0
+
+    def test_video_timeout_falls_back_to_vision(self, tmp_path):
+        """When auxiliary.video has no timeout, auxiliary.vision.timeout is used (floored at 180)."""
+        video = tmp_path / "test.mp4"
+        video.write_bytes(b"\x00" * 100)
+
+        captured_kwargs = {}
+
+        async def capture_llm(**kwargs):
+            captured_kwargs.update(kwargs)
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "ok"
+            return mock_response
+
+        fake_cfg = {
+            "auxiliary": {
+                "video": {},
+                "vision": {"timeout": 240},
+            }
+        }
+
+        with patch("tools.vision_tools.async_call_llm", side_effect=capture_llm):
+            with patch("tools.vision_tools.extract_content_or_reasoning", return_value="ok"):
+                with patch("hermes_cli.config.load_config", return_value=fake_cfg):
+                    self._run(video_analyze_tool(str(video), "test"))
+
+        assert captured_kwargs.get("timeout") == 240.0
+
 
 # ---------------------------------------------------------------------------
 # Toolset registration

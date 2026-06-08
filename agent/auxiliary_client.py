@@ -2790,7 +2790,7 @@ def _retry_same_provider_sync(
     effective_timeout: float,
     effective_extra_body: dict,
 ) -> Any:
-    if task == "vision":
+    if task in ("vision", "video"):
         _, retry_client, retry_model = resolve_vision_provider_client(
             provider=resolved_provider,
             model=final_model,
@@ -2847,7 +2847,7 @@ async def _retry_same_provider_async(
     effective_timeout: float,
     effective_extra_body: dict,
 ) -> Any:
-    if task == "vision":
+    if task in ("vision", "video"):
         _, retry_client, retry_model = resolve_vision_provider_client(
             provider=resolved_provider,
             model=final_model,
@@ -5059,7 +5059,7 @@ def call_llm(
     handles auth, request formatting, and model-specific arg adjustments.
 
     Args:
-        task: Auxiliary task name ("compression", "vision", "web_extract",
+        task: Auxiliary task name ("compression", "vision", "video", "web_extract",
               "session_search", "skills_hub", "mcp", "title_generation").
               Reads provider:model from config/env. Ignored if provider is set.
         provider: Explicit provider override.
@@ -5103,6 +5103,37 @@ def call_llm(
         if client is None:
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "
+                f"Run: hermes setup"
+            )
+        resolved_provider = effective_provider or resolved_provider
+    elif task == "video":
+        # Use auxiliary.video config; fall back to auxiliary.vision when video backend is unset.
+        _vp = resolved_provider
+        _vm = resolved_model or model
+        _vbu = resolved_base_url or base_url
+        _vak = resolved_api_key or api_key
+        if _vp in ("auto", None) and not _vm and not _vbu:
+            _vp2, _vm2, _vbu2, _vak2, _ = _resolve_task_provider_model(
+                "vision", provider, model, base_url, api_key)
+            _vp = _vp2
+            _vm = _vm2 or _vm
+            _vbu = _vbu2 or _vbu
+            _vak = _vak2 or _vak
+        effective_provider, client, final_model = resolve_vision_provider_client(
+            provider=_vp if _vp != "auto" else provider,
+            model=_vm,
+            base_url=_vbu,
+            api_key=_vak,
+            async_mode=False,
+        )
+        if client is None and _vp not in ("auto", None) and not _vbu:
+            logger.warning(
+                "Video provider %s unavailable, falling back to auto vision backends", _vp)
+            effective_provider, client, final_model = resolve_vision_provider_client(
+                provider="auto", model=resolved_model, async_mode=False)
+        if client is None:
+            raise RuntimeError(
+                f"No LLM provider configured for task={task} provider={_vp}. "
                 f"Run: hermes setup"
             )
         resolved_provider = effective_provider or resolved_provider
@@ -5319,7 +5350,7 @@ def call_llm(
                 api_key=resolved_api_key,
                 api_mode=resolved_api_mode,
                 main_runtime=main_runtime,
-                is_vision=(task == "vision"),
+                is_vision=(task in ("vision", "video")),
             )
             if refreshed_client is not None:
                 logger.info("Auxiliary %s: refreshed Nous runtime credentials after 401, retrying",
@@ -5610,6 +5641,37 @@ async def async_call_llm(
                 f"Run: hermes setup"
             )
         resolved_provider = effective_provider or resolved_provider
+    elif task == "video":
+        # Use auxiliary.video config; fall back to auxiliary.vision when video backend is unset.
+        _vp = resolved_provider
+        _vm = resolved_model or model
+        _vbu = resolved_base_url or base_url
+        _vak = resolved_api_key or api_key
+        if _vp in ("auto", None) and not _vm and not _vbu:
+            _vp2, _vm2, _vbu2, _vak2, _ = _resolve_task_provider_model(
+                "vision", provider, model, base_url, api_key)
+            _vp = _vp2
+            _vm = _vm2 or _vm
+            _vbu = _vbu2 or _vbu
+            _vak = _vak2 or _vak
+        effective_provider, client, final_model = resolve_vision_provider_client(
+            provider=_vp if _vp != "auto" else provider,
+            model=_vm,
+            base_url=_vbu,
+            api_key=_vak,
+            async_mode=True,
+        )
+        if client is None and _vp not in ("auto", None) and not _vbu:
+            logger.warning(
+                "Video provider %s unavailable, falling back to auto vision backends", _vp)
+            effective_provider, client, final_model = resolve_vision_provider_client(
+                provider="auto", model=resolved_model, async_mode=True)
+        if client is None:
+            raise RuntimeError(
+                f"No LLM provider configured for task={task} provider={_vp}. "
+                f"Run: hermes setup"
+            )
+        resolved_provider = effective_provider or resolved_provider
     else:
         client, final_model = _get_cached_client(
             resolved_provider,
@@ -5793,7 +5855,7 @@ async def async_call_llm(
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
                 api_mode=resolved_api_mode,
-                is_vision=(task == "vision"),
+                is_vision=(task in ("vision", "video")),
             )
             if refreshed_client is not None:
                 logger.info("Auxiliary %s (async): refreshed Nous runtime credentials after 401, retrying",
@@ -5921,7 +5983,7 @@ async def async_call_llm(
                     base_url=str(getattr(fb_client, "base_url", "") or ""))
                 # Convert sync fallback client to async
                 async_fb, async_fb_model = _to_async_client(
-                    fb_client, fb_model or "", is_vision=(task == "vision")
+                    fb_client, fb_model or "", is_vision=(task in ("vision", "video"))
                 )
                 if async_fb_model and async_fb_model != fb_kwargs.get("model"):
                     fb_kwargs["model"] = async_fb_model
