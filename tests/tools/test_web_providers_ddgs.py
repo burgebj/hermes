@@ -206,6 +206,38 @@ class TestDDGSBackendWiring:
         monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: True)
         assert web_tools.check_web_api_key() is True
 
+    def test_web_search_schema_stays_visible_when_ddgs_package_missing(self, monkeypatch):
+        from model_tools import _clear_tool_defs_cache, get_tool_definitions
+        from tools import web_tools
+        from tools.registry import invalidate_check_fn_cache
+
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"backend": "ddgs"})
+        monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: False)
+
+        invalidate_check_fn_cache()
+        _clear_tool_defs_cache()
+
+        tool_names = {
+            tool_def["function"]["name"]
+            for tool_def in get_tool_definitions(
+                enabled_toolsets=["web"],
+                quiet_mode=True,
+            )
+        }
+
+        assert "web_search" in tool_names
+
+    def test_web_search_tool_returns_structured_error_when_ddgs_package_missing(self, monkeypatch):
+        from tools import web_tools
+
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"backend": "ddgs"})
+        monkeypatch.setattr(web_tools, "_ddgs_package_importable", lambda: False)
+
+        result = json.loads(web_tools.web_search_tool("hello world", limit=3))
+
+        assert result["success"] is False
+        assert "ddgs package is not installed" in result["error"]
+
 
 # ---------------------------------------------------------------------------
 # ddgs is search-only: web_extract returns a clear error

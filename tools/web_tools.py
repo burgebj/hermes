@@ -1190,6 +1190,26 @@ def check_web_api_key() -> bool:
     )
 
 
+def check_web_search_api_key() -> bool:
+    """Check whether ``web_search`` should be exposed to the model.
+
+    When the user explicitly configures a search backend, keep the tool
+    visible even if that backend is currently unavailable. That lets the
+    dispatcher return the provider's structured "missing package / missing
+    API key" error instead of hiding the schema and causing raw tool-call
+    text to leak back to the user.
+    """
+    configured = _load_web_config()
+    explicit = (
+        configured.get("search_backend")
+        or configured.get("backend")
+        or ""
+    ).lower().strip()
+    if explicit in {"exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs", "xai"}:
+        return True
+    return check_web_api_key()
+
+
 def check_auxiliary_model() -> bool:
     """Check if an auxiliary text model is available for LLM content processing."""
     client, _, _ = _resolve_web_extract_auxiliary()
@@ -1355,7 +1375,7 @@ registry.register(
     toolset="web",
     schema=WEB_SEARCH_SCHEMA,
     handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=args.get("limit", 5)),
-    check_fn=check_web_api_key,
+    check_fn=check_web_search_api_key,
     requires_env=_web_requires_env(),
     emoji="🔍",
     max_result_size_chars=100_000,
