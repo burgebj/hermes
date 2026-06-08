@@ -708,6 +708,15 @@ class ContextCompressor(ContextEngine):
         """
         if rough_tokens < self.threshold_tokens:
             return False
+        # Guard against immediate re-compression on the turn right after a
+        # compress run.  last_prompt_tokens is parked at -1 and
+        # last_real_prompt_tokens still holds the old pre-compression value
+        # (which is >= threshold), so the check below would incorrectly allow
+        # a second compression before the API has reported real usage for the
+        # now-shorter conversation.  Defer until update_from_response() clears
+        # the flag with the real post-compression token count. (#36718)
+        if self.awaiting_real_usage_after_compression:
+            return True
         if self.last_real_prompt_tokens <= 0:
             return False
         if self.last_real_prompt_tokens >= self.threshold_tokens:
@@ -2155,5 +2164,11 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 savings_pct,
             )
             logger.info("Compression #%d complete", self.compression_count)
+
+        # Park last_prompt_tokens at -1 so should_defer_preflight_to_real_usage()
+        # returns True until update_from_response() receives the real post-compress
+        # token count.  Without this the flag is never set and the guard never fires.
+        self.last_prompt_tokens = -1
+        self.awaiting_real_usage_after_compression = True
 
         return compressed
