@@ -377,6 +377,48 @@ class TestRunJobProfileContext:
         assert observed["hermes_home_during_init"] == str(root)
         assert os.environ["HERMES_HOME"] == str(root)
 
+    def test_profile_home_override_does_not_bleed_to_concurrent_default_context(
+        self, isolated_cron_profile_home, monkeypatch
+    ):
+        import threading
+        import cron.scheduler as sched
+
+        root, profile_home = isolated_cron_profile_home
+        monkeypatch.setattr(sched, "_hermes_home", None)
+        entered = threading.Event()
+        release = threading.Event()
+        observed: dict[str, object] = {}
+        errors: list[BaseException] = []
+
+        def profile_worker():
+            try:
+                with sched._job_profile_context("profile-job", "support"):
+                    observed["profile_home"] = sched._get_hermes_home()
+                    entered.set()
+                    if not release.wait(5):
+                        raise AssertionError("timed out waiting to release profile context")
+            except BaseException as exc:
+                errors.append(exc)
+                entered.set()
+
+        worker = threading.Thread(target=profile_worker, name="profile-context-test")
+        worker.start()
+        try:
+            assert entered.wait(5), "profile context did not start"
+            if errors:
+                raise errors[0]
+
+            observed["default_home"] = sched._get_hermes_home()
+        finally:
+            release.set()
+            worker.join(timeout=5)
+
+        assert not worker.is_alive()
+        if errors:
+            raise errors[0]
+        assert observed["profile_home"] == profile_home.resolve()
+        assert observed["default_home"] == root
+
 
 class TestTickProfilePartition:
     def test_profile_and_workdir_combined(self, isolated_cron_profile_home, monkeypatch):
