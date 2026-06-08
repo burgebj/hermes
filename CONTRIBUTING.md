@@ -131,6 +131,50 @@ pytest tests/ -v
 
 ---
 
+## Submitting Changes
+
+Most contributors need to work through a fork because they cannot push branches directly to `NousResearch/hermes-agent`.
+
+1. Fork the repository on GitHub, or with the GitHub CLI:
+
+   ```bash
+   gh repo fork NousResearch/hermes-agent --clone=false
+   ```
+
+2. Clone your fork and keep the upstream remote:
+
+   ```bash
+   git clone --recurse-submodules https://github.com/<your-user>/hermes-agent.git
+   cd hermes-agent
+   git remote add upstream https://github.com/NousResearch/hermes-agent.git
+   ```
+
+3. Create a focused branch from the latest upstream `main`:
+
+   ```bash
+   git fetch upstream
+   git checkout -b fix/short-description upstream/main
+   ```
+
+4. Make the smallest reviewable change you can, then run the relevant tests. Use `scripts/run_tests.sh` for broad code changes and `git diff --check` for docs-only changes.
+
+5. Push your branch and open a pull request against `NousResearch/hermes-agent:main`:
+
+   ```bash
+   git push -u origin HEAD
+   gh pr create --repo NousResearch/hermes-agent --base main --fill
+   ```
+
+In the PR body, include a short summary, the exact validation commands you ran, and any linked issue (`Fixes #123`).
+
+**Note:** GitHub fine-grained personal access tokens cannot fork repositories you do not own. If `gh repo fork` returns `403` even though your token looks correctly scoped, re-authenticate with GitHub OAuth instead:
+
+```bash
+gh auth login --web -p https
+```
+
+---
+
 ## Project Structure
 
 ```
