@@ -302,6 +302,49 @@ def test_session_expired_handler_returns_none_when_retry_also_fails(
         mcp_tool._servers.pop("srv-retry-fail", None)
 
 
+@pytest.mark.parametrize("retry_result", ['{"ok": true}', 'plain non-json text'])
+def test_session_expired_retry_success_fully_closes_breaker(
+    monkeypatch, tmp_path, retry_result
+):
+    """A session-expired reconnect+retry success must FULLY close the breaker
+    — clearing _server_breaker_opened_at, not just the failure count — matching
+    the auth-recovery path (_handle_auth_error_and_retry). A partial reset
+    (count only) leaves a stale open-timestamp. Covers both the JSON-success
+    (no "error" key) and non-JSON-success retry branches."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from tools import mcp_tool
+    from tools.mcp_tool import _handle_session_expired_and_retry
+
+    server, _ = _install_stub_server("brk")
+    mcp_tool._servers["brk"] = server
+    # Simulate a breaker that had tripped: both count (at threshold) and
+    # open-timestamp set. (Calling the handler directly bypasses the gate,
+    # which would otherwise short-circuit an open+fresh breaker.)
+    mcp_tool._server_error_counts["brk"] = mcp_tool._CIRCUIT_BREAKER_THRESHOLD
+    mcp_tool._server_breaker_opened_at["brk"] = time.monotonic()
+
+    try:
+        out = _handle_session_expired_and_retry(
+            "brk",
+            RuntimeError("Invalid or expired session"),
+            lambda: retry_result,            # retry succeeds
+            "tools/call",
+        )
+        assert out == retry_result           # retry result returned
+        assert mcp_tool._server_error_counts.get("brk", 0) == 0
+        assert "brk" not in mcp_tool._server_breaker_opened_at, (
+            "session-expired retry success must clear the breaker open-"
+            "timestamp (full _reset_server_error), not just the count — a "
+            "stale opened_at diverges from the auth-recovery path and the "
+            "_reset_server_error contract."
+        )
+    finally:
+        mcp_tool._servers.pop("brk", None)
+        mcp_tool._server_error_counts.pop("brk", None)
+        mcp_tool._server_breaker_opened_at.pop("brk", None)
+
+
 # ---------------------------------------------------------------------------
 # Parallel coverage for resources/list, resources/read, prompts/list,
 # prompts/get — all four handlers share the same exception path.
