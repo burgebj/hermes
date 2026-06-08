@@ -127,6 +127,7 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    TRUECONF = "trueconf"
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -452,6 +453,9 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
         (cfg.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID"))
         and (cfg.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET"))
     ),
+    Platform.TRUECONF: lambda cfg: bool(
+        cfg.extra.get("TRUECONF_USERNAME") and cfg.extra.get("TRUECONF_PASSWORD")
+    ),
 }
 
 
@@ -515,7 +519,9 @@ class GatewayConfig:
         for platform, config in self.platforms.items():
             if not config.enabled:
                 continue
-            if self._is_platform_connected(platform, config):
+            if platform == Platform.TRUECONF and os.getenv("TRUECONF_SERVER"):
+                connected.append(platform)
+            elif self._is_platform_connected(platform, config):
                 connected.append(platform)
         return connected
 
@@ -1857,6 +1863,29 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         yuanbao_group_allow_from = os.getenv("YUANBAO_GROUP_ALLOW_FROM")
         if yuanbao_group_allow_from:
             extra["group_allow_from"] = yuanbao_group_allow_from
+    
+    # TrueConf
+    trueconf_username = os.getenv("TRUECONF_USERNAME")
+    trueconf_password = os.getenv("TRUECONF_PASSWORD")
+    trueconf_server = os.getenv("TRUECONF_SERVER")
+    if trueconf_username and trueconf_password and trueconf_server:
+        if Platform.TRUECONF not in config.platforms:
+            config.platforms[Platform.TRUECONF] = PlatformConfig()
+        config.platforms[Platform.TRUECONF].enabled = True
+        config.platforms[Platform.TRUECONF].token = trueconf_password
+        config.platforms[Platform.TRUECONF].extra["username"] = trueconf_username
+        config.platforms[Platform.TRUECONF].extra["server"] = trueconf_server
+        if os.getenv("TRUECONF_VERIFY_SSL", "").lower() in ("false", "0", "no"):
+            config.platforms[Platform.TRUECONF].extra["verify_ssl"] = False
+        else:
+            config.platforms[Platform.TRUECONF].extra["verify_ssl"] = True
+    trueconf_home = os.getenv("TRUECONF_HOME_CHANNEL")
+    if trueconf_home and Platform.TRUECONF in config.platforms:
+        config.platforms[Platform.TRUECONF].home_channel = HomeChannel(
+            platform=Platform.TRUECONF,
+            chat_id=trueconf_home,
+            name=os.getenv("TRUECONF_HOME_CHANNEL_NAME", "Home"),
+        )
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")
