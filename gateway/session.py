@@ -228,6 +228,30 @@ def _discord_tools_loaded() -> bool:
         return False
 
 
+def _send_message_loaded(platform: Platform) -> bool:
+    """True if the ``send_message`` tool is available for *platform*.
+
+    Checks whether the ``messaging`` toolset is enabled in the user's
+    ``platform_toolsets`` config for the given platform.  When the user
+    explicitly restricts toolsets (e.g. ``[terminal, file, vision, cronjob]``),
+    the ``messaging`` toolset is absent and ``send_message`` is not
+    registered — so the session prompt must not promise messaging
+    capabilities.
+
+    Returns False (safe default — no messaging promises) on any error.
+    """
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import _get_platform_tools
+        cfg = load_config()
+        enabled = _get_platform_tools(
+            cfg, platform.value, include_default_mcp_servers=False,
+        )
+        return "messaging" in enabled
+    except Exception:
+        return False
+
+
 def build_session_context_prompt(
     context: SessionContext,
     *,
@@ -367,14 +391,22 @@ def build_session_context_prompt(
         )
     elif context.source.platform == Platform.YUANBAO:
         lines.append("")
-        lines.append(
-            "**Platform notes:** You are running inside Yuanbao. "
-            "You CAN send private (DM) messages via the send_message tool. "
-            "Use target='yuanbao:direct:<account_id>' for DM "
-            "and target='yuanbao:group:<group_code>' for group chat."
-        )
+        if _send_message_loaded(Platform.YUANBAO):
+            lines.append(
+                "**Platform notes:** You are running inside Yuanbao. "
+                "You CAN send private (DM) messages via the send_message tool. "
+                "Use target='yuanbao:direct:<account_id>' for DM "
+                "and target='yuanbao:group:<group_code>' for group chat."
+            )
+        else:
+            lines.append(
+                "**Platform notes:** You are running inside Yuanbao. "
+                "You do NOT have access to Yuanbao-specific APIs — you cannot "
+                "send messages, manage contacts, or interact with groups. "
+                "Do not promise to perform these actions."
+            )
 
-    # Connected platforms
+    # Connected platforms — always show (informational, no messaging promise)
     platforms_list = ["local (files on this machine)"]
     for p in context.connected_platforms:
         if p != Platform.LOCAL:
@@ -382,8 +414,10 @@ def build_session_context_prompt(
 
     lines.append(f"**Connected Platforms:** {', '.join(platforms_list)}")
 
-    # Home channels
-    if context.home_channels:
+    # Home channels — only show when send_message is available so we don't
+    # imply the agent can deliver to messaging targets it lacks.
+    _has_send_message = _send_message_loaded(context.source.platform)
+    if context.home_channels and _has_send_message:
         lines.append("")
         lines.append("**Home Channels (default destinations):**")
         for platform, home in context.home_channels.items():
@@ -410,13 +444,15 @@ def build_session_context_prompt(
         f"- `\"local\"` → Save to local files only ({display_hermes_home()}/cron/output/)"
     )
 
-    # Platform home channels
-    for platform, home in context.home_channels.items():
-        lines.append(f"- `\"{platform.value}\"` → Home channel ({home.name})")
+    # Platform home channels — only when send_message is available
+    if _has_send_message:
+        for platform, home in context.home_channels.items():
+            lines.append(f"- `\"{platform.value}\"` → Home channel ({home.name})")
 
-    # Note about explicit targeting
-    lines.append("")
-    lines.append("*For explicit targeting, use `\"platform:chat_id\"` format if the user provides a specific chat ID.*")
+    # Note about explicit targeting — only when send_message is available
+    if _has_send_message:
+        lines.append("")
+        lines.append("*For explicit targeting, use `\"platform:chat_id\"` format if the user provides a specific chat ID.*")
 
     return "\n".join(lines)
 
