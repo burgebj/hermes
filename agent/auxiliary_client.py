@@ -78,16 +78,85 @@ def _load_openai_cls() -> type:
     return _OPENAI_CLS_CACHE
 
 
+def _build_aux_keepalive_httpx_client(base_url: str = "") -> Any:
+    """Build an httpx.Client with TCP keepalive socket options.
+
+    Mirrors ``AIAgent._build_keepalive_http_client()`` in run_agent.py so
+    auxiliary calls (title generation, vision, compression, session_search)
+    survive corporate proxies / load balancers that drop idle TLS
+    connections.  Returns None on import / construction failure so callers
+    fall back to the SDK default transport.
+    """
+    try:
+        import httpx as _httpx
+        import socket as _socket
+        import urllib.request as _urllib_request
+        from urllib.parse import urlparse as _urlparse
+
+        _sock_opts = [(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)]
+        if hasattr(_socket, "TCP_KEEPIDLE"):
+            _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, 30))
+            _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 10))
+            _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3))
+        elif hasattr(_socket, "TCP_KEEPALIVE"):
+            _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPALIVE, 30))
+
+        # Resolve proxy from env, honouring NO_PROXY for local endpoints.
+        _proxy = None
+        for _env_key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY",
+                         "http_proxy", "ALL_PROXY", "all_proxy"):
+            _val = os.environ.get(_env_key, "").strip()
+            if _val:
+                _proxy = _val
+                break
+        if _proxy and base_url:
+            try:
+                _host = _urlparse(base_url).hostname or ""
+                if _host and _urllib_request.proxy_bypass_environment(_host):
+                    _proxy = None
+            except Exception:
+                pass
+
+        return _httpx.Client(
+            transport=_httpx.HTTPTransport(socket_options=_sock_opts),
+            proxy=_proxy,
+        )
+    except Exception:
+        return None
+
+
+# Module-level cached keepalive httpx client — shared across all auxiliary
+# OpenAI() construction sites.  Created once on first use to avoid
+# re-opening a fresh connection pool for every title / vision / compression
+# call.  Set to None on failure so subsequent calls skip the kwarg.
+_aux_keepalive_http_client: Optional[Any] = None
+_aux_keepalive_http_client_attempted: bool = False
+
+
+def _get_aux_keepalive_http_client(base_url: str = "") -> Any:
+    """Return the cached keepalive httpx client, building it lazily."""
+    global _aux_keepalive_http_client, _aux_keepalive_http_client_attempted
+    if not _aux_keepalive_http_client_attempted:
+        _aux_keepalive_http_client = _build_aux_keepalive_httpx_client(base_url)
+        _aux_keepalive_http_client_attempted = True
+    return _aux_keepalive_http_client
+
+
 class _OpenAIProxy:
     """Module-level proxy that looks like the ``openai.OpenAI`` class.
 
     Forwards ``OpenAI(...)`` calls and ``isinstance(x, OpenAI)`` checks to the
     real SDK class, importing the SDK lazily on first use.
     """
-
     __slots__ = ()
 
     def __call__(self, *args, **kwargs):
+        if "http_client" not in kwargs and not args:
+            _hk = _get_aux_keepalive_http_client(
+                str(kwargs.get("base_url") or "")
+            )
+            if _hk is not None:
+                kwargs["http_client"] = _hk
         return _load_openai_cls()(*args, **kwargs)
 
     def __instancecheck__(self, obj):
