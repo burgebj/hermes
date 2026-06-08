@@ -2090,3 +2090,76 @@ class TestConvertToolsToAnthropicDedup:
 
     def test_none_tools_returns_empty(self):
         assert convert_tools_to_anthropic(None) == []
+
+
+# ─── TOCTOU Race Regression Tests (Issue #24751) ─────────────────────────────
+
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import agent.anthropic_adapter as _adapter_mod
+
+
+class TestGetClaudeCodeVersionToctouRace:
+    """50-thread barrier tests for _get_claude_code_version() double-checked locking."""
+
+    def setup_method(self):
+        _adapter_mod._claude_code_version_cache = None
+
+    def teardown_method(self):
+        _adapter_mod._claude_code_version_cache = None
+
+    def test_concurrent_calls_return_same_version(self):
+        """All 50 concurrent callers must receive the identical version string."""
+        detect_count = 0
+        count_lock = threading.Lock()
+
+        def _fake_detect():
+            nonlocal detect_count
+            with count_lock:
+                detect_count += 1
+            return "9.9.9"
+
+        with patch.object(_adapter_mod, "_detect_claude_code_version", side_effect=_fake_detect):
+            barrier = threading.Barrier(50)
+            results: list = []
+            results_lock = threading.Lock()
+
+            def call():
+                barrier.wait()
+                v = _adapter_mod._get_claude_code_version()
+                with results_lock:
+                    results.append(v)
+
+            with ThreadPoolExecutor(max_workers=50) as pool:
+                futures = [pool.submit(call) for _ in range(50)]
+                for f in futures:
+                    f.result()
+
+        assert len(results) == 50
+        assert all(v == "9.9.9" for v in results)
+        assert detect_count == 1, f"_detect_claude_code_version called {detect_count} times (expected 1)"
+
+    def test_only_one_subprocess_spawned(self):
+        """_detect_claude_code_version must be called exactly once regardless of concurrency."""
+        detect_count = 0
+        count_lock = threading.Lock()
+
+        def _fake_detect():
+            nonlocal detect_count
+            with count_lock:
+                detect_count += 1
+            return "1.2.3"
+
+        with patch.object(_adapter_mod, "_detect_claude_code_version", side_effect=_fake_detect):
+            barrier = threading.Barrier(50)
+
+            def call():
+                barrier.wait()
+                _adapter_mod._get_claude_code_version()
+
+            with ThreadPoolExecutor(max_workers=50) as pool:
+                futures = [pool.submit(call) for _ in range(50)]
+                for f in futures:
+                    f.result()
+
+        assert detect_count == 1, f"_detect_claude_code_version called {detect_count} times (expected 1)"
