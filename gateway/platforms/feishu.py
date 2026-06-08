@@ -157,6 +157,8 @@ _MARKDOWN_HINT_RE = re.compile(
 # Detect markdown tables: a line starting with | followed by a separator line.
 # Feishu post-type 'md' elements do not render tables, so we force text mode.
 _MARKDOWN_TABLE_RE = re.compile(r"^\|.*\|\n\|[-|: ]+\|", re.MULTILINE)
+# Detect fenced code blocks — used by card-mode routing (matches OpenClaw shouldUseCard).
+_MARKDOWN_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 _MARKDOWN_FENCE_OPEN_RE = re.compile(r"^```([^\n`]*)\s*$")
 _MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^```\s*$")
@@ -214,6 +216,15 @@ _FEISHU_WEBHOOK_BODY_TIMEOUT_SECONDS = 30          # max seconds to read request
 _FEISHU_WEBHOOK_ANOMALY_THRESHOLD = 25             # consecutive error responses before WARNING log
 _FEISHU_WEBHOOK_ANOMALY_TTL_SECONDS = 6 * 60 * 60  # anomaly tracker TTL (6 hours) — matches openclaw
 _FEISHU_CARD_ACTION_DEDUP_TTL_SECONDS = 15 * 60    # card action token dedup window (15 min)
+# -- Feishu card building helpers (stream_card / form_action / json_input) --
+
+_FEISHU_CARD_INPUT_MAX_LENGTH = 2000       # plain_text max_chars for inputs
+_FEISHU_CARD_BUTTON_PRIMARY_COLOR = "blue" # default button color
+_FEISHU_CARD_FILE_SIZE_LIMITS = {
+    "image": 30 * 1024 * 1024,   # 30MB
+    "file":  30 * 1024 * 1024,   # 30MB
+}
+
 
 _APPROVAL_CHOICE_MAP: Dict[str, str] = {
     "approve_once": "once",
@@ -560,20 +571,27 @@ def _build_markdown_post_payload(content: str) -> str:
     )
 
 
-def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
-    """Build Feishu post rows while isolating fenced code blocks.
+def _build_markdown_post_rows(content: str) -> List[List[Dict[str, Any]]]:
+    """Build Feishu post rows, splitting on blank lines and converting Markdown.
 
-    Feishu's `md` renderer can swallow trailing content when a fenced code block
-    appears inside one large markdown element. Split the reply at real fence
-    lines so prose before/after the code block remains visible while code stays
-    in a dedicated row.
+    Feishu post format only supports ``text`` (with ``style`` keys: bold,
+    italic, underline, lineThrough), ``a`` (links), ``at`` (mentions),
+    ``img``, and ``emotion``.  The ``md`` tag is NOT a valid Feishu element.
+
+    This function:
+    1. Splits the content into paragraphs at blank-line boundaries.
+    2. Strips fenced code block delimiters (`` ``` ``) and emits code as a
+       plain-text paragraph.
+    3. Converts inline Markdown formatting (*bold*, *italic*, links, ...) into
+       properly-typed Feishu post elements.
+    4. Block-level constructs that Feishu post cannot express (tables,
+       blockquotes, headings) are kept as plain text paragraphs so the
+       user can still read them.
     """
     if not content:
-        return [[{"tag": "md", "text": ""}]]
-    if "```" not in content:
-        return [[{"tag": "md", "text": content}]]
+        return [[{"tag": "text", "text": ""}]]
 
-    rows: List[List[Dict[str, str]]] = []
+    rows: List[List[Dict[str, Any]]] = []
     current: List[str] = []
     in_code_block = False
 
@@ -582,9 +600,10 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
         if not current:
             return
         segment = "\n".join(current)
-        if segment.strip():
-            rows.append([{"tag": "md", "text": segment}])
-        current = []
+        current.clear()
+        if not segment.strip():
+            return
+        rows.append(_parse_markdown_inline(segment))
 
     for raw_line in content.splitlines():
         stripped_line = raw_line.strip()
@@ -597,16 +616,283 @@ def _build_markdown_post_rows(content: str) -> List[List[Dict[str, str]]]:
         if is_fence:
             if not in_code_block:
                 _flush_current()
-            current.append(raw_line)
+            # Drop the fence line itself; keep the code inside.
             in_code_block = not in_code_block
             if not in_code_block:
                 _flush_current()
             continue
 
+        if not in_code_block and stripped_line == "":
+            _flush_current()
+            continue
+
         current.append(raw_line)
 
     _flush_current()
-    return rows or [[{"tag": "md", "text": content}]]
+    return rows or [[{"tag": "text", "text": content}]]
+
+
+# ---------------------------------------------------------------------------
+# Inline Markdown -> Feishu post elements
+# ---------------------------------------------------------------------------
+
+# Order matters: match longer / outer patterns before shorter ones so that
+# ``**bold**`` is not partially consumed by ``*italic*``.
+_INLINE_TOKEN_RE = re.compile(
+    r"""
+    \*\*\*(.+?)\*\*\*          # 1: bold+italic
+    | \*\*(.+?)\*\*             # 2: bold
+    | \*(.+?)\*                # 3: italic
+    | ~~(.+?)~~                # 4: strikethrough
+    | <u>(.+?)</u>             # 5: underline (HTML tag)
+    | `(.+?)`                  # 6: inline code
+    | \[([^\]]+)\]\(([^)]+)\)  # 7: link text + url
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
+
+def _parse_markdown_inline(text: str) -> List[Dict[str, Any]]:
+    """Convert a single paragraph of Markdown text into Feishu post elements.
+
+    Recognised inline patterns are mapped to their Feishu post equivalents:
+
+    * ``**text**`` -> ``{"tag":"text","text":"text","style":["bold"]}``
+    * ``*text*``  -> ``{"tag":"text","text":"text","style":["italic"]}``
+    * ``***text***`` (bold+italic) -> ``["bold","italic"]``
+    * ``~~text~~`` -> ``["lineThrough"]``
+    * ``<u>text</u>`` -> ``["underline"]``
+    * `` `code` `` -> plain ``text`` element (Feishu has no code style)
+    * ``[label](url)`` -> ``{"tag":"a","text":"label","href":"url"}``
+
+    Everything else becomes a plain ``text`` element.
+    """
+    elements: List[Dict[str, Any]] = []
+    pos = 0
+
+    for m in _INLINE_TOKEN_RE.finditer(text):
+        # Plain text before this token
+        prefix = text[pos:m.start()]
+        if prefix:
+            elements.append({"tag": "text", "text": prefix})
+
+        # bold-italic (group 1)
+        if m.group(1) is not None:
+            elements.append({"tag": "text", "text": m.group(1), "style": ["bold", "italic"]})
+        # bold (group 2)
+        elif m.group(2) is not None:
+            elements.append({"tag": "text", "text": m.group(2), "style": ["bold"]})
+        # italic (group 3)
+        elif m.group(3) is not None:
+            elements.append({"tag": "text", "text": m.group(3), "style": ["italic"]})
+        # strikethrough (group 4)
+        elif m.group(4) is not None:
+            elements.append({"tag": "text", "text": m.group(4), "style": ["lineThrough"]})
+        # underline (group 5)
+        elif m.group(5) is not None:
+            elements.append({"tag": "text", "text": m.group(5), "style": ["underline"]})
+        # inline code (group 6)
+        elif m.group(6) is not None:
+            elements.append({"tag": "text", "text": m.group(6)})
+        # link (groups 7-8)
+        elif m.group(7) is not None:
+            elements.append({"tag": "a", "text": m.group(7), "href": m.group(8)})
+
+        pos = m.end()
+
+    # Trailing plain text
+    tail = text[pos:]
+    if tail:
+        elements.append({"tag": "text", "text": tail})
+
+    return elements
+
+
+# ---------------------------------------------------------------------------
+# Schema 2.0 card builder — cc-haha markdown optimizations ported from
+# adapters/feishu/markdown-style.ts
+# ---------------------------------------------------------------------------
+
+# Maximum GFM tables allowed in a single Schema 2.0 card.  Exceeding this
+# limit triggers 230099 / 11310 (verified 2026-03 by openclaw + cc-haha).
+_FEISHU_CARD_TABLE_LIMIT = 5
+
+# Regex to find GFM tables *outside* fenced code blocks (code-block tables
+# are skipped because the Feishu markdown renderer treats them as code,
+# not as interactive table elements).
+_GFM_TABLE_OUTSIDE_CODE_RE = re.compile(
+    r"\|.+\|[\r\n]+\|[-:| ]+\|[\s\S]*?(?=\n\n|\n(?!\|)|$)"
+)
+
+# HTML-escape < > & in card markdown content to prevent Feishu from
+# mis-parsing them as HTML tags/entities inside schema 2.0 markdown elements.
+# Matches OpenClaw escapeFeishuCardMarkdownText.
+_CARD_MARKDOWN_ESCAPE_MAP = str.maketrans({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+})
+
+
+def _escape_card_markdown(text: str) -> str:
+    """Escape & < > for safe embedding in Feishu card markdown elements."""
+    return text.translate(_CARD_MARKDOWN_ESCAPE_MAP)
+
+
+def _build_table_card_payload(content: str) -> str:
+    """Build a Feishu Schema 2.0 interactive card with a ``markdown`` element.
+
+    Schema 2.0's ``markdown`` element renders GFM tables, fenced code blocks,
+    blockquotes, and inline formatting natively (verified 2026-05-24).
+
+    The markdown is run through cc-haha's optimisation pipeline + HTML escaping
+    before being wrapped into the card JSON.
+    """
+    # Limit table count (max 3) — extras become fenced code blocks.
+    # Escape user content first, then optimise — optimisation adds <br> tags
+    # that must NOT be escaped.
+    escaped = _escape_card_markdown(content)
+    sanitised = _sanitise_card_text(escaped)
+    optimised = _optimise_markdown_for_feishu(sanitised)
+    return json.dumps(
+        {
+            "schema": "2.0",
+            "config": {
+                "update_multi": True,
+                "width_mode": "fill",
+            },
+            "body": {
+                "elements": [
+                    {
+                        "tag": "markdown",
+                        "content": optimised or " ",
+                        "text_align": "left",
+                    }
+                ],
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# cc-haha markdown optimisation pipeline (ported from markdown-style.ts)
+# ---------------------------------------------------------------------------
+
+
+def _sanitise_card_text(
+    text: str,
+    table_limit: int = _FEISHU_CARD_TABLE_LIMIT,
+) -> str:
+    """Wrap GFM tables beyond *table_limit* inside fenced code blocks.
+
+    The first *table_limit* tables are left as-is for native rendering;
+    any extras are turned into `` ``` ... ``` `` code blocks to avoid
+    the 230099 / 11310 errors.
+    """
+    # Step 1 — locate code-block spans so we don't touch tables inside them.
+    code_ranges: list[tuple[int, int]] = []
+    for m in re.finditer(r"```[\s\S]*?```", text):
+        code_ranges.append((m.start(), m.end()))
+
+    def _inside_code(idx: int) -> bool:
+        return any(start <= idx < end for start, end in code_ranges)
+
+    # Step 2 — find GFM tables outside code blocks.
+    tables: list[re.Match[str]] = []
+    for m in _GFM_TABLE_OUTSIDE_CODE_RE.finditer(text):
+        if not _inside_code(m.start()):
+            tables.append(m)
+
+    if len(tables) <= table_limit:
+        return text
+
+    # Step 3 — replace extra tables with code blocks (right-to-left so
+    # earlier indices stay valid).
+    result = text
+    for m in reversed(tables[table_limit:]):
+        replacement = "```\n" + m.group(0).rstrip() + "\n```"
+        result = result[: m.start()] + replacement + result[m.end() :]
+
+    return result
+
+
+def _optimise_markdown_for_feishu(text: str) -> str:
+    """Pre-process markdown for Feishu Schema 2.0 rendering.
+
+    Ported from cc-haha ``optimizeMarkdownForFeishu``.  Applies:
+    1. Heading downgrade (H1→H4, H2+→H5) when H1-H3 are present.
+    2. ``<br>`` spacing around consecutive headings / tables / code blocks.
+    3. Blank-line compression (3+ → 2).
+    """
+    try:
+        return _do_optimise_markdown(text)
+    except Exception:
+        return text
+
+
+def _do_optimise_markdown(text: str) -> str:
+    # ── 1. Protect fenced code blocks with placeholders ──────────────────
+    MARK = "___CB_"
+    code_blocks: list[str] = []
+    out = re.sub(
+        r"```[\s\S]*?```",
+        lambda m: f"{MARK}{code_blocks.append(m.group(0)) or len(code_blocks) - 1}___",
+        text,
+    )
+
+    # ── 2. Heading downgrade ────────────────────────────────────────────
+    if re.search(r"^#{1,3} ", text, re.MULTILINE):
+        out = re.sub(r"^#{2,6} (.+)$", r"##### \1", out, flags=re.MULTILINE)
+        out = re.sub(r"^# (.+)$", r"#### \1", out, flags=re.MULTILINE)
+
+    # ── 3. Schema 2.0 paragraph spacing ─────────────────────────────────
+    # 3a. Consecutive headings → <br>
+    out = re.sub(r"^(#{4,5} .+)\n{1,2}(#{4,5} )", r"\1\n<br>\n\2", out, flags=re.MULTILINE)
+
+    # 3b. Non-table line before table → add blank line
+    out = re.sub(r"^([^|\n].*)\n(\|.+\|)", r"\1\n\n\2", out, flags=re.MULTILINE)
+
+    # 3c. Insert <br> before table blocks
+    out = re.sub(r"\n\n((?:\|.+\|[^\S\n]*\n?)+)", r"\n\n<br>\n\n\1", out)
+
+    # 3d. Append <br> after table blocks (skip when followed by --- / heading / bold)
+    def _table_post_br(m: re.Match[str]) -> str:
+        after = out[m.end() :].lstrip("\n")
+        if not after or re.match(r"^(---|#{4,5} |\*\*)", after):
+            return m.group(0)
+        return m.group(0) + "\n<br>\n"
+
+    out = re.sub(r"((?:^\|.+\|[^\S\n]*\n?)+)", _table_post_br, out, flags=re.MULTILINE)
+
+    # 3e-g. Compact redundant <br> + blank-line combos
+    out = re.sub(
+        r"^((?!#{4,5} )(?!\*\*).+)\n\n(<br>)\n\n(\|)",
+        r"\1\n\2\n\3",
+        out,
+        flags=re.MULTILINE,
+    )
+    out = re.sub(
+        r"^(\*\*.+)\n\n(<br>)\n\n(\|)",
+        r"\1\n\2\n\n\3",
+        out,
+        flags=re.MULTILINE,
+    )
+    out = re.sub(
+        r"(\|[^\n]*\n)\n(<br>\n)((?!#{4,5} )(?!\*\*))",
+        r"\1\2\3",
+        out,
+        flags=re.MULTILINE,
+    )
+
+    # ── 4. Compress 3+ blank lines → 2 ──────────────────────────────────
+    out = re.sub(r"\n{3,}", "\n\n", out)
+
+    # ── 5. Restore code blocks with <br> padding ────────────────────────
+    for i, block in enumerate(code_blocks):
+        out = out.replace(f"{MARK}{i}___", f"\n<br>\n{block}\n<br>\n")
+
+    return out
 
 
 def parse_feishu_post_payload(
@@ -1404,6 +1690,86 @@ def check_feishu_requirements() -> bool:
 
     from tools.lazy_deps import ensure_and_bind
     return ensure_and_bind("platform.feishu", _import, globals(), prompt=False)
+
+
+
+# -- Card building helpers (module-level) --
+
+def _make_card_element(tag: str, **kwargs) -> dict:
+    """Build a single card element dict."""
+    return {k: v for k, v in {"tag": tag, **kwargs}.items() if v is not None}
+
+
+def _make_card_form(form_id: str, elements: list) -> dict:
+    """Wrap elements in a form container."""
+    return {"tag": "form", "name": form_id, "elements": elements}
+
+
+def _make_card_button(text: str, action_type: str = "button",
+                      button_type: str = "primary", value: dict = None,
+                      form_action_type: str = None, width: str = None) -> dict:
+    """Build a button element."""
+    btn = {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": text},
+        "type": button_type,
+        "value": value or {},
+    }
+    if action_type:
+        btn["action_type"] = action_type
+    if form_action_type:
+        btn["form_action_type"] = form_action_type
+    if width:
+        btn["width"] = width
+    return btn
+
+
+def _make_card_json_input(name: str, placeholder: str = "",
+                          max_length: int = _FEISHU_CARD_INPUT_MAX_LENGTH,
+                          width: str = "fill", required: bool = False,
+                          label: str = None) -> dict:
+    """Build a JSON input element."""
+    inp = {
+        "tag": "input",
+        "name": name,
+        "placeholder": {"tag": "plain_text", "content": placeholder},
+        "max_length": max_length,
+        "width": width,
+    }
+    if required:
+        inp["required"] = required
+    if label:
+        inp["label"] = {"tag": "plain_text", "content": label}
+    return inp
+
+
+def _make_card_divider() -> dict:
+    return {"tag": "hr"}
+
+
+def _make_card_markdown(content: str) -> dict:
+    return {"tag": "markdown", "content": content}
+
+
+def _make_card_column_set(columns: list, flex_mode: str = "none",
+                          background_style: str = "default") -> dict:
+    return {
+        "tag": "column_set",
+        "flex_mode": flex_mode,
+        "background_style": background_style,
+        "columns": columns,
+    }
+
+
+def _make_card_column(elements: list, width: str = "weighted",
+                      weight: int = 1, vertical_align: str = "top") -> dict:
+    return {
+        "tag": "column",
+        "width": width,
+        "weight": weight,
+        "vertical_align": vertical_align,
+        "elements": elements,
+    }
 
 
 class FeishuAdapter(BasePlatformAdapter):
@@ -4374,13 +4740,17 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements do not render markdown tables; sending
-        # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
-        if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
-        if _MARKDOWN_HINT_RE.search(content):
+        logger.warning("[Feishu DEBUG] _build_outbound_payload called, content[:100]=%r", content[:100])
+        # GFM tables / fenced code blocks → interactive Card 2.0 (Schema 2.0
+        # markdown element renders both natively — matches OpenClaw shouldUseCard).
+        if _MARKDOWN_TABLE_RE.search(content) or _MARKDOWN_CODE_BLOCK_RE.search(content):
+            try:
+                card_json = _build_table_card_payload(content)
+                logger.warning("[Feishu DEBUG] table card built OK, payload len=%d", len(card_json))
+                return "interactive", card_json
+            except Exception as exc:
+                logger.warning("[Feishu DEBUG] Card build FAILED: %s", exc, exc_info=True)
+        if _MARKDOWN_HINT_RE.search(content) or _MARKDOWN_TABLE_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
         return "text", json.dumps(text_payload, ensure_ascii=False)
@@ -4400,6 +4770,19 @@ class FeishuAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         if not os.path.exists(file_path):
             return SendResult(success=False, error=f"File not found: {file_path}")
+
+        # Pre-check file size (Feishu limit: 30MB for images, 30MB for files)
+        file_size = os.path.getsize(file_path)
+        size_limit = _FEISHU_CARD_FILE_SIZE_LIMITS.get(
+            "image" if outbound_message_type == "image" else "file", 30 * 1024 * 1024
+        )
+        if file_size > size_limit:
+            size_mb = file_size / (1024 * 1024)
+            limit_mb = size_limit / (1024 * 1024)
+            return SendResult(
+                success=False,
+                error=f"File too large: {size_mb:.1f}MB exceeds {limit_mb:.0f}MB limit",
+            )
 
         display_name = file_name or os.path.basename(file_path)
         upload_file_type, resolved_message_type = self._resolve_outbound_file_routing(
