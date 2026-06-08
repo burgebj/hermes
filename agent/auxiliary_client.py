@@ -100,11 +100,51 @@ class _OpenAIProxy:
 OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 
 from agent.credential_pool import load_pool
+from agent.process_bootstrap import _get_proxy_for_base_url
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_vars
 
 logger = logging.getLogger(__name__)
+
+
+def _build_keepalive_http_client(base_url: str = "") -> Optional[Any]:
+    """Build an httpx client with TCP keepalive socket options.
+    
+    Keepalive is essential for auxiliary functions (title, vision, compression,
+    session_search) when endpoints are behind corporate proxies or load balancers
+    that aggressively drop idle TLS connections. The main agent loop already uses
+    this pattern via run_agent.py; this makes auxiliary clients consistent.
+    
+    Args:
+        base_url: The endpoint base URL (used to resolve proxy settings).
+    
+    Returns:
+        An httpx.Client with keepalive socket options enabled, or None if
+        keepalive setup fails (e.g. import error).
+    """
+    try:
+        import httpx as _httpx
+        import socket as _socket
+        
+        _sock_opts = [(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)]
+        if hasattr(_socket, "TCP_KEEPIDLE"):
+            _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPIDLE, 30))
+            _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPINTVL, 10))
+            _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPCNT, 3))
+        elif hasattr(_socket, "TCP_KEEPALIVE"):
+            # macOS / BSD
+            _sock_opts.append((_socket.IPPROTO_TCP, _socket.TCP_KEEPALIVE, 30))
+        
+        # Explicitly read proxy settings while honoring NO_PROXY for loopback.
+        _proxy = _get_proxy_for_base_url(base_url)
+        return _httpx.Client(
+            transport=_httpx.HTTPTransport(socket_options=_sock_opts),
+            proxy=_proxy,
+        )
+    except Exception as e:
+        logger.debug("Failed to build keepalive http client: %s", e)
+        return None
 
 
 def _safe_isinstance(obj: Any, maybe_type: Any) -> bool:
@@ -1527,7 +1567,8 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
             _merged_aux = _apply_user_default_headers(extra.get("default_headers"))
             if _merged_aux:
                 extra["default_headers"] = _merged_aux
-            _client = OpenAI(api_key=api_key, base_url=base_url, **extra)
+            _keepalive_client = _build_keepalive_http_client(base_url)
+            _client = OpenAI(api_key=api_key, base_url=base_url, http_client=_keepalive_client, **extra)
             _client = _maybe_wrap_anthropic(_client, model, api_key, raw_base_url)
             return _client, model
 
@@ -1567,7 +1608,8 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
         _merged_aux2 = _apply_user_default_headers(extra.get("default_headers"))
         if _merged_aux2:
             extra["default_headers"] = _merged_aux2
-        _client = OpenAI(api_key=api_key, base_url=base_url, **extra)
+        _keepalive_client = _build_keepalive_http_client(base_url)
+        _client = OpenAI(api_key=api_key, base_url=base_url, http_client=_keepalive_client, **extra)
         _client = _maybe_wrap_anthropic(_client, model, api_key, raw_base_url)
         return _client, model
 
@@ -1587,16 +1629,18 @@ def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Op
             return None, None
         base_url = _pool_runtime_base_url(entry, OPENROUTER_BASE_URL) or OPENROUTER_BASE_URL
         logger.debug("Auxiliary client: OpenRouter via pool")
+        _keepalive_client = _build_keepalive_http_client(base_url)
         return OpenAI(api_key=or_key, base_url=base_url,
-                       default_headers=build_or_headers()), model or _OPENROUTER_MODEL
+                       default_headers=build_or_headers(), http_client=_keepalive_client), model or _OPENROUTER_MODEL
 
     or_key = explicit_api_key or os.getenv("OPENROUTER_API_KEY")
     if not or_key:
         _mark_provider_unhealthy("openrouter", ttl=60)
         return None, None
     logger.debug("Auxiliary client: OpenRouter")
+    _keepalive_client = _build_keepalive_http_client(OPENROUTER_BASE_URL)
     return OpenAI(api_key=or_key, base_url=OPENROUTER_BASE_URL,
-                   default_headers=build_or_headers()), model or _OPENROUTER_MODEL
+                   default_headers=build_or_headers(), http_client=_keepalive_client), model or _OPENROUTER_MODEL
 
 
 def _describe_openrouter_unavailable() -> str:
@@ -1965,7 +2009,8 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
     if _custom_headers:
         _extra["default_headers"] = _custom_headers
     if custom_mode == "codex_responses":
-        real_client = OpenAI(api_key=custom_key, base_url=_clean_base, **_extra)
+        _keepalive_client = _build_keepalive_http_client(_clean_base)
+        real_client = OpenAI(api_key=custom_key, base_url=_clean_base, http_client=_keepalive_client, **_extra)
         return CodexAuxiliaryClient(real_client, model), model
     if custom_mode == "anthropic_messages":
         # Third-party Anthropic-compatible gateway (MiniMax, Zhipu GLM,
@@ -1979,14 +2024,16 @@ def _try_custom_endpoint() -> Tuple[Optional[Any], Optional[str]]:
                 "Custom endpoint declares api_mode=anthropic_messages but the "
                 "anthropic SDK is not installed — falling back to OpenAI-wire."
             )
-            return OpenAI(api_key=custom_key, base_url=_clean_base, **_extra), model
+            _keepalive_client = _build_keepalive_http_client(_clean_base)
+            return OpenAI(api_key=custom_key, base_url=_clean_base, http_client=_keepalive_client, **_extra), model
         return (
             AnthropicAuxiliaryClient(real_client, model, custom_key, custom_base, is_oauth=False),
             model,
         )
     # URL-based anthropic detection for custom endpoints that didn't set
     # api_mode explicitly (e.g. kimi.com/coding reached via custom config).
-    _fallback_client = OpenAI(api_key=custom_key, base_url=_clean_base, **_extra)
+    _keepalive_client = _build_keepalive_http_client(_clean_base)
+    _fallback_client = OpenAI(api_key=custom_key, base_url=_clean_base, http_client=_keepalive_client, **_extra)
     _fallback_client = _maybe_wrap_anthropic(
         _fallback_client, model, custom_key, custom_base, custom_mode,
     )
@@ -2015,7 +2062,8 @@ def _build_xai_oauth_aux_client(model: str) -> Tuple[Optional[Any], Optional[str
         return None, None
     api_key, base_url = resolved
     logger.debug("Auxiliary client: xAI OAuth (%s via Responses API)", model)
-    real_client = OpenAI(api_key=api_key, base_url=base_url)
+    _keepalive_client = _build_keepalive_http_client(base_url)
+    real_client = OpenAI(api_key=api_key, base_url=base_url, http_client=_keepalive_client)
     return CodexAuxiliaryClient(real_client, model), model
 
 
@@ -2052,10 +2100,12 @@ def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
             return None, None
         base_url = _CODEX_AUX_BASE_URL
     logger.debug("Auxiliary client: Codex OAuth (%s via Responses API)", model)
+    _keepalive_client = _build_keepalive_http_client(base_url)
     real_client = OpenAI(
         api_key=codex_token,
         base_url=base_url,
         default_headers=_codex_cloudflare_headers(codex_token),
+        http_client=_keepalive_client,
     )
     return CodexAuxiliaryClient(real_client, model), model
 
@@ -2152,7 +2202,8 @@ def _try_azure_foundry(
     if _dq:
         extra["default_query"] = _dq
 
-    client = OpenAI(api_key=api_key, base_url=_clean_base, **extra)
+    _keepalive_client = _build_keepalive_http_client(_clean_base)
+    client = OpenAI(api_key=api_key, base_url=_clean_base, http_client=_keepalive_client, **extra)
 
     if runtime_api_mode == "codex_responses":
         # GPT-5.x / o-series / codex models on Azure Foundry are
@@ -3626,7 +3677,8 @@ def resolve_provider_client(
             _merged_custom = _apply_user_default_headers(extra.get("default_headers"))
             if _merged_custom:
                 extra["default_headers"] = _merged_custom
-            client = OpenAI(api_key=custom_key, base_url=_clean_base, **extra)
+            _keepalive_client = _build_keepalive_http_client(_clean_base)
+            client = OpenAI(api_key=custom_key, base_url=_clean_base, http_client=_keepalive_client, **extra)
             client = _wrap_if_needed(client, final_model, custom_base, custom_key)
             return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                     else (client, final_model))
@@ -3730,7 +3782,8 @@ def resolve_provider_client(
                         _fb_headers = _apply_user_default_headers(_fb_extra.get("default_headers"))
                         if _fb_headers:
                             _fb_extra["default_headers"] = _fb_headers
-                        client = OpenAI(api_key=custom_key, base_url=_fb_clean, **_fb_extra)
+                        _fb_keepalive = _build_keepalive_http_client(_fb_clean)
+                        client = OpenAI(api_key=custom_key, base_url=_fb_clean, http_client=_fb_keepalive, **_fb_extra)
                         return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
                                 else (client, final_model))
                     sync_anthropic = AnthropicAuxiliaryClient(
@@ -3739,7 +3792,8 @@ def resolve_provider_client(
                     if async_mode:
                         return AsyncAnthropicAuxiliaryClient(sync_anthropic), final_model
                     return sync_anthropic, final_model
-                client = OpenAI(api_key=custom_key, base_url=_clean_base2, **_extra2)
+                _keepalive_client2 = _build_keepalive_http_client(_clean_base2)
+                client = OpenAI(api_key=custom_key, base_url=_clean_base2, http_client=_keepalive_client2, **_extra2)
                 # codex_responses or inherited auto-detect (via _wrap_if_needed).
                 # _wrap_if_needed reads the closed-over `api_mode` (the task-level
                 # override). Named-provider entry api_mode=codex_responses also
@@ -3881,7 +3935,9 @@ def resolve_provider_client(
         _merged_main = _apply_user_default_headers(headers)
         if _merged_main:
             headers = _merged_main
+        _keepalive_client = _build_keepalive_http_client(base_url)
         client = OpenAI(api_key=api_key, base_url=base_url,
+                        http_client=_keepalive_client,
                         **({"default_headers": headers} if headers else {}))
 
         # Copilot GPT-5+ models (except gpt-5-mini) require the Responses
@@ -4407,7 +4463,8 @@ def _refresh_nous_auxiliary_client(
         return None, model
 
     fresh_key, fresh_base_url = runtime
-    sync_client = OpenAI(api_key=fresh_key, base_url=fresh_base_url)
+    _keepalive_client = _build_keepalive_http_client(fresh_base_url)
+    sync_client = OpenAI(api_key=fresh_key, base_url=fresh_base_url, http_client=_keepalive_client)
     final_model = model
 
     current_loop = None
