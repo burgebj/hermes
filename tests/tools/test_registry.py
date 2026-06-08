@@ -544,3 +544,122 @@ class TestThreadSafety:
         toolsets = result_holder["value"]
         assert "gated" in toolsets
         assert toolsets["gated"]["available"] is True
+
+# ---------------------------------------------------------------------------
+# Override semantics --- plugin-overrides-of-builtin protection
+# ---------------------------------------------------------------------------
+
+class TestOverrideSameToolset:
+    """Plugin override=True must be respected when toolsets match.
+
+    Regression tests for #30568: register() only checked ``override``
+    when toolsets differed, so a plugin that registered first with
+    ``override=True`` could be silently overwritten by a later
+    ``discover_builtin_tools()`` re-registration in the same toolset.
+    """
+
+    def test_override_survives_later_same_toolset_no_override(self):
+        """Plugin registers with override=True; builtin re-register later
+        (no override) must NOT overwrite the plugin."""
+        reg = ToolRegistry()
+        # Plugin registers first (as in gateway startup)
+        reg.register(
+            name="img",
+            toolset="image_gen",
+            schema={"name": "img", "description": "plugin", "parameters": {}},
+            handler=_dummy_handler,
+            override=True,
+        )
+        # Builtin tries to re-register later without override
+        reg.register(
+            name="img",
+            toolset="image_gen",
+            schema={"name": "img", "description": "builtin", "parameters": {}},
+            handler=_dummy_handler,
+        )
+        entry = reg.get_entry("img")
+        assert entry is not None
+        assert entry.schema["description"] == "plugin", (
+            f"override=True entry was overwritten: {entry.schema['description']}"
+        )
+
+    def test_override_wins_over_earlier_same_toolset(self):
+        """Builtin registered first; plugin with override=True later must win."""
+        reg = ToolRegistry()
+        reg.register(
+            name="img",
+            toolset="image_gen",
+            schema={"name": "img", "description": "builtin", "parameters": {}},
+            handler=_dummy_handler,
+        )
+        reg.register(
+            name="img",
+            toolset="image_gen",
+            schema={"name": "img", "description": "plugin", "parameters": {}},
+            handler=_dummy_handler,
+            override=True,
+        )
+        entry = reg.get_entry("img")
+        assert entry is not None
+        assert entry.schema["description"] == "plugin"
+
+    def test_no_override_same_toolset_still_overwrites(self):
+        """Backward compat: same-toolset re-registration without override
+        on either side silently overwrites (existing behaviour)."""
+        reg = ToolRegistry()
+        reg.register(
+            name="img",
+            toolset="image_gen",
+            schema={"name": "img", "description": "first", "parameters": {}},
+            handler=_dummy_handler,
+        )
+        reg.register(
+            name="img",
+            toolset="image_gen",
+            schema={"name": "img", "description": "second", "parameters": {}},
+            handler=_dummy_handler,
+        )
+        entry = reg.get_entry("img")
+        assert entry is not None
+        assert entry.schema["description"] == "second"
+
+    def test_cross_toolset_without_override_rejected(self):
+        """Cross-toolset without override is still rejected."""
+        reg = ToolRegistry()
+        reg.register(
+            name="img",
+            toolset="image_gen",
+            schema={"name": "img", "description": "gen", "parameters": {}},
+            handler=_dummy_handler,
+        )
+        reg.register(
+            name="img",
+            toolset="browser",
+            schema={"name": "img", "description": "browse", "parameters": {}},
+            handler=_dummy_handler,
+        )
+        entry = reg.get_entry("img")
+        assert entry is not None
+        assert entry.schema["description"] == "gen", (
+            "cross-toolset without override must be rejected"
+        )
+
+    def test_cross_toolset_override_wins(self):
+        """Cross-toolset with override=True still wins."""
+        reg = ToolRegistry()
+        reg.register(
+            name="img",
+            toolset="image_gen",
+            schema={"name": "img", "description": "gen", "parameters": {}},
+            handler=_dummy_handler,
+        )
+        reg.register(
+            name="img",
+            toolset="browser",
+            schema={"name": "img", "description": "browse", "parameters": {}},
+            handler=_dummy_handler,
+            override=True,
+        )
+        entry = reg.get_entry("img")
+        assert entry is not None
+        assert entry.schema["description"] == "browse"

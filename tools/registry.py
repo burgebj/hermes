@@ -81,11 +81,13 @@ class ToolEntry:
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
+        "_override",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
-                 max_result_size_chars=None, dynamic_schema_overrides=None):
+                 max_result_size_chars=None, dynamic_schema_overrides=None,
+                 _override=False):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -104,6 +106,7 @@ class ToolEntry:
         # on every get_definitions() call; results are merged shallow on top
         # of the base schema before the {"type": "function", ...} wrap.
         self.dynamic_schema_overrides = dynamic_schema_overrides
+        self._override = _override
 
 
 # ---------------------------------------------------------------------------
@@ -256,14 +259,14 @@ class ToolRegistry:
         """
         with self._lock:
             existing = self._tools.get(name)
-            if existing and existing.toolset != toolset:
-                # Allow MCP-to-MCP overwrites (legitimate: server refresh,
-                # or two MCP servers with overlapping tool names).
+            if existing:
                 both_mcp = (
                     existing.toolset.startswith("mcp-")
                     and toolset.startswith("mcp-")
                 )
                 if both_mcp:
+                    # Allow MCP-to-MCP overwrites (legitimate: server refresh,
+                    # or two MCP servers with overlapping tool names).
                     logger.debug(
                         "Tool '%s': MCP toolset '%s' overwriting MCP toolset '%s'",
                         name, toolset, existing.toolset,
@@ -276,9 +279,20 @@ class ToolRegistry:
                         "(override=True opt-in)",
                         name, toolset, existing.toolset,
                     )
-                else:
-                    # Reject shadowing — prevent plugins/MCP from overwriting
-                    # built-in tools or vice versa.
+                elif existing._override:
+                    # Existing entry was itself registered with override=True.
+                    # Protect it from silent overwrite by a later same-toolset
+                    # registration that lacks override (e.g. discover_builtin_tools
+                    # re-running after a plugin has already overridden a built-in).
+                    logger.info(
+                        "Tool '%s': keeping existing override=True entry from "
+                        "toolset '%s' — rejecting re-registration from toolset '%s' "
+                        "without override",
+                        name, existing.toolset, toolset,
+                    )
+                    return
+                elif existing.toolset != toolset:
+                    # Cross-toolset shadowing without override — reject.
                     logger.error(
                         "Tool registration REJECTED: '%s' (toolset '%s') would "
                         "shadow existing tool from toolset '%s'. Pass "
@@ -287,6 +301,15 @@ class ToolRegistry:
                         name, toolset, existing.toolset,
                     )
                     return
+                else:
+                    # Same-toolset re-registration without override.
+                    # Preserve the existing permissive behaviour (built-in
+                    # tool modules can re-register on re-import) but log a
+                    # debug line so plugin authors can detect silent overwrites.
+                    logger.debug(
+                        "Tool '%s': re-registering same-toolset entry (toolset '%s', no override)",
+                        name, toolset,
+                    )
             self._tools[name] = ToolEntry(
                 name=name,
                 toolset=toolset,
@@ -299,6 +322,7 @@ class ToolRegistry:
                 emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
                 dynamic_schema_overrides=dynamic_schema_overrides,
+                _override=override,
             )
             if check_fn and toolset not in self._toolset_checks:
                 self._toolset_checks[toolset] = check_fn
