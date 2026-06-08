@@ -163,16 +163,20 @@ class TestSchemas:
         assert RETAIN_SCHEMA["name"] == "hindsight_retain"
         assert "content" in RETAIN_SCHEMA["parameters"]["properties"]
         assert "tags" in RETAIN_SCHEMA["parameters"]["properties"]
+        assert "bank_id" in RETAIN_SCHEMA["parameters"]["properties"]
         assert "content" in RETAIN_SCHEMA["parameters"]["required"]
 
     def test_recall_schema_has_query(self):
         assert RECALL_SCHEMA["name"] == "hindsight_recall"
         assert "query" in RECALL_SCHEMA["parameters"]["properties"]
+        assert "bank_id" in RECALL_SCHEMA["parameters"]["properties"]
         assert "query" in RECALL_SCHEMA["parameters"]["required"]
 
     def test_reflect_schema_has_query(self):
         assert REFLECT_SCHEMA["name"] == "hindsight_reflect"
         assert "query" in REFLECT_SCHEMA["parameters"]["properties"]
+        assert "bank_id" in REFLECT_SCHEMA["parameters"]["properties"]
+        assert "query" in REFLECT_SCHEMA["parameters"]["required"]
 
     def test_get_tool_schemas_returns_three(self, provider):
         schemas = provider.get_tool_schemas()
@@ -570,6 +574,60 @@ class TestToolHandlers:
             "hindsight_recall", {"query": "test"}
         ))
         assert "error" in result
+
+    def test_retain_uses_override_bank_id(self, provider):
+        """When bank_id is passed, it overrides the default bank."""
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_retain", {"content": "work note", "bank_id": "test-bank-work"}
+        ))
+        assert result["result"] == "Memory stored successfully."
+        call_kwargs = provider._client.aretain.call_args.kwargs
+        assert call_kwargs["bank_id"] == "test-bank-work"
+
+    def test_retain_uses_default_bank_when_no_override(self, provider):
+        """When bank_id is omitted, the default configured bank is used."""
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_retain", {"content": "general note"}
+        ))
+        assert result["result"] == "Memory stored successfully."
+        call_kwargs = provider._client.aretain.call_args.kwargs
+        assert call_kwargs["bank_id"] == "test-bank"
+
+    def test_recall_uses_override_bank_id(self, provider):
+        """When bank_id is passed, it overrides the default bank."""
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_recall", {"query": "work", "bank_id": "test-bank-work"}
+        ))
+        assert "Memory 1" in result["result"]
+        call_kwargs = provider._client.arecall.call_args.kwargs
+        assert call_kwargs["bank_id"] == "test-bank-work"
+
+    def test_recall_uses_default_bank_when_no_override(self, provider):
+        """When bank_id is omitted, the default configured bank is used."""
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_recall", {"query": "general"}
+        ))
+        assert "Memory 1" in result["result"]
+        call_kwargs = provider._client.arecall.call_args.kwargs
+        assert call_kwargs["bank_id"] == "test-bank"
+
+    def test_reflect_uses_override_bank_id(self, provider):
+        """When bank_id is passed, it overrides the default bank."""
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_reflect", {"query": "work summary", "bank_id": "test-bank-work"}
+        ))
+        assert result["result"] == "Synthesized answer"
+        call_kwargs = provider._client.areflect.call_args.kwargs
+        assert call_kwargs["bank_id"] == "test-bank-work"
+
+    def test_reflect_uses_default_bank_when_no_override(self, provider):
+        """When bank_id is omitted, the default configured bank is used."""
+        result = json.loads(provider.handle_tool_call(
+            "hindsight_reflect", {"query": "general summary"}
+        ))
+        assert result["result"] == "Synthesized answer"
+        call_kwargs = provider._client.areflect.call_args.kwargs
+        assert call_kwargs["bank_id"] == "test-bank"
 
     def test_local_embedded_recall_reconnects_after_idle_shutdown(self, provider, monkeypatch):
         first_client = _make_mock_client()

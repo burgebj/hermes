@@ -254,6 +254,10 @@ RETAIN_SCHEMA = {
                 "items": {"type": "string"},
                 "description": "Optional per-call tags to merge with configured default retain tags.",
             },
+            "bank_id": {
+                "type": "string",
+                "description": "Optional target memory bank ID. When omitted, the default configured bank is used.",
+            },
         },
         "required": ["content"],
     },
@@ -269,6 +273,10 @@ RECALL_SCHEMA = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "What to search for."},
+            "bank_id": {
+                "type": "string",
+                "description": "Optional target memory bank ID. When omitted, the default configured bank is used.",
+            },
         },
         "required": ["query"],
     },
@@ -284,6 +292,10 @@ REFLECT_SCHEMA = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "The question to reflect on."},
+            "bank_id": {
+                "type": "string",
+                "description": "Optional target memory bank ID. When omitted, the default configured bank is used.",
+            },
         },
         "required": ["query"],
     },
@@ -1418,9 +1430,10 @@ class HindsightMemoryProvider(MemoryProvider):
         metadata: Dict[str, str] | None = None,
         tags: List[str] | None = None,
         retain_async: bool | None = None,
+        bank_id: str | None = None,
     ) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {
-            "bank_id": self._bank_id,
+            "bank_id": bank_id or self._bank_id,
             "content": content,
             "metadata": metadata or self._build_metadata(message_count=1, turn_index=self._turn_index),
         }
@@ -1544,14 +1557,17 @@ class HindsightMemoryProvider(MemoryProvider):
             if not content:
                 return tool_error("Missing required parameter: content")
             context = args.get("context")
+            bank_id_override = args.get("bank_id")
             try:
                 retain_kwargs = self._build_retain_kwargs(
                     content,
                     context=context,
                     tags=args.get("tags"),
+                    bank_id=bank_id_override,
                 )
+                effective_bank = bank_id_override or self._bank_id
                 logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
-                             self._bank_id, len(content), context)
+                             effective_bank, len(content), context)
                 self._run_hindsight_operation(lambda client: client.aretain(**retain_kwargs))
                 logger.debug("Tool hindsight_retain: success")
                 return json.dumps({"result": "Memory stored successfully."})
@@ -1563,9 +1579,11 @@ class HindsightMemoryProvider(MemoryProvider):
             query = args.get("query", "")
             if not query:
                 return tool_error("Missing required parameter: query")
+            bank_id_override = args.get("bank_id")
             try:
+                effective_bank = bank_id_override or self._bank_id
                 recall_kwargs: dict = {
-                    "bank_id": self._bank_id, "query": query, "budget": self._budget,
+                    "bank_id": effective_bank, "query": query, "budget": self._budget,
                     "max_tokens": self._recall_max_tokens,
                 }
                 if self._recall_tags:
@@ -1574,7 +1592,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 if self._recall_types:
                     recall_kwargs["types"] = self._recall_types
                 logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s",
-                             self._bank_id, len(query), self._budget)
+                             effective_bank, len(query), self._budget)
                 resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
                 num_results = len(resp.results) if resp.results else 0
                 logger.debug("Tool hindsight_recall: %d results", num_results)
@@ -1590,12 +1608,14 @@ class HindsightMemoryProvider(MemoryProvider):
             query = args.get("query", "")
             if not query:
                 return tool_error("Missing required parameter: query")
+            bank_id_override = args.get("bank_id")
             try:
+                effective_bank = bank_id_override or self._bank_id
                 logger.debug("Tool hindsight_reflect: bank=%s, query_len=%d, budget=%s",
-                             self._bank_id, len(query), self._budget)
+                             effective_bank, len(query), self._budget)
                 resp = self._run_hindsight_operation(
                     lambda client: client.areflect(
-                        bank_id=self._bank_id, query=query, budget=self._budget
+                        bank_id=effective_bank, query=query, budget=self._budget
                     )
                 )
                 logger.debug("Tool hindsight_reflect: response_len=%d", len(resp.text or ""))
