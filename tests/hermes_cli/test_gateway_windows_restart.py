@@ -118,6 +118,10 @@ class TestScheduleRestartHandoff:
             mod.preflight_check = lambda **kw: (True, "ok")
             mod._spawn_worker = lambda intent, profile, request_id: 5678
             mod._wait_for_worker_claim = lambda profile, request_id, timeout_s=10.0: True
+            mod._read_lease_data = lambda profile, request_id: {
+                "request_id": request_id, "owner_token": "lease-token",
+                "worker_pid": 5678,
+            }
             mod._wait_for_completion = lambda profile, timeout_s, request_id="": (True, "completed")
             mod._read_final_status = lambda profile, request_id: {
                 "state": "completed", "new_pid": 5678, "launcher": "direct_spawn",
@@ -160,6 +164,10 @@ class TestScheduleRestartHandoff:
             mod.preflight_check = lambda **kw: (True, "ok")
             mod._spawn_worker = lambda intent, profile, request_id: 5678
             mod._wait_for_worker_claim = lambda profile, request_id, timeout_s=10.0: True
+            mod._read_lease_data = lambda profile, request_id: {
+                "request_id": request_id, "owner_token": "lease-token",
+                "worker_pid": 5678,
+            }
             # _wait_for_completion returns False with intermediate state
             mod._wait_for_completion = lambda profile, timeout_s, request_id="": (False, "draining")
             # _read_final_status returns an intermediate state

@@ -201,11 +201,92 @@ def update_intent_state(profile: str, request_id: str, state: str,
         return False
 
 
-def cleanup_intent(profile: str = "default", request_id: str = "") -> None:
-    """Remove the request directory (intent + status + lease).
+def release_lease(profile: str, request_id: str) -> None:
+    """Release only the request-scoped lease file.
 
-    With per-request directories, cleanup only affects the specific request.
-    No compare-and-delete needed — each request_id has its own directory.
+    P0-4: Worker calls this instead of cleanup_intent() to preserve
+    terminal status for the Coordinator to read.
+    """
+    if not request_id:
+        return
+    try:
+        lp = lease_path(profile, request_id)
+        lp.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def sanitize_intent(profile: str, request_id: str) -> None:
+    """Clear sensitive fields from intent (nonce) while preserving the file.
+
+    P0-4: Worker calls this after completing to prevent nonce leakage
+    without deleting the request directory.
+    """
+    if not request_id:
+        return
+    ip = intent_path(profile, request_id)
+    try:
+        data = json.loads(ip.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            data["nonce"] = ""
+            _atomic_write_json(ip, data)
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def gc_expired_request_dirs(profile: str = "default",
+                            max_age_s: int = 3600) -> int:
+    """Garbage-collect expired request directories.
+
+    P0-4: Request directories are no longer deleted by the Worker.
+    Periodic GC removes directories older than max_age_s.
+    Returns the number of directories removed.
+    """
+    profile_dir = _get_profile_dir(profile)
+    now = time.time()
+    removed = 0
+    try:
+        for d in profile_dir.iterdir():
+            if not d.is_dir():
+                continue
+            sp = d / "status.json"
+            if not sp.exists():
+                # No status = stale/orphaned, check age by directory mtime
+                try:
+                    age = now - d.stat().st_mtime
+                    if age > max_age_s:
+                        import shutil
+                        shutil.rmtree(d, ignore_errors=True)
+                        removed += 1
+                except OSError:
+                    continue
+                continue
+            try:
+                data = json.loads(sp.read_text(encoding="utf-8"))
+                ts_str = data.get("updated_at", "")
+                if ts_str:
+                    from datetime import datetime as _dt
+                    ts = _dt.fromisoformat(ts_str).timestamp()
+                    if now - ts > max_age_s:
+                        import shutil
+                        shutil.rmtree(d, ignore_errors=True)
+                        removed += 1
+            except (OSError, json.JSONDecodeError, ValueError):
+                continue
+    except OSError:
+        pass
+    return removed
+
+
+def cleanup_intent(profile: str = "default", request_id: str = "") -> None:
+    """Remove the entire request directory (intent + status + lease).
+
+    DEPRECATED for Worker use — Workers should use release_lease() +
+    sanitize_intent() to preserve terminal status for the Coordinator.
+
+    Only use this for:
+    - Coordinator crash recovery (invalid request cleanup)
+    - _fail_closed() on validation failures
     """
     if not request_id:
         return
@@ -241,6 +322,11 @@ class RestartLock:
         self._path = lock_path(profile)
         self._owner_token: str = ""
         self._owner_request_id: str = ""
+
+    @property
+    def owner_token(self) -> str:
+        """Expose owner_token for handoff verification."""
+        return self._owner_token
 
     def try_acquire(self, request_id: str, ttl_s: int = _LOCK_TTL_S,
                     worker_pid: int = 0) -> bool:
@@ -336,6 +422,91 @@ class RestartLock:
         except OSError:
             pass
 
+    def mark_worker_spawned(self, worker_pid: int,
+                            claim_deadline: float) -> bool:
+        """Record that a worker has been spawned.
+
+        P0-3: Atomically updates phase, worker_pid, and claim_deadline.
+        This enables claim-timeout stale recovery even if the coordinator
+        process is still alive (the coordinator PID check in TTL recovery
+        would block because the coordinator is alive, but the worker may
+        have silently died).
+
+        Returns True on success.
+        """
+        existing = self._read_lock()
+        if not existing:
+            return False
+        if existing.get("owner_token") != self._owner_token:
+            return False
+        existing["phase"] = "awaiting_claim"
+        existing["worker_pid"] = worker_pid
+        existing["claim_deadline"] = claim_deadline
+        try:
+            _atomic_write_json(self._path, existing)
+            return True
+        except OSError:
+            return False
+
+    def handoff_active_lock(
+        self,
+        request_id: str,
+        coordinator_owner_token: str,
+        worker_pid: int,
+        lease_owner_token: str,
+    ) -> bool:
+        """Transfer active.lock ownership from Coordinator to Worker.
+
+        P0-1 + P0-2: After the Worker claims the lease, the Coordinator
+        hands off the active.lock so the Worker can release it when done.
+        This prevents the Coordinator from releasing the lock while the
+        Worker is still running drain/stop/start/verify.
+
+        Validates:
+        - active.lock.request_id matches
+        - Coordinator's owner_token matches
+        - Lease file exists with matching worker_pid and lease_owner_token
+
+        On success, active.lock.owner_token = lease_owner_token,
+        active.lock.owner_pid = worker_pid, phase = "running".
+
+        Returns True on success.
+        """
+        existing = self._read_lock()
+        if not existing:
+            return False
+        if existing.get("request_id") != request_id:
+            return False
+        if existing.get("owner_token") != coordinator_owner_token:
+            return False
+
+        # Verify lease exists with matching owner_token and worker_pid
+        lp = lease_path(self._profile(), request_id)
+        if not lp.exists():
+            return False
+        try:
+            lease_data = json.loads(lp.read_text(encoding="utf-8"))
+            if not isinstance(lease_data, dict):
+                return False
+            if lease_data.get("owner_token") != lease_owner_token:
+                return False
+            if lease_data.get("worker_pid") != worker_pid:
+                return False
+        except (OSError, json.JSONDecodeError):
+            return False
+
+        # Transfer ownership
+        existing["owner_token"] = lease_owner_token
+        existing["owner_pid"] = worker_pid
+        existing["phase"] = "running"
+        try:
+            _atomic_write_json(self._path, existing)
+            # Update our in-memory token so release() works
+            self._owner_token = lease_owner_token
+            return True
+        except OSError:
+            return False
+
     def claim_lease(self, request_id: str, nonce: str,
                     expected_state: str = "scheduled") -> bool:
         """Atomically claim the lease for a request using O_EXCL.
@@ -382,10 +553,19 @@ class RestartLock:
             return False
 
         # P0-3: Update intent state to "claimed" (only winner does this)
+        # P1-2: If intent state update fails, rollback the lease
         self._owner_token = lease_data["owner_token"]
         self._owner_request_id = request_id
-        update_intent_state(self._profile(), request_id, "claimed",
-                            expected_state=expected_state)
+        if not update_intent_state(self._profile(), request_id, "claimed",
+                                   expected_state=expected_state):
+            # Rollback: delete the lease we just created
+            try:
+                lp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._owner_token = ""
+            self._owner_request_id = ""
+            return False
         return True
 
     def release_lease(self, profile: str, request_id: str) -> None:

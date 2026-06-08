@@ -215,13 +215,30 @@ def schedule_restart_handoff(
             "detail": f"Failed to spawn worker: {e}",
         }
 
-    # P1-1: Update lock with worker_pid and claim_deadline for recovery
-    lock.mark_phase("awaiting_claim")
+    # P0-3: Update lock with worker_pid and claim_deadline for recovery
+    lock.mark_worker_spawned(worker_pid, time.time() + 30)
 
     # Wait for worker to claim lease
     claimed = _wait_for_worker_claim(profile, request_id, timeout_s=10.0)
     if claimed:
-        lock.release()
+        # P0-1 + P0-2: Hand off active.lock to Worker instead of releasing
+        lease_data = _read_lease_data(profile, request_id)
+        if lease_data:
+            handoff_ok = lock.handoff_active_lock(
+                request_id,
+                coordinator_owner_token=lock.owner_token,
+                worker_pid=lease_data.get("worker_pid", 0),
+                lease_owner_token=lease_data.get("owner_token", ""),
+            )
+            if handoff_ok:
+                # Worker now owns active.lock — Coordinator must NOT release
+                pass
+            else:
+                # Handoff failed — release to avoid permanent lock
+                lock.release()
+        else:
+            # Lease disappeared (Worker crashed?) — release active.lock
+            lock.release()
     else:
         # Worker failed to claim — lock stays (P1-1 recovery will handle it)
         append_restart_log(
@@ -273,6 +290,19 @@ def _wait_for_worker_claim(
             return True
         time.sleep(0.5)
     return False
+
+
+def _read_lease_data(profile: str, request_id: str) -> Optional[dict[str, Any]]:
+    """Read the lease file data for handoff verification."""
+    from hermes_cli.gateway_restart_state import lease_path
+    lp = lease_path(profile, request_id)
+    if not lp.exists():
+        return None
+    try:
+        data = json.loads(lp.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def _wait_for_completion(

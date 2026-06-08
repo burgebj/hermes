@@ -1400,17 +1400,20 @@ class TestClaimThenWriteStatusError:
                 1234, "test", "/fake/hermes", "Hermes_Gateway",
             )
 
-        # After the transaction, the request directory should be cleaned up
-        # (cleanup_intent in the finally block removes the entire dir)
-        intent_on_disk = read_intent("default", request_id)
-        # The intent may or may not exist depending on whether cleanup
-        # ran successfully. The key invariant is that we got a "failed" status.
+        # P0-4: After the transaction, the request directory is preserved
+        # (Worker uses release_lease + sanitize_intent, NOT cleanup_intent).
+        # The last status before the crash ("preflight_ok") is retained
+        # for the Coordinator to read.
         from hermes_cli.gateway_restart_state import read_status
         status = read_status("default", request_id)
-        # Status might be None if cleanup removed the whole directory,
-        # or "failed" if it was written before cleanup
-        if status is not None:
-            assert status["state"] == "failed"
+        assert status is not None, "Terminal status must be preserved"
+        assert status["state"] == "preflight_ok", (
+            "Last status before crash should be preserved"
+        )
+
+        # Lease must be released
+        lp = lease_path("default", request_id)
+        assert not lp.exists(), "Lease must be released by finally"
 
 
 # ===========================================================================
@@ -1504,3 +1507,240 @@ class TestIntermediateStateTimeout:
                 f"State '{state}' with request_id '{rid}' should NOT be "
                 f"reported as completed on timeout"
             )
+
+
+# ===========================================================================
+# P0-1: active.lock lifecycle — concurrent restart blocking
+# ===========================================================================
+
+class TestActiveLockLifecycle:
+    """P0-1: active.lock covers full transaction lifecycle."""
+
+    def test_active_lock_blocks_concurrent_restart(self, worker_env, monkeypatch):
+        """While Worker-A is running, Request-B cannot acquire active.lock."""
+        from hermes_cli.gateway_restart_state import RestartLock, create_intent
+
+        intent_a = create_intent(profile="default", target_pid=100, origin="test")
+        rid_a = intent_a["request_id"]
+
+        lock_a = RestartLock("default")
+        assert lock_a.try_acquire(rid_a) is True
+
+        # Simulate Worker-A claiming lease (lock still held by coordinator)
+        # Request-B tries to acquire — should fail
+        lock_b = RestartLock("default")
+        assert lock_b.try_acquire("request-b") is False
+
+
+# ===========================================================================
+# P0-2: active.lock atomic handoff and release
+# ===========================================================================
+
+class TestActiveLockHandoff:
+    """P0-2: active.lock handoff from Coordinator to Worker."""
+
+    def test_handoff_active_lock_atomic(self, worker_env, monkeypatch):
+        """P0-2: handoff_active_lock atomically transfers ownership."""
+        from hermes_cli.gateway_restart_state import RestartLock, create_intent, lease_path
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+        nonce = intent["nonce"]
+
+        # Coordinator acquires lock
+        coord_lock = RestartLock("default")
+        assert coord_lock.try_acquire(rid) is True
+        coord_token = coord_lock.owner_token
+
+        # Worker claims lease
+        worker_lock = RestartLock("default")
+        assert worker_lock.claim_lease(rid, nonce) is True
+        lease_token = worker_lock.owner_token
+
+        # Coordinator hands off to Worker
+        assert coord_lock.handoff_active_lock(rid, coord_token, os.getpid(), lease_token) is True
+
+        # Worker's lock should now be able to release the active.lock
+        worker_lock.release()
+
+    def test_worker_finally_releases_active_lock(self, worker_env, monkeypatch):
+        """P0-2: Worker finally releases active.lock after handoff."""
+        from hermes_cli.gateway_restart_state import RestartLock, create_intent, lock_path
+
+        intent = create_intent(profile="default", target_pid=1234, origin="test")
+        rid = intent["request_id"]
+        nonce = intent["nonce"]
+
+        # Coordinator acquires
+        coord_lock = RestartLock("default")
+        assert coord_lock.try_acquire(rid) is True
+        coord_token = coord_lock.owner_token
+
+        # Worker claims lease
+        worker_lock = RestartLock("default")
+        assert worker_lock.claim_lease(rid, nonce) is True
+        lease_token = worker_lock.owner_token
+
+        # Handoff
+        assert coord_lock.handoff_active_lock(rid, coord_token, os.getpid(), lease_token) is True
+
+        # Worker releases (simulating finally block)
+        worker_lock.release()
+
+        # active.lock should be gone
+        assert not lock_path("default").exists()
+
+    def test_coordinator_crash_before_handoff_recoverable(self, worker_env, monkeypatch):
+        """P0-2: If Coordinator crashes before handoff, lock is recoverable via TTL."""
+        from hermes_cli.gateway_restart_state import RestartLock, create_intent, lock_path
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+
+        # Coordinator acquires with short TTL
+        coord_lock = RestartLock("default")
+        assert coord_lock.try_acquire(rid, ttl_s=1) is True
+
+        # Simulate crash: wait for TTL to expire and pretend owner is dead
+        time.sleep(1.5)
+        monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
+
+        # New restart request should be able to acquire (same short TTL so
+        # age > ttl_s triggers the stale recovery path)
+        new_lock = RestartLock("default")
+        assert new_lock.try_acquire("new-request", ttl_s=1) is True
+
+
+# ===========================================================================
+# P0-3: claim deadline recovery
+# ===========================================================================
+
+class TestClaimDeadlineRecovery:
+    """P0-3: Worker never claims → claim_deadline expires → lock recoverable."""
+
+    def test_claim_deadline_recovery(self, worker_env, monkeypatch):
+        """P0-3: Worker never claims → claim_deadline expires → lock recoverable."""
+        from hermes_cli.gateway_restart_state import RestartLock, create_intent, _pid_exists
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+
+        # Coordinator acquires and marks worker spawned
+        coord_lock = RestartLock("default")
+        assert coord_lock.try_acquire(rid) is True
+        # Use current PID but with a deadline that will expire
+        coord_lock.mark_worker_spawned(os.getpid(), time.time() + 0.5)
+
+        # Wait for deadline to expire
+        time.sleep(1.0)
+
+        # Mock _pid_exists to return False (worker is "dead")
+        monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
+
+        # New restart should be able to recover the lock
+        new_lock = RestartLock("default")
+        assert new_lock.try_acquire("new-request") is True
+
+
+# ===========================================================================
+# P0-4: Terminal status preserved after Worker completion
+# ===========================================================================
+
+class TestStatusPreservation:
+    """P0-4: Terminal status preserved after Worker completion."""
+
+    def test_worker_completed_status_preserved(self, worker_env, monkeypatch):
+        """P0-4: Worker writes 'completed' → Coordinator can read it."""
+        from hermes_cli.gateway_restart_state import (
+            create_intent, write_status, read_status, release_lease, sanitize_intent,
+        )
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+
+        # Simulate Worker writing terminal status then cleaning up
+        write_status("default", "completed", request_id=rid, old_pid=100, new_pid=200)
+        release_lease("default", rid)
+        sanitize_intent("default", rid)
+
+        # Coordinator should still be able to read the status
+        status = read_status("default", rid)
+        assert status is not None
+        assert status["state"] == "completed"
+        assert status["new_pid"] == 200
+
+    def test_failed_status_not_deleted(self, worker_env, monkeypatch):
+        """P0-4: Worker writes 'failed' → status persists after cleanup."""
+        from hermes_cli.gateway_restart_state import (
+            create_intent, write_status, read_status, release_lease, sanitize_intent,
+        )
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+
+        write_status("default", "failed", request_id=rid, error="test error")
+        release_lease("default", rid)
+        sanitize_intent("default", rid)
+
+        status = read_status("default", rid)
+        assert status is not None
+        assert status["state"] == "failed"
+        assert "test error" in status.get("error", "")
+
+
+# ===========================================================================
+# P1-1: schtasks fail closed and dual gateway detection
+# ===========================================================================
+
+class TestSchtasksFailClosed:
+    """P1-1: schtasks /Run success without evidence → fail closed."""
+
+    def test_schtasks_accepted_no_evidence_fails_closed(self, worker_env, monkeypatch):
+        """P1-1: schtasks /Run returns 0 but no launch evidence → RuntimeError."""
+        from hermes_cli.gateway_windows_restart_worker import _start_new_gateway
+        from hermes_cli.gateway_restart_state import create_intent
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+
+        # Mock hermes_cli.gateway_windows module so is_task_registered returns True
+        # and _exec_schtasks returns success (code=0)
+        mock_gw_windows = MagicMock()
+        mock_gw_windows.is_task_registered = MagicMock(return_value=True)
+        mock_gw_windows._exec_schtasks = MagicMock(return_value=(0, "", ""))
+        monkeypatch.setitem(sys.modules, "hermes_cli.gateway_windows", mock_gw_windows)
+
+        # Mock _wait_for_launch_evidence → 0 (no evidence)
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows_restart_worker._wait_for_launch_evidence",
+            MagicMock(return_value=0),
+        )
+        # Mock _direct_spawn_gateway to prevent fallback spawn path
+        monkeypatch.setattr(
+            "hermes_cli.gateway_windows_restart_worker._direct_spawn_gateway",
+            MagicMock(return_value=0),
+        )
+
+        with pytest.raises(RuntimeError, match="schtasks /Run succeeded|no launch evidence|Direct spawn failed"):
+            _start_new_gateway("default", rid, 100, "test", "Hermes_Gateway")
+
+    def test_dual_gateway_detected(self, worker_env, monkeypatch):
+        """P1-1: Two gateways running simultaneously → detection fails."""
+        from hermes_cli.gateway_windows_restart_worker import _verify_new_gateway
+        from hermes_cli.gateway_restart_state import create_intent, read_status
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+
+        # Mock _pid_exists: both old and new PIDs alive
+        monkeypatch.setattr(
+            "hermes_cli.gateway_restart_state._pid_exists",
+            lambda pid: pid in (100, 200),
+        )
+
+        _verify_new_gateway("default", rid, 100, 200, "test", "direct_spawn")
+
+        status = read_status("default", rid)
+        assert status is not None
+        assert status["state"] == "failed"
+        assert "dual" in status.get("error", "").lower()

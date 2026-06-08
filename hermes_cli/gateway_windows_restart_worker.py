@@ -63,7 +63,8 @@ def main() -> None:
         # P0-8: Write failed status on ANY unhandled exception
         from hermes_cli.gateway_restart_state import (
             append_restart_log,
-            cleanup_intent,
+            release_lease as _release_lease,
+            sanitize_intent as _sanitize_intent,
             write_status,
         )
         write_status(profile, "failed", request_id=request_id, error=str(exc))
@@ -71,21 +72,22 @@ def main() -> None:
             request_id=request_id, profile=profile, old_pid=old_pid,
             origin=origin, state="failed", error=f"unhandled: {exc}",
         )
-        # Clean up only on genuine exceptions (not SystemExit from loser path).
-        # _run_restart_transaction's own finally handles winner cleanup;
-        # _fail_closed handles invalid-request cleanup.
+        # P0-4: Release lease + sanitize intent (NOT full cleanup_intent)
+        # to preserve terminal status for Coordinator.
         try:
-            cleanup_intent(profile, request_id)
+            _release_lease(profile, request_id)
+        except Exception:
+            pass
+        try:
+            _sanitize_intent(profile, request_id)
         except Exception:
             pass
         sys.exit(1)
     # NOTE: No blanket finally:cleanup_intent here.
-    # - Winner cleanup: _run_restart_transaction inner finally (L175-182)
+    # - Winner cleanup: _run_restart_transaction inner finally
     # - Invalid-request cleanup: _fail_closed() does its own cleanup
     # - Loser (SystemExit from claim_lease failure): must NOT cleanup
     #   because the winner is actively using the same request directory.
-    # A blanket finally would delete winner's resources when the loser's
-    # sys.exit(1) triggers it (SystemExit bypasses except Exception).
 
 
 def _run_restart_transaction(
@@ -181,11 +183,22 @@ def _run_restart_transaction(
         # --- Phase 4: Verify ---
         _verify_new_gateway(profile, request_id, old_pid, new_pid, origin, launcher)
     finally:
-        # P0-4: Guaranteed cleanup with the SAME lock object
-        lock.release()
-        from hermes_cli.gateway_restart_state import cleanup_intent
+        # P0-4: Clean up Worker-owned resources only.
+        # - Release lease (lease.lock) — NOT the entire request directory
+        # - Sanitize intent (clear nonce)
+        # - Release active.lock if Coordinator handed it off
+        # - Preserve terminal status (completed/failed) for Coordinator
+        from hermes_cli.gateway_restart_state import (
+            release_lease as _release_lease,
+            sanitize_intent as _sanitize_intent,
+        )
+        _release_lease(profile, request_id)
+        _sanitize_intent(profile, request_id)
+        # Release active.lock if Coordinator handed it off.
+        # After handoff, active.lock.owner_token == lock.owner_token (lease token).
+        # lock.release() checks owner_token match — safe even if handoff didn't happen.
         try:
-            cleanup_intent(profile, request_id)
+            lock.release()
         except Exception:
             pass
 
@@ -501,6 +514,19 @@ def _start_new_gateway(
                         launcher="scheduled_task", reason="launch_evidence_ok",
                     )
                     return new_pid, "scheduled_task"
+                # P1-1: schtasks /Run accepted but no evidence — fail closed
+                # Scheduled Task may have started with a delay; direct spawn
+                # would create a dual gateway.
+                append_restart_log(
+                    request_id=request_id, profile=profile, old_pid=old_pid,
+                    origin=origin, state="failed",
+                    reason="schtasks_run_accepted_but_no_evidence",
+                )
+                raise RuntimeError(
+                    "schtasks /Run succeeded (exit 0) but no launch evidence "
+                    "within 15s.  Scheduled Task may have started with delay. "
+                    "Will NOT direct-spawn to avoid dual gateway."
+                )
 
             append_restart_log(
                 request_id=request_id, profile=profile, old_pid=old_pid,

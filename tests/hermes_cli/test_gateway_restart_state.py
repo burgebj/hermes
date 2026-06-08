@@ -686,3 +686,71 @@ class TestEnvSanitization:
 
         assert "HERMES_GATEWAY_RESTART_WORKER" not in env
         assert "_HERMES_GATEWAY" not in env
+
+
+# ---------------------------------------------------------------------------
+# P1-2: claim_lease rollback tests
+# ---------------------------------------------------------------------------
+
+class TestClaimLeaseRollback:
+    """P1-2: claim_lease rolls back lease if intent state update fails."""
+
+    def test_claim_lease_rollback_on_intent_update_failure(self, tmp_path, monkeypatch):
+        """If update_intent_state fails after O_EXCL lease creation, lease is rolled back."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            RestartLock, create_intent, lease_path, read_intent,
+        )
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+        nonce = intent["nonce"]
+
+        # Monkey-patch update_intent_state to fail
+        import hermes_cli.gateway_restart_state as state_mod
+        original = state_mod.update_intent_state
+        state_mod.update_intent_state = lambda *a, **kw: False
+
+        lock = RestartLock("default")
+        result = lock.claim_lease(rid, nonce)
+
+        # Restore
+        state_mod.update_intent_state = original
+
+        assert result is False
+
+        # Lease should have been rolled back
+        lp = lease_path("default", rid)
+        assert not lp.exists(), "Lease must be rolled back on intent update failure"
+
+
+# ---------------------------------------------------------------------------
+# P0-4: release_lease preserves status
+# ---------------------------------------------------------------------------
+
+class TestReleaseLease:
+    """P0-4: release_lease only removes lease.lock, preserves status."""
+
+    def test_release_lease_preserves_status(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        from hermes_cli.gateway_restart_state import (
+            create_intent, write_status, read_status, release_lease, lease_path,
+        )
+
+        intent = create_intent(profile="default", target_pid=100, origin="test")
+        rid = intent["request_id"]
+
+        write_status("default", "completed", request_id=rid, new_pid=200)
+
+        # Create a fake lease file
+        lp = lease_path("default", rid)
+        lp.write_text('{"test": true}')
+        assert lp.exists()
+
+        release_lease("default", rid)
+
+        # Lease removed, status preserved
+        assert not lp.exists()
+        status = read_status("default", rid)
+        assert status is not None
+        assert status["state"] == "completed"
