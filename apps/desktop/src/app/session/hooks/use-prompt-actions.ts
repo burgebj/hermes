@@ -672,6 +672,41 @@ export function usePromptActions({
           return
         }
 
+        if (normalizedName === 'compress') {
+          try {
+            renderSlashOutput('🗜️ Compressing…')
+            const result = await requestGateway<{ output?: string }>('session.compress', {
+              session_id: sessionId,
+              focus_topic: arg || ''
+            })
+
+            renderSlashOutput(result?.output || 'Compression complete.')
+          } catch (err) {
+            renderSlashOutput(`error: ${err instanceof Error ? err.message : String(err)}`)
+          }
+
+          return
+        }
+
+        if (normalizedName === 'steer') {
+          if (!arg) {
+            renderSlashOutput('usage: /steer <prompt>')
+            return
+          }
+          try {
+            const result = await requestGateway<{ status?: string }>('session.steer', {
+              session_id: sessionId,
+              text: arg
+            })
+
+            renderSlashOutput(result?.status === 'queued' ? `⏩ Steer queued — arrives after the next tool call: '${arg.slice(0, 60)}'` : 'Steer rejected (empty payload).')
+          } catch (err) {
+            renderSlashOutput(`error: ${err instanceof Error ? err.message : String(err)}`)
+          }
+
+          return
+        }
+
         if (!isDesktopSlashCommand(name)) {
           renderSlashOutput(desktopSlashUnavailableMessage(name) || `/${name} is not available in the desktop app.`)
 

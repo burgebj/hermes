@@ -1596,6 +1596,22 @@ def _compress_session_history(
             return 0, usage
         session["history"] = compressed
         session["history_version"] = history_version + 1
+    # Write compressed messages to the NEW DB session so they survive
+    # restarts.  _compress_context rotates agent.session_id (ends old
+    # session, creates new one) — the DB must contain the compressed
+    # transcript for that new session.  Without this, the compressed
+    # content lives only in memory and is lost on exit.  (data loss — #39704)
+    _new_sid = getattr(agent, "session_id", None)
+    if _new_sid:
+        _db = _get_db()
+        if _db:
+            try:
+                _db.replace_messages(_new_sid, compressed)
+            except Exception as _werr:
+                logger.warning(
+                    "session.compress: replace_messages failed for "
+                    "new session %s: %s", _new_sid, _werr,
+                )
     usage = _get_usage(agent)
     return len(history) - len(compressed), usage
 
@@ -3838,70 +3854,72 @@ def _(rid, params: dict) -> dict:
         )
     sid = params.get("session_id", "")
     focus_topic = str(params.get("focus_topic", "") or "").strip()
-    try:
-        from agent.manual_compression_feedback import summarize_manual_compression
-        from agent.model_metadata import estimate_request_tokens_rough
 
-        with session["history_lock"]:
-            before_messages = list(session.get("history", []))
-            history_version = int(session.get("history_version", 0))
-        before_count = len(before_messages)
-        _agent = session["agent"]
-        _sys_prompt = getattr(_agent, "_cached_system_prompt", "") or ""
-        _tools = getattr(_agent, "tools", None) or None
-        before_tokens = (
-            estimate_request_tokens_rough(
-                before_messages, system_prompt=_sys_prompt, tools=_tools
-            )
-            if before_count
-            else 0
-        )
+    # Fire-and-fork: return immediately so the RPC doesn't time out,
+    # compress in a background thread, emit result as an event.
+    import threading
 
-        if before_count >= 4:
-            focus_suffix = f', focus: "{focus_topic}"' if focus_topic else ""
-            _status_update(
-                sid,
-                "compressing",
-                f"⠋ compressing {before_count} messages "
-                f"(~{before_tokens:,} tok){focus_suffix}…",
-            )
-
+    def _bg_compress():
         try:
-            removed, usage = _compress_session_history(
-                session,
-                focus_topic,
-                approx_tokens=before_tokens,
-                before_messages=before_messages,
-                history_version=history_version,
-            )
+            from agent.manual_compression_feedback import summarize_manual_compression
+            from agent.model_metadata import estimate_request_tokens_rough
+
             with session["history_lock"]:
-                messages = list(session.get("history", []))
-            after_count = len(messages)
-            # Re-read system prompt + tools after compression — _compress_context
-            # may have rebuilt the system prompt (_cached_system_prompt=None).
-            _sys_prompt_after = (
-                getattr(_agent, "_cached_system_prompt", "") or _sys_prompt
-            )
-            _tools_after = getattr(_agent, "tools", None) or _tools
-            after_tokens = (
+                before_messages = list(session.get("history", []))
+                history_version = int(session.get("history_version", 0))
+            before_count = len(before_messages)
+            _agent = session["agent"]
+            _sys_prompt = getattr(_agent, "_cached_system_prompt", "") or ""
+            _tools = getattr(_agent, "tools", None) or None
+            before_tokens = (
                 estimate_request_tokens_rough(
-                    messages,
-                    system_prompt=_sys_prompt_after,
-                    tools=_tools_after,
+                    before_messages, system_prompt=_sys_prompt, tools=_tools
                 )
-                if after_count
+                if before_count
                 else 0
             )
-            agent = session["agent"]
-            _sync_session_key_after_compress(sid, session)
-            summary = summarize_manual_compression(
-                before_messages, messages, before_tokens, after_tokens
-            )
-            info = _session_info(agent, session)
-            _emit("session.info", sid, info)
-            return _ok(
-                rid,
-                {
+
+            if before_count >= 4:
+                focus_suffix = f', focus: "{focus_topic}"' if focus_topic else ""
+                _status_update(
+                    sid,
+                    "compressing",
+                    f"⠋ compressing {before_count} messages "
+                    f"(~{before_tokens:,} tok){focus_suffix}…",
+                )
+
+            try:
+                removed, usage = _compress_session_history(
+                    session,
+                    focus_topic,
+                    approx_tokens=before_tokens,
+                    before_messages=before_messages,
+                    history_version=history_version,
+                )
+                with session["history_lock"]:
+                    messages = list(session.get("history", []))
+                after_count = len(messages)
+                _sys_prompt_after = (
+                    getattr(_agent, "_cached_system_prompt", "") or _sys_prompt
+                )
+                _tools_after = getattr(_agent, "tools", None) or _tools
+                after_tokens = (
+                    estimate_request_tokens_rough(
+                        messages,
+                        system_prompt=_sys_prompt_after,
+                        tools=_tools_after,
+                    )
+                    if after_count
+                    else 0
+                )
+                agent = session["agent"]
+                _sync_session_key_after_compress(sid, session)
+                summary = summarize_manual_compression(
+                    before_messages, messages, before_tokens, after_tokens
+                )
+                info = _session_info(agent, session)
+                _emit("session.info", sid, info)
+                _emit("session.compress.done", sid, {
                     "status": "compressed",
                     "removed": removed,
                     "before_messages": before_count,
@@ -3911,16 +3929,18 @@ def _(rid, params: dict) -> dict:
                     "summary": summary,
                     "usage": usage,
                     "info": info,
-                    "messages": messages,
-                },
-            )
-        finally:
-            # Always clear the pinned compressing status so the bar
-            # reverts to neutral whether compaction succeeded, was a
-            # no-op, or raised.
+                })
+            finally:
+                _status_update(sid, "ready")
+        except Exception as e:
+            _emit("session.compress.done", sid, {
+                "status": "error",
+                "error": str(e),
+            })
             _status_update(sid, "ready")
-    except Exception as e:
-        return _err(rid, 5005, str(e))
+
+    threading.Thread(target=_bg_compress, daemon=True, name="session.compress").start()
+    return _ok(rid, {"status": "compressing"})
 
 
 @method("session.save")

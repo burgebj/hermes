@@ -902,6 +902,26 @@ export function useMessageStream({
             updateSessionState(sessionId, state => ({ ...state, needsInput: true }))
           }
         }
+      } else if (event.type === 'session.compress.done') {
+        // Compression completed in background — show result as a system message.
+        const summary = payload?.summary
+        const status = payload?.status
+        if (status === 'error') {
+          notify({ kind: 'error', title: 'Compression failed', message: payload?.error || 'Unknown error' })
+        } else if (summary) {
+          const icon = summary.headline?.includes('noop') ? '🗜️' : '✅'
+          const lines = [`${icon} ${summary.headline || 'Compression complete'}`]
+          if (summary.token_line) lines.push(summary.token_line)
+          if (summary.note) lines.push(summary.note)
+          // Append as a system message to the active session
+          const targetSid = sessionId ?? explicitSid
+          if (targetSid) {
+            appendAssistantDelta(targetSid, lines.join('\n'))
+            completeAssistantMessage(targetSid)
+          }
+        }
+        // Refresh sessions so the new compressed session appears in sidebar
+        refreshSessions().catch(() => undefined)
       } else if (event.type === 'error') {
         const errorMessage = payload?.message || 'Hermes reported an error'
         const looksLikeProviderSetup = isProviderSetupErrorMessage(errorMessage)

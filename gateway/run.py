@@ -9352,30 +9352,40 @@ class GatewayRunner:
                                             source, session_entry,
                                             reason="hygiene-compression",
                                         )
+                                        self.session_store.rewrite_transcript(
+                                            session_entry.session_id, _compressed
+                                        )
+                                        # Reset stored token count — transcript was rewritten
+                                        session_entry.last_prompt_tokens = 0
+                                        history = _compressed
+                                        _new_count = len(_compressed)
+                                        _new_tokens = estimate_messages_tokens_rough(
+                                            _compressed
+                                        )
 
-                                    self.session_store.rewrite_transcript(
-                                        session_entry.session_id, _compressed
-                                    )
-                                    # Reset stored token count — transcript was rewritten
-                                    session_entry.last_prompt_tokens = 0
-                                    history = _compressed
-                                    _new_count = len(_compressed)
-                                    _new_tokens = estimate_messages_tokens_rough(
-                                        _compressed
-                                    )
+                                        logger.info(
+                                            "Session hygiene: compressed %s → %s msgs, "
+                                            "~%s → ~%s tokens",
+                                            _msg_count, _new_count,
+                                            f"{_approx_tokens:,}", f"{_new_tokens:,}",
+                                        )
 
-                                    logger.info(
-                                        "Session hygiene: compressed %s → %s msgs, "
-                                        "~%s → ~%s tokens",
-                                        _msg_count, _new_count,
-                                        f"{_approx_tokens:,}", f"{_new_tokens:,}",
-                                    )
-
-                                    if _new_tokens >= _warn_token_threshold:
+                                        if _new_tokens >= _warn_token_threshold:
+                                            logger.warning(
+                                                "Session hygiene: still ~%s tokens after "
+                                                "compression",
+                                                f"{_new_tokens:,}",
+                                            )
+                                    else:
+                                        # Session rotation did NOT happen (e.g.
+                                        # _session_db was None).  Writing compressed
+                                        # messages here would overwrite the original
+                                        # transcript — data loss (#39704).
                                         logger.warning(
-                                            "Session hygiene: still ~%s tokens after "
-                                            "compression",
-                                            f"{_new_tokens:,}",
+                                            "Session hygiene: session rotation did not "
+                                            "occur (session_db unavailable?) — skipping "
+                                            "transcript rewrite to preserve original %d "
+                                            "messages.", _msg_count,
                                         )
 
                                     # If summary generation failed, the
@@ -13349,8 +13359,20 @@ class GatewayRunner:
                     self._sync_telegram_topic_binding(
                         source, session_entry, reason="compress-command",
                     )
-
-                self.session_store.rewrite_transcript(new_session_id, compressed)
+                    self.session_store.rewrite_transcript(new_session_id, compressed)
+                else:
+                    # Session rotation did NOT happen (e.g. _session_db was
+                    # None).  Writing compressed messages here would
+                    # overwrite the original transcript — data loss (#39704).
+                    logger.warning(
+                        "Manual compress: session rotation did not occur "
+                        "(session_db unavailable?) — skipping transcript "
+                        "rewrite to preserve original %d messages.",
+                        len(head),
+                    )
+                    return t("gateway.compress.failed",
+                             error="Session rotation did not occur — "
+                             "original messages preserved. Check logs.")
                 # Reset stored token count — transcript changed, old value is stale
                 self.session_store.update_session(
                     session_entry.session_key, last_prompt_tokens=0
@@ -19157,11 +19179,22 @@ class GatewayRunner:
             # (e.g. during the final API call), the agent couldn't inject it
             # and returned it in result["pending_steer"]. Deliver it as the
             # next user turn so it isn't silently dropped.
-            if result and not pending and not pending_event:
+            if result:
                 _leftover_steer = result.get("pending_steer")
                 if _leftover_steer:
-                    pending = _leftover_steer
-                    logger.debug("Delivering leftover /steer as next turn: '%s...'", pending[:40])
+                    if not pending and not pending_event:
+                        pending = _leftover_steer
+                        logger.debug("Delivering leftover /steer as next turn: '%s...'", pending[:40])
+                    elif pending:
+                        # There's already a queued message — prepend the
+                        # steer so the user's guidance isn't silently lost.
+                        pending = f"[Steered guidance]: {_leftover_steer}\n\n{pending}"
+                        logger.debug("Prepending leftover /steer to queued message")
+                    else:
+                        # pending_event exists but no pending text yet —
+                        # promote steer as the pending text so it runs first.
+                        pending = _leftover_steer
+                        logger.debug("Promoting leftover /steer ahead of queued event")
 
             # Safety net: if the pending text is a slash command (e.g. "/stop",
             # "/new"), discard it — commands should never be passed to the agent
