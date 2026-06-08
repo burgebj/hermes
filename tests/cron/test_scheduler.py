@@ -3,11 +3,12 @@
 import json
 import logging
 import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
+from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt, _record_session_notice
 from tools.env_passthrough import clear_env_passthrough
 from tools.credential_files import clear_credential_files
 
@@ -809,6 +810,56 @@ class TestDeliverResultWrapping:
 
         mirror_mock.assert_not_called()
 
+    def test_records_session_notice_on_delivery(self):
+        """Successful delivery buffers a pending session notice (push side)."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
+             patch("cron.pending_notices.record") as rec_mock:
+            job = {
+                "id": "test-job",
+                "name": "PR Watch",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+            }
+            _deliver_result(job, "Hello!")
+
+        rec_mock.assert_called_once()
+        args, kwargs = rec_mock.call_args
+        assert args[0] == "telegram"
+        assert args[1] == "123"
+        assert args[2] == "PR Watch"
+        assert args[3] == "Hello!"
+
+    def test_notify_session_false_skips_notice(self):
+        """cron.notify_session: false disables the push buffer."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
+             patch("cron.scheduler.load_config", return_value={"cron": {"notify_session": False}}), \
+             patch("cron.pending_notices.record") as rec_mock:
+            job = {
+                "id": "test-job",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+            }
+            _deliver_result(job, "Hello!")
+
+        rec_mock.assert_not_called()
+
     def test_origin_delivery_preserves_thread_id(self):
         """Origin delivery should forward thread_id to the send helper."""
         from gateway.config import Platform
@@ -835,6 +886,75 @@ class TestDeliverResultWrapping:
 
         send_mock.assert_called_once()
         assert send_mock.call_args.kwargs["thread_id"] == "17585"
+
+
+class TestRecordSessionNoticeButton:
+    """_record_session_notice: auto records injectable, off skips, button holds
+    the entry (inject=False) and sends accept/dismiss buttons when the adapter
+    supports them, falling back to auto otherwise."""
+
+    def _job(self):
+        return {"id": "j1", "name": "PR Watch"}
+
+    def test_auto_mode_records_injectable(self, monkeypatch):
+        import cron.pending_notices as pn
+        rec = MagicMock(return_value="nid")
+        monkeypatch.setattr(pn, "record", rec)
+        _record_session_notice("auto", "telegram", "123", "Hello", None, self._job())
+        rec.assert_called_once()
+        assert rec.call_args.kwargs.get("inject") is True
+
+    def test_off_mode_records_nothing(self, monkeypatch):
+        import cron.pending_notices as pn
+        rec = MagicMock(return_value="nid")
+        monkeypatch.setattr(pn, "record", rec)
+        _record_session_notice("off", "telegram", "123", "Hello", None, self._job())
+        rec.assert_not_called()
+
+    def test_empty_text_records_nothing(self, monkeypatch):
+        import cron.pending_notices as pn
+        rec = MagicMock(return_value="nid")
+        monkeypatch.setattr(pn, "record", rec)
+        _record_session_notice("auto", "telegram", "123", "   ", None, self._job())
+        rec.assert_not_called()
+
+    def test_button_mode_with_support_holds_and_sends(self, monkeypatch):
+        import cron.pending_notices as pn
+        import agent.async_utils as au
+        rec = MagicMock(return_value="fixedid")
+        monkeypatch.setattr(pn, "record", rec)
+        monkeypatch.setattr(pn, "new_notice_id", lambda: "fixedid")
+        fake_future = MagicMock()
+        fake_future.result.return_value = SimpleNamespace(success=True)
+        monkeypatch.setattr(au, "safe_schedule_threadsafe", lambda coro, loop: fake_future)
+
+        adapter = MagicMock()
+        adapter.SUPPORTS_CRON_BUTTONS = True
+        loop = MagicMock()
+        _record_session_notice(
+            "button", "telegram", "123", "Hello", None, self._job(),
+            adapter=adapter, loop=loop, send_metadata={"thread_id": None},
+        )
+
+        rec.assert_called_once()
+        assert rec.call_args.kwargs.get("inject") is False
+        assert rec.call_args.kwargs.get("notice_id") == "fixedid"
+        adapter.send_cron_notice.assert_called_once_with("123", "fixedid", metadata={"thread_id": None})
+
+    def test_button_mode_without_support_falls_back_to_auto(self, monkeypatch):
+        import cron.pending_notices as pn
+        rec = MagicMock(return_value="nid")
+        monkeypatch.setattr(pn, "record", rec)
+        adapter = MagicMock()
+        adapter.SUPPORTS_CRON_BUTTONS = False
+        loop = MagicMock()
+        _record_session_notice(
+            "button", "telegram", "123", "Hello", None, self._job(),
+            adapter=adapter, loop=loop,
+        )
+        rec.assert_called_once()
+        assert rec.call_args.kwargs.get("inject") is True
+        adapter.send_cron_notice.assert_not_called()
 
 
 class TestDeliverResultErrorReturns:

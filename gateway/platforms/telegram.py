@@ -357,6 +357,10 @@ class TelegramAdapter(BasePlatformAdapter):
     # Fixes #25710.
     REQUIRES_EDIT_FINALIZE: bool = True
 
+    # Telegram renders the cron-delivery accept/dismiss buttons used by
+    # ``cron.notify_session: button`` (see send_cron_notice).
+    SUPPORTS_CRON_BUTTONS: bool = True
+
     # Adaptive text-batch ingress: short messages need a tighter delay so the
     # first token reaches the agent fast.  Numbers tuned for "feels instant":
     # ≤320 codepoints (one short paragraph) settles in ~180ms; ≤1024
@@ -2718,6 +2722,62 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.warning("[%s] send_exec_approval failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
 
+    async def send_cron_notice(
+        self,
+        chat_id: str,
+        notice_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an Add-to-context / Dismiss prompt beneath a cron delivery.
+
+        Button mode (``cron.notify_session: button``) delivers the cron message
+        normally and then this short prompt.  Accept folds the buffered delivery
+        into the chat's next interactive turn (pending_notices.mark_accepted);
+        dismiss drops it (pending_notices.dismiss).  No in-memory state is kept:
+        the on-disk notice buffer is the source of truth, keyed by ``notice_id``,
+        so the buttons keep working after a gateway restart (unlike the
+        exec-approval in-memory counter).
+        """
+        if not self._bot:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            text = (
+                "📥 <b>Cron delivery above</b>\n\n"
+                "It is not in my chat memory. Add it to this conversation's context?"
+            )
+            thread_id = self._metadata_thread_id(metadata)
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📥 Add to context", callback_data=f"cron:accept:{notice_id}"),
+                    InlineKeyboardButton("✕ Dismiss", callback_data=f"cron:dismiss:{notice_id}"),
+                ],
+            ])
+            kwargs: Dict[str, Any] = {
+                "chat_id": int(chat_id),
+                "text": text,
+                "parse_mode": ParseMode.HTML,
+                "reply_markup": keyboard,
+                **self._link_preview_kwargs(),
+            }
+            reply_to_id = self._reply_to_message_id_for_send(None, metadata, reply_to_mode=self._reply_to_mode)
+            kwargs["reply_to_message_id"] = reply_to_id
+            kwargs.update(
+                self._thread_kwargs_for_send(
+                    chat_id,
+                    thread_id,
+                    metadata,
+                    reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode,
+                )
+            )
+
+            msg = await self._send_message_with_thread_fallback(**kwargs)
+            return SendResult(success=True, message_id=str(msg.message_id))
+        except Exception as e:
+            logger.warning("[%s] send_cron_notice failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
     async def send_slash_confirm(
         self, chat_id: str, title: str, message: str, session_key: str,
         confirm_id: str, metadata: Optional[Dict[str, Any]] = None,
@@ -3332,6 +3392,52 @@ class TelegramAdapter(BasePlatformAdapter):
                 # button click.
                 if count and query_chat_id is not None:
                     self.resume_typing_for_chat(str(query_chat_id))
+            return
+
+        # --- Cron delivery accept/dismiss callbacks (cron:choice:id) ---
+        if data.startswith("cron:"):
+            parts = data.split(":", 2)
+            if len(parts) == 3:
+                choice = parts[1]  # accept, dismiss
+                notice_id = parts[2]
+
+                # Only authorized users may resolve cron notices.
+                caller_id = str(getattr(query.from_user, "id", ""))
+                if not self._is_callback_user_authorized(
+                    caller_id,
+                    chat_id=query_chat_id,
+                    chat_type=str(query_chat_type) if query_chat_type is not None else None,
+                    thread_id=str(query_thread_id) if query_thread_id is not None else None,
+                    user_name=query_user_name,
+                ):
+                    await query.answer(text="⛔ You are not authorized.")
+                    return
+
+                # The on-disk notice buffer is the source of truth (keyed by
+                # platform:chat_id), so this survives a gateway restart.
+                from cron.pending_notices import dismiss as dismiss_notice
+                from cron.pending_notices import mark_accepted
+
+                chat_key = str(query_chat_id)
+                if choice == "accept":
+                    ok = mark_accepted("telegram", chat_key, notice_id)
+                    label = "📥 Added to context" if ok else "Already resolved"
+                elif choice == "dismiss":
+                    ok = dismiss_notice("telegram", chat_key, notice_id)
+                    label = "✕ Dismissed" if ok else "Already resolved"
+                else:
+                    await query.answer(text="Invalid action.")
+                    return
+
+                await query.answer(text=label)
+                try:
+                    await query.edit_message_text(
+                        text=self.format_message(label),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass  # non-fatal if the edit fails
             return
 
         # --- Slash-confirm callbacks (sc:choice:confirm_id) ---

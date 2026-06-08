@@ -746,10 +746,19 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     # Optionally wrap the content with a header/footer so the user knows this
     # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
     # in config.yaml for clean output.
+    #
+    # notify_session (on by default; set cron.notify_session: false to disable)
+    # buffers each delivery so the chat's next interactive turn surfaces it in
+    # the system prompt — see cron/pending_notices.py.  This does NOT inject
+    # into message history (that broke alternation, #2313/#2221).
     wrap_response = True
+    notify_mode = "auto"
     try:
+        from cron.pending_notices import normalize_notify_mode
         user_cfg = load_config()
-        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
+        cron_cfg = user_cfg.get("cron", {})
+        wrap_response = cron_cfg.get("wrap_response", True)
+        notify_mode = normalize_notify_mode(cron_cfg.get("notify_session", True))
     except Exception:
         pass
 
@@ -770,6 +779,11 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     from gateway.platforms.base import BasePlatformAdapter
     media_files, cleaned_delivery_content = BasePlatformAdapter.extract_media(delivery_content)
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+
+    # For the session notice we want the raw job output (no wrapper/footer),
+    # with MEDIA tags stripped so the buffered text stays clean.
+    _, notice_text = BasePlatformAdapter.extract_media(content)
+    notice_text = (notice_text or "").strip()
 
     try:
         config = load_gateway_config()
@@ -877,6 +891,11 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 if adapter_ok:
                     logger.info("Job '%s': delivered to %s:%s via live adapter", job["id"], platform_name, chat_id)
                     delivered = True
+                    _record_session_notice(
+                        notify_mode, platform_name, chat_id,
+                        notice_text, thread_id, job,
+                        adapter=runtime_adapter, loop=loop, send_metadata=send_metadata,
+                    )
             except Exception as e:
                 logger.warning(
                     "Job '%s': live adapter delivery to %s:%s failed (%s), falling back to standalone",
@@ -910,10 +929,88 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 continue
 
             logger.info("Job '%s': delivered to %s:%s", job["id"], platform_name, chat_id)
+            _record_session_notice(
+                notify_mode, platform_name, chat_id,
+                notice_text, thread_id, job,
+            )
 
     if delivery_errors:
         return "; ".join(delivery_errors)
     return None
+
+
+def _record_session_notice(
+    mode: str,
+    platform_name: str,
+    chat_id: str,
+    text: str,
+    thread_id: Optional[str],
+    job: dict,
+    adapter=None,
+    loop=None,
+    send_metadata=None,
+) -> None:
+    """Buffer a delivered cron message for the chat's next interactive turn.
+
+    ``mode`` is the normalized cron.notify_session value:
+
+      * ``off``    -> no-op.
+      * ``auto``   -> buffer as injectable; the next turn folds it into the
+        system prompt automatically.
+      * ``button`` -> on a live adapter that supports inline buttons, buffer the
+        entry as held (inject=False) and send an accept/dismiss prompt; the user
+        decides whether it reaches context. Platforms without button support (or
+        the standalone no-adapter path) fall back to ``auto`` so awareness is
+        never lost.
+
+    No-ops when off or empty. Best-effort: delivery has already succeeded, so a
+    buffering failure must never surface as a delivery error.
+    """
+    text = (text or "").strip()
+    if mode == "off" or not text:
+        return
+    try:
+        from cron.pending_notices import new_notice_id, record
+
+        job_label = job.get("name", job.get("id", ""))
+        use_buttons = (
+            mode == "button"
+            and adapter is not None
+            and loop is not None
+            and getattr(adapter, "SUPPORTS_CRON_BUTTONS", False)
+        )
+
+        if not use_buttons:
+            record(platform_name, str(chat_id), job_label, text, thread_id=thread_id, inject=True)
+            return
+
+        # Button mode: hold the entry until the user accepts it, and send the
+        # accept/dismiss prompt beneath the delivery.
+        notice_id = new_notice_id()
+        record(
+            platform_name, str(chat_id), job_label, text,
+            thread_id=thread_id, notice_id=notice_id, inject=False,
+        )
+        try:
+            from agent.async_utils import safe_schedule_threadsafe
+
+            future = safe_schedule_threadsafe(
+                adapter.send_cron_notice(str(chat_id), notice_id, metadata=send_metadata),
+                loop,
+            )
+            if future is not None:
+                future.result(timeout=30)
+        except Exception as e:
+            # The prompt could not be sent; don't strand the notice. Make it
+            # injectable so the next turn still surfaces it (auto fallback).
+            logger.debug(
+                "Job '%s': cron notice button send failed (%s); auto-injecting",
+                job.get("id"), e,
+            )
+            from cron.pending_notices import mark_accepted
+            mark_accepted(platform_name, str(chat_id), notice_id)
+    except Exception as e:
+        logger.debug("Job '%s': session notice not buffered (%s)", job.get("id"), e)
 
 
 _DEFAULT_SCRIPT_TIMEOUT = 120  # seconds
