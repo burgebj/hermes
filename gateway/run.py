@@ -8395,17 +8395,33 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                                             source, session_entry,
                                             reason="hygiene-compression",
                                         )
-
-                                    self.session_store.rewrite_transcript(
-                                        session_entry.session_id, _compressed
-                                    )
-                                    # Reset stored token count — transcript was rewritten
-                                    session_entry.last_prompt_tokens = 0
-                                    history = _compressed
-                                    _new_count = len(_compressed)
-                                    _new_tokens = estimate_messages_tokens_rough(
-                                        _compressed
-                                    )
+                                        # Write compressed messages to the NEW session
+                                        self.session_store.rewrite_transcript(
+                                            session_entry.session_id, _compressed
+                                        )
+                                        # Reset stored token count — transcript was rewritten
+                                        session_entry.last_prompt_tokens = 0
+                                        history = _compressed
+                                        _new_count = len(_compressed)
+                                        _new_tokens = estimate_messages_tokens_rough(
+                                            _compressed
+                                        )
+                                    else:
+                                        # Session rotation did not occur (e.g., _session_db unavailable).
+                                        # Do NOT rewrite the original session transcript — that would
+                                        # permanently delete the original messages. Instead, keep the
+                                        # compressed messages in memory for this API call only.
+                                        logger.warning(
+                                            "Session hygiene: compression triggered but session rotation "
+                                            "did not occur (_session_db unavailable?) — skipping transcript "
+                                            "rewrite to preserve original %s messages",
+                                            _msg_count,
+                                        )
+                                        history = _compressed
+                                        _new_count = len(_compressed)
+                                        _new_tokens = estimate_messages_tokens_rough(
+                                            _compressed
+                                        )
 
                                     logger.info(
                                         "Session hygiene: compressed %s → %s msgs, "
