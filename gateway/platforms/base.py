@@ -1190,15 +1190,17 @@ MEDIA_DELIVERY_EXTS: Tuple[str, ...] = (
     # Audio (delivered as voice/audio where supported)
     ".mp3", ".wav", ".ogg", ".opus", ".m4a", ".flac",
     # Documents (uploaded as file attachments)
-    ".pdf", ".docx", ".doc", ".odt", ".rtf", ".txt", ".md", ".epub",
+    ".pdf", ".docx", ".doc", ".odt", ".rtf", ".txt", ".md", ".markdown", ".epub",
     # Spreadsheets / data
-    ".xlsx", ".xls", ".ods", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml",
+    ".xlsx", ".xls", ".ods", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".toml",
     # Presentations
     ".pptx", ".ppt", ".odp", ".key",
     # Archives
     ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".apk", ".ipa",
     # Web / rendered output
     ".html", ".htm",
+    # Scripts / code files (plain-text, safe to deliver as documents)
+    ".py", ".js", ".ts", ".sh", ".bash", ".zsh",
 )
 
 # Regex alternation fragment of bare extensions (no leading dot), e.g.
