@@ -117,6 +117,41 @@ def _ra():
     return run_agent
 
 
+def _emit_preflight_token_usage(agent: Any, request_tokens: int) -> None:
+    """Send the current request-size estimate through the live usage channel."""
+    if request_tokens <= 0:
+        return
+    compressor = getattr(agent, "context_compressor", None)
+    if compressor is None:
+        return
+
+    try:
+        previous = getattr(compressor, "last_prompt_tokens", 0) or 0
+        if request_tokens > previous:
+            compressor.last_prompt_tokens = request_tokens
+    except Exception:
+        logger.debug("could not update preflight context estimate", exc_info=True)
+
+    emit = getattr(agent, "_emit_token_usage", None)
+    if not callable(emit):
+        return
+
+    try:
+        emit(
+            input_tokens=getattr(agent, "session_input_tokens", 0)
+            or getattr(agent, "session_prompt_tokens", 0)
+            or 0,
+            output_tokens=getattr(agent, "session_output_tokens", 0)
+            or getattr(agent, "session_completion_tokens", 0)
+            or 0,
+            total_tokens=getattr(agent, "session_total_tokens", 0) or 0,
+            context_tokens=request_tokens,
+            context_length=getattr(compressor, "context_length", 0) or 0,
+        )
+    except Exception:
+        logger.debug("could not emit preflight token usage", exc_info=True)
+
+
 def _nous_entitlement_message(capability: str) -> str:
     try:
         from hermes_cli.nous_account import (
@@ -600,19 +635,6 @@ def run_conversation(
 
     active_system_prompt = agent._cached_system_prompt
 
-    # Crash-resilience: persist the inbound user turn as soon as the session row
-    # has a valid system prompt, before any provider call or tool execution can
-    # hang/kill the process. The normal end-of-turn persist still runs later;
-    # _last_flushed_db_idx makes this idempotent and prevents duplicate rows.
-    try:
-        agent._persist_session(messages, conversation_history)
-    except Exception:
-        logger.warning(
-            "Early turn-start session persistence failed for session=%s",
-            agent.session_id or "none",
-            exc_info=True,
-        )
-
     # ── Preflight context compression ──
     # Before entering the main loop, check if the loaded conversation
     # history already exceeds the model's context threshold.  This handles
@@ -654,14 +676,7 @@ def run_conversation(
             # Skipped when deferring — a deferred estimate is known to over-count
             # vs the last real provider prompt, so trusting it for the display
             # would re-introduce the very desync we're avoiding.
-            _last = _compressor.last_prompt_tokens
-            # Do NOT overwrite the -1 sentinel. compress_context() sets
-            # last_prompt_tokens=-1 right after compression to mark "no real API
-            # usage yet". `(x or 0)` evaluates to -1 (truthy) for the sentinel,
-            # so the old comparison was always True and clobbered the sentinel
-            # with a schema-inflated rough estimate — re-triggering compression
-            # on the next turn (#36718). Treat any negative value as "no data".
-            if _last >= 0 and _preflight_tokens > _last:
+            if _preflight_tokens > (_compressor.last_prompt_tokens or 0):
                 _compressor.last_prompt_tokens = _preflight_tokens
 
         if _preflight_deferred:
@@ -689,11 +704,18 @@ def run_conversation(
             # context windows (each pass summarises the middle N turns).
             for _pass in range(3):
                 _orig_len = len(messages)
+                _orig_tokens = _preflight_tokens
                 messages, active_system_prompt = agent._compress_context(
                     messages, system_message, approx_tokens=_preflight_tokens,
                     task_id=effective_task_id,
                 )
-                if len(messages) >= _orig_len:
+                _post_preflight_tokens = estimate_request_tokens_rough(
+                    messages,
+                    system_prompt=active_system_prompt or "",
+                    tools=agent.tools or None,
+                )
+                if len(messages) >= _orig_len and _post_preflight_tokens >= _orig_tokens:
+                    _preflight_tokens = _post_preflight_tokens
                     break  # Cannot compress further
                 # Compression created a new session — clear the history
                 # reference so _flush_messages_to_session_db writes ALL
@@ -711,12 +733,10 @@ def run_conversation(
                 agent._last_content_with_tools = None
                 agent._last_content_tools_all_housekeeping = False
                 agent._mute_post_response = False
-                # Re-estimate after compression
-                _preflight_tokens = estimate_request_tokens_rough(
-                    messages,
-                    system_prompt=active_system_prompt or "",
-                    tools=agent.tools or None,
-                )
+                # Re-use the post-compression estimate above.  A compressor may
+                # keep the same number of messages while replacing large
+                # contents with summaries; that is still useful progress.
+                _preflight_tokens = _post_preflight_tokens
                 if not _compressor.should_compress(_preflight_tokens):
                     break  # Under threshold or anti-thrash guard stopped it
 
@@ -1123,6 +1143,7 @@ def run_conversation(
         approx_request_tokens = estimate_request_tokens_rough(
             api_messages, tools=agent.tools or None
         )
+        _emit_preflight_token_usage(agent, approx_request_tokens)
 
         _runtime_context_error = _ollama_context_limit_error(
             agent, approx_request_tokens
@@ -1996,6 +2017,19 @@ def run_conversation(
                     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
                     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
                     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+
+                    # Emit structured token usage for real-time context bar updates.
+                    # Fire-and-forget: the target may not have a status_callback wired,
+                    # and we never want to block the conversation loop.
+                    agent._emit_token_usage(
+                        input_tokens=agent.session_input_tokens,
+                        output_tokens=agent.session_output_tokens,
+                        total_tokens=agent.session_total_tokens,
+                        context_tokens=agent.context_compressor.last_prompt_tokens
+                        if agent.context_compressor else 0,
+                        context_length=agent.context_compressor.context_length
+                        if agent.context_compressor else 0,
+                    )
 
                     # Log API call details for debugging/observability
                     _cache_pct = ""
@@ -3214,7 +3248,11 @@ def run_conversation(
                             "failed": True,
                             "compression_exhausted": True,
                         }
-                    agent._buffer_status(f"🗜️ Context too large (~{approx_tokens:,} tokens) — compressing ({compression_attempts}/{max_compression_attempts})...")
+                    pre_compress_request_tokens = approx_request_tokens if approx_request_tokens > 0 else approx_tokens
+                    agent._buffer_status(
+                        f"🗜️ Context too large (~{pre_compress_request_tokens:,} request tokens) "
+                        f"— compressing ({compression_attempts}/{max_compression_attempts})..."
+                    )
 
                     original_len = len(messages)
                     messages, active_system_prompt = agent._compress_context(
@@ -3225,10 +3263,22 @@ def run_conversation(
                     # so _flush_messages_to_session_db writes compressed
                     # messages to the new session, not skipping them.
                     conversation_history = None
+                    post_compress_request_tokens = estimate_request_tokens_rough(
+                        messages,
+                        system_prompt=active_system_prompt or "",
+                        tools=agent.tools or None,
+                    )
+                    token_reduced = post_compress_request_tokens < pre_compress_request_tokens
 
-                    if len(messages) < original_len or new_ctx and new_ctx < old_ctx:
+                    if len(messages) < original_len or token_reduced or new_ctx and new_ctx < old_ctx:
                         if len(messages) < original_len:
                             agent._buffer_status(f"🗜️ Compressed {original_len} → {len(messages)} messages, retrying...")
+                        elif token_reduced:
+                            agent._buffer_status(
+                                f"🗜️ Compressed request estimate "
+                                f"~{pre_compress_request_tokens:,} → ~{post_compress_request_tokens:,} tokens, retrying..."
+                            )
+                        _emit_preflight_token_usage(agent, post_compress_request_tokens)
                         time.sleep(2)  # Brief pause between compression retries
                         restart_with_compressed_messages = True
                         break
@@ -3237,13 +3287,16 @@ def run_conversation(
                         agent._flush_status_buffer()
                         agent._vprint(f"{agent.log_prefix}❌ Context length exceeded and cannot compress further.", force=True)
                         agent._vprint(f"{agent.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
-                        logger.error(f"{agent.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
+                        logger.error(
+                            f"{agent.log_prefix}Context length exceeded: "
+                            f"{post_compress_request_tokens:,} request tokens. Cannot compress further."
+                        )
                         agent._persist_session(messages, conversation_history)
                         return {
                             "messages": messages,
                             "completed": False,
                             "api_calls": api_call_count,
-                            "error": f"Context length exceeded ({approx_tokens:,} tokens). Cannot compress further.",
+                            "error": f"Context length exceeded ({post_compress_request_tokens:,} request tokens). Cannot compress further.",
                             "partial": True,
                             "failed": True,
                             "compression_exhausted": True,

@@ -450,15 +450,7 @@ export interface Translations {
       ready: string
       nousIncluded: string
       noApiKeyRequired: string
-      postSetupHint: (step: string) => string
-      postSetupRun: string
-      postSetupRunning: string
-      postSetupStarting: string
-      postSetupCompleteTitle: string
-      postSetupCompleteMessage: (step: string) => string
-      postSetupErrorTitle: string
-      postSetupErrorMessage: (step: string) => string
-      postSetupFailed: (step: string) => string
+      postSetup: (step: string) => string
     }
   }
 
@@ -699,6 +691,8 @@ export interface Translations {
   cron: {
     close: string
     search: string
+    refresh: string
+    refreshing: string
     loading: string
     states: Record<string, string>
     deliveryLabels: Record<string, string>
@@ -712,18 +706,15 @@ export interface Translations {
     monthlyOnDayAt: (dayOfMonth: string, time: string) => string
     topOfHour: string
     everyHourAt: (minute: string) => string
+    active: (enabled: number, total: number) => string
     newCron: string
+    createFirst: string
     emptyDescNew: string
     emptyDescSearch: string
     emptyTitleNew: string
     emptyTitleSearch: string
     last: string
     next: string
-    noRuns: string
-    manage: string
-    showRuns: string
-    hideRuns: string
-    runHistory: string
     actionsFor: (title: string) => string
     actionsTitle: string
     resume: string
@@ -810,7 +801,6 @@ export interface Translations {
     results: string
     pinned: string
     sessions: string
-    cronJobs: string
     groupAriaGrouped: string
     groupAriaUngrouped: string
     groupTitleGrouped: string

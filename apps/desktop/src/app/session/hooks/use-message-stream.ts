@@ -16,6 +16,7 @@ import {
 import { coerceGatewayText, coerceThinkingText, normalizePersonalityValue } from '@/lib/chat-runtime'
 import { triggerHaptic } from '@/lib/haptics'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
+import { mergeTokenUsagePayload, type TokenUsagePayload } from '@/lib/token-usage'
 import { setClarifyRequest } from '@/store/clarify'
 import { notify } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
@@ -451,8 +452,7 @@ export function useMessageStream({
             busy: false,
             needsInput: false,
             pendingBranchGroup: null,
-            streamId: null,
-            turnStartedAt: null
+            streamId: null
           }
         }
 
@@ -542,8 +542,7 @@ export function useMessageStream({
           pendingBranchGroup: null,
           awaitingResponse: false,
           busy: false,
-          needsInput: false,
-          turnStartedAt: null
+          needsInput: false
         }
       })
 
@@ -601,8 +600,7 @@ export function useMessageStream({
           sawAssistantPayload: true,
           awaitingResponse: false,
           busy: false,
-          needsInput: false,
-          turnStartedAt: null
+          needsInput: false
         }
       })
     },
@@ -686,8 +684,7 @@ export function useMessageStream({
               if (busy) {
                 return {
                   ...state,
-                  busy,
-                  turnStartedAt: state.turnStartedAt ?? Date.now()
+                  busy
                 }
               }
 
@@ -700,8 +697,7 @@ export function useMessageStream({
                 awaitingResponse: false,
                 busy,
                 pendingBranchGroup: null,
-                streamId: null,
-                turnStartedAt: null
+                streamId: null
               }
             })
           }
@@ -722,6 +718,10 @@ export function useMessageStream({
             queryKey: explicitSid && sessionId ? ['model-options', sessionId] : ['model-options']
           })
         }
+      } else if (event.type === 'token.usage') {
+        if (!explicitSid || isActiveEvent) {
+          setCurrentUsage(current => mergeTokenUsagePayload(current, event.payload as TokenUsagePayload | undefined))
+        }
       } else if (event.type === 'message.start') {
         if (!sessionId) {
           return
@@ -740,8 +740,7 @@ export function useMessageStream({
           busy: true,
           awaitingResponse: true,
           sawAssistantPayload: false,
-          interrupted: false,
-          turnStartedAt: Date.now()
+          interrupted: false
         }))
 
         if (isActiveEvent) {

@@ -21,7 +21,7 @@ import {
 import { triggerHaptic } from '@/lib/haptics'
 import { setMutableRef } from '@/lib/mutable-ref'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
-import { setSessionYolo } from '@/lib/yolo-session'
+import { setDesktopYoloMode } from '@/lib/yolo-session'
 import {
   $composerAttachments,
   addComposerAttachment,
@@ -34,15 +34,13 @@ import { requestDesktopOnboarding } from '@/store/onboarding'
 import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import {
   $busy,
-  $connection,
   $messages,
   $yoloActive,
   setAwaitingResponse,
   setBusy,
   setMessages,
   setModelPickerOpen,
-  setSessions,
-  setYoloActive
+  setSessions
 } from '@/store/session'
 
 import type {
@@ -79,28 +77,6 @@ function inlineErrorMessage(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : typeof error === 'string' ? error : fallback
 
   return (raw.match(/Error invoking remote method '[^']+': Error: (.+)$/)?.[1] ?? raw).replace(/^Error:\s*/, '').trim()
-}
-
-function base64FromDataUrl(dataUrl: string): string {
-  const comma = dataUrl.indexOf(',')
-
-  return comma >= 0 ? dataUrl.slice(comma + 1) : ''
-}
-
-function imageFilenameFromPath(filePath: string): string {
-  return filePath.split(/[\\/]/).filter(Boolean).pop() || 'image.png'
-}
-
-// Remote gateway: the local composer-image file lives on THIS machine's disk,
-// not the gateway's, so read the bytes here and upload them via
-// image.attach_bytes. Returns null when the file can't be read.
-async function readImageForRemoteAttach(
-  filePath: string
-): Promise<{ contentBase64: string; filename: string } | null> {
-  const dataUrl = await window.hermesDesktop?.readFileDataUrl(filePath)
-  const contentBase64 = dataUrl ? base64FromDataUrl(dataUrl) : ''
-
-  return contentBase64 ? { contentBase64, filename: imageFilenameFromPath(filePath) } : null
 }
 
 interface PromptActionsOptions {
@@ -220,36 +196,16 @@ export function usePromptActions({
     ) => {
       const updateComposerAttachments = options.updateComposerAttachments ?? true
       const images = attachments.filter(attachment => attachment.kind === 'image' && attachment.path)
-      const remote = $connection.get()?.mode === 'remote'
 
       for (const attachment of images) {
         if (attachment.attachedSessionId === sessionId) {
           continue
         }
 
-        let result: ImageAttachResponse
-
-        if (remote) {
-          // The gateway is on another machine — it can't read attachment.path
-          // (a path on THIS disk). Upload the bytes via image.attach_bytes.
-          const payload = attachment.path ? await readImageForRemoteAttach(attachment.path) : null
-
-          if (!payload) {
-            const label = attachment.label || (attachment.path ? pathLabel(attachment.path) : 'image')
-            throw new Error(`Could not read ${label}`)
-          }
-
-          result = await requestGateway<ImageAttachResponse>('image.attach_bytes', {
-            session_id: sessionId,
-            content_base64: payload.contentBase64,
-            filename: payload.filename
-          })
-        } else {
-          result = await requestGateway<ImageAttachResponse>('image.attach', {
-            session_id: sessionId,
-            path: attachment.path
-          })
-        }
+        const result = await requestGateway<ImageAttachResponse>('image.attach', {
+          session_id: sessionId,
+          path: attachment.path
+        })
 
         if (!result.attached) {
           const label = attachment.label || (attachment.path ? pathLabel(attachment.path) : 'image')
@@ -483,16 +439,14 @@ export function usePromptActions({
           const sid = sessionHint || activeSessionIdRef.current
           const next = !$yoloActive.get()
 
-          if (!sid) {
-            setYoloActive(next)
-            notify({ kind: 'success', message: next ? copy.yoloArmed : copy.yoloOff })
-
-            return
-          }
-
           try {
-            const active = await setSessionYolo(requestGateway, sid, next)
-            appendSessionTextMessage(sid, 'system', copy.yoloSystem(active))
+            const active = await setDesktopYoloMode(requestGateway, sid, next)
+
+            if (sid) {
+              appendSessionTextMessage(sid, 'system', copy.yoloSystem(active))
+            } else {
+              notify({ kind: 'success', message: active ? copy.yoloArmed : copy.yoloOff })
+            }
           } catch {
             notify({ kind: 'error', title: copy.yoloTitle, message: copy.yoloToggleFailed })
           }
