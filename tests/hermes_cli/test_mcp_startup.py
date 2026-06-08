@@ -164,3 +164,126 @@ def test_init_agent_waits_for_mcp_discovery_before_agent_build(monkeypatch):
     monkeypatch.setattr(cli_mod, "AIAgent", _fake_agent)
 
     assert cli._init_agent() is True
+
+
+# ---------------------------------------------------------------------------
+# ensure_mcp_discovered() — three-case coverage (#38448)
+# ---------------------------------------------------------------------------
+
+def test_ensure_mcp_discovered_noop_inside_async_event_loop(monkeypatch):
+    """Case 1: inside a running asyncio event loop, discover_mcp_tools must NOT be called."""
+    import asyncio
+    from tools.mcp_tool import ensure_mcp_discovered
+
+    called = {"n": 0}
+
+    monkeypatch.setattr(
+        "tools.mcp_tool.discover_mcp_tools",
+        lambda: called.__setitem__("n", called["n"] + 1),
+    )
+
+    async def _run():
+        ensure_mcp_discovered()
+
+    asyncio.run(_run())
+    assert called["n"] == 0, "discover_mcp_tools must not be called inside an event loop"
+
+
+def test_ensure_mcp_discovered_joins_background_thread_without_direct_call(monkeypatch):
+    """Case 2: when a background thread is in flight, join it — don't call discover again."""
+    import time
+    from tools.mcp_tool import ensure_mcp_discovered
+
+    called = {"discover": 0}
+    thread_ran = {"done": False}
+
+    def _slow_discovery():
+        time.sleep(0.05)
+        thread_ran["done"] = True
+
+    thread = threading.Thread(target=_slow_discovery, daemon=True)
+    thread.start()
+    mcp_startup._mcp_discovery_thread = thread
+
+    monkeypatch.setattr(
+        "tools.mcp_tool.discover_mcp_tools",
+        lambda: called.__setitem__("discover", called["discover"] + 1),
+    )
+
+    start = time.monotonic()
+    ensure_mcp_discovered()
+    elapsed = time.monotonic() - start
+
+    assert thread_ran["done"] is True, "ensure_mcp_discovered must wait for background thread"
+    assert elapsed >= 0.04, "should have blocked until thread finished"
+    assert called["discover"] == 0, "discover_mcp_tools must not be called when thread handles it"
+
+
+def test_ensure_mcp_discovered_calls_discover_when_no_thread(monkeypatch):
+    """Case 3: no background thread (batch_runner, delegate_tool, …) → discover synchronously."""
+    from tools.mcp_tool import ensure_mcp_discovered
+
+    called = {"n": 0}
+
+    # Ensure no background thread is set
+    mcp_startup._mcp_discovery_thread = None
+
+    monkeypatch.setattr(
+        "tools.mcp_tool.discover_mcp_tools",
+        lambda: called.__setitem__("n", called["n"] + 1),
+    )
+
+    ensure_mcp_discovered()
+    assert called["n"] == 1, "discover_mcp_tools must be called when no background thread exists"
+
+
+def test_init_agent_calls_ensure_mcp_discovered(monkeypatch):
+    """Integration: init_agent() must call ensure_mcp_discovered() so that all
+    AIAgent construction paths — oneshot, batch_runner, delegate_tool, etc. —
+    get MCP tools without each entry point handling it explicitly (#38448).
+    """
+    import tools.mcp_tool as mcp_tool_mod
+    from agent import agent_init
+
+    called = {"n": 0}
+
+    monkeypatch.setattr(mcp_tool_mod, "ensure_mcp_discovered", lambda: called.__setitem__("n", called["n"] + 1))
+
+    stub = types.SimpleNamespace()
+    try:
+        agent_init.init_agent(stub, model="test-model", quiet_mode=True)
+    except Exception:
+        # init_agent may fail later (no real provider) — that's fine
+        pass
+
+    assert called["n"] == 1, "init_agent must call ensure_mcp_discovered exactly once"
+
+
+def test_ensure_mcp_discovered_oneshot_path_joins_thread_not_double_calls(monkeypatch):
+    """Regression for the hermes -z race: background thread started by main.py,
+    then init_agent runs immediately. ensure_mcp_discovered must join the thread
+    rather than calling discover_mcp_tools concurrently.
+    """
+    import time
+    from tools.mcp_tool import ensure_mcp_discovered
+
+    direct_calls = {"n": 0}
+    thread_done = {"v": False}
+
+    def _slow_discovery():
+        time.sleep(0.05)
+        thread_done["v"] = True
+
+    thread = threading.Thread(target=_slow_discovery, daemon=True)
+    thread.start()
+    mcp_startup._mcp_discovery_thread = thread
+
+    monkeypatch.setattr(
+        "tools.mcp_tool.discover_mcp_tools",
+        lambda: direct_calls.__setitem__("n", direct_calls["n"] + 1),
+    )
+
+    ensure_mcp_discovered()
+
+    assert thread_done["v"] is True, "must have waited for the background thread"
+    assert direct_calls["n"] == 0, "must not call discover_mcp_tools directly when thread handles it"

@@ -271,6 +271,17 @@ def init_agent(
     """
     _install_safe_stdio()
 
+    # Ensure MCP tools are registered before the agent resolves its tool list.
+    # In gateway/ACP paths this is a no-op (event loop already running, discovery
+    # was done at startup via run_in_executor).  In all other paths — oneshot,
+    # batch_runner, delegate_tool, background_review, curator, etc. — this
+    # guarantees MCP servers are connected without each caller having to remember.
+    try:
+        from tools.mcp_tool import ensure_mcp_discovered
+        ensure_mcp_discovered()
+    except Exception:
+        pass
+
     agent.model = model
     agent.max_iterations = max_iterations
     # Shared iteration budget — parent creates, children inherit.
