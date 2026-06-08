@@ -460,6 +460,7 @@ def run_conversation(
     agent._incomplete_scratchpad_retries = 0
     agent._codex_incomplete_retries = 0
     agent._thinking_prefill_retries = 0
+    agent._malformed_final_retries = 0
     agent._post_tool_empty_retried = False
     agent._last_content_with_tools = None
     agent._last_content_tools_all_housekeeping = False
@@ -708,6 +709,7 @@ def run_conversation(
                 # context loss.
                 agent._empty_content_retries = 0
                 agent._thinking_prefill_retries = 0
+                agent._malformed_final_retries = 0
                 agent._last_content_with_tools = None
                 agent._last_content_tools_all_housekeeping = False
                 agent._mute_post_response = False
@@ -4071,6 +4073,7 @@ def run_conversation(
                 if _had_prefill:
                     agent._thinking_prefill_retries = 0
                     agent._empty_content_retries = 0
+                    agent._malformed_final_retries = 0
                 # Successful tool execution — reset the post-tool nudge
                 # flag so it can fire again if the model goes empty on
                 # a LATER tool round.
@@ -4463,6 +4466,76 @@ def run_conversation(
                 # Reset retry counter/signature on successful content
                 agent._empty_content_retries = 0
                 agent._thinking_prefill_retries = 0
+
+                malformed_final_reason = agent._detect_malformed_tool_final_response(
+                    final_response,
+                    finish_reason,
+                    messages,
+                )
+                if malformed_final_reason:
+                    agent._malformed_final_retries += 1
+                    logger.warning(
+                        "Malformed final response after tool calls (%s) — "
+                        "recovery attempt %d (model=%s provider=%s)",
+                        malformed_final_reason,
+                        agent._malformed_final_retries,
+                        agent.model,
+                        agent.provider,
+                    )
+                    agent._buffer_status(
+                        "⚠️ Model returned a malformed final response after "
+                        f"tool calls — retrying ({agent._malformed_final_retries}/2)"
+                    )
+                    if agent._malformed_final_retries == 1:
+                        recovery_msg = agent._build_assistant_message(
+                            assistant_message,
+                            finish_reason,
+                        )
+                        recovery_msg["content"] = "[malformed final response omitted]"
+                        recovery_msg["_malformed_final_recovery_synthetic"] = True
+                        messages.append(recovery_msg)
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "The previous final response was malformed. "
+                                "Regenerate a concise, complete final answer "
+                                "from the tool results above. Do not repeat "
+                                "punctuation or stop mid-word."
+                            ),
+                            "_malformed_final_recovery_synthetic": True,
+                        })
+                        agent._session_messages = messages
+                        continue
+
+                    if agent._fallback_chain:
+                        agent._buffer_status(
+                            "⚠️ Malformed final response repeated — "
+                            "switching to fallback provider..."
+                        )
+                        if agent._try_activate_fallback():
+                            agent._buffer_status(
+                                f"↻ Switched to fallback: {agent.model} "
+                                f"({agent.provider})"
+                            )
+                            continue
+
+                    agent._flush_status_buffer()
+                    _turn_exit_reason = "malformed_final_exhausted"
+                    assistant_msg = agent._build_assistant_message(
+                        assistant_message,
+                        finish_reason,
+                    )
+                    assistant_msg["content"] = "(malformed final response)"
+                    assistant_msg["_malformed_final_recovery_synthetic"] = True
+                    messages.append(assistant_msg)
+                    final_response = (
+                        "Model returned a malformed final response after "
+                        "tool calls and recovery was exhausted. Try again "
+                        "or switch providers."
+                    )
+                    break
+
+                agent._malformed_final_retries = 0
                 # Successful content reached — drop any buffered retry
                 # status from earlier failed attempts in this turn.
                 agent._clear_status_buffer()
@@ -4515,6 +4588,7 @@ def run_conversation(
                         messages[-1].get("_thinking_prefill")
                         or messages[-1].get("_empty_recovery_synthetic")
                         or messages[-1].get("_empty_terminal_sentinel")
+                        or messages[-1].get("_malformed_final_recovery_synthetic")
                     )
                 ):
                     messages.pop()
