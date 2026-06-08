@@ -1262,6 +1262,61 @@ class TestLeaseLoserBehavior:
         assert intent_on_disk is not None
         assert intent_on_disk["request_id"] == request_id
 
+    def test_loser_through_main_preserves_winner(
+        self, worker_env, monkeypatch
+    ):
+        """P0-2: Loser going through main() must NOT delete winner's
+        intent/status/lease.  This exercises the real code path including
+        main()'s exception handling (SystemExit bypasses except Exception).
+
+        Unlike the tests above which call _run_restart_transaction directly,
+        this test calls main() end-to-end without mocking cleanup_intent.
+        """
+        from hermes_cli.gateway_windows_restart_worker import main
+        from hermes_cli.gateway_restart_state import (
+            RestartLock, create_intent, read_intent, read_status, write_status,
+        )
+
+        disk_intent = create_intent(profile="default", target_pid=1234,
+                                    origin="test")
+        request_id = disk_intent["request_id"]
+        nonce = disk_intent["nonce"]
+
+        # Winner claims the lease and writes a status
+        winner_lock = RestartLock("default")
+        assert winner_lock.try_acquire(request_id) is True
+        assert winner_lock.claim_lease(request_id, nonce) is True
+        write_status("default", "preflight_ok", request_id=request_id,
+                     old_pid=1234)
+
+        # Loser calls main() — must NOT mock cleanup_intent
+        monkeypatch.setattr(
+            "hermes_cli.gateway_restart_state._pid_exists",
+            lambda pid: False,
+        )
+        monkeypatch.setattr(sys, "argv", [
+            "worker", "--profile", "default", "--request-id", request_id,
+        ])
+
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+
+        # Winner's intent must survive
+        intent_on_disk = read_intent("default", request_id)
+        assert intent_on_disk is not None
+        assert intent_on_disk["request_id"] == request_id
+
+        # Winner's status must survive
+        status_on_disk = read_status("default", request_id)
+        assert status_on_disk is not None
+        assert status_on_disk["state"] == "preflight_ok"
+
+        # Winner's lease must survive
+        from hermes_cli.gateway_restart_state import lease_path
+        lp = lease_path("default", request_id)
+        assert lp.exists(), "Loser must NOT delete winner's lease file"
+
 
 # ===========================================================================
 # P0-3: Only lease winner writes consumed/claimed state

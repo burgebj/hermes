@@ -63,6 +63,7 @@ def main() -> None:
         # P0-8: Write failed status on ANY unhandled exception
         from hermes_cli.gateway_restart_state import (
             append_restart_log,
+            cleanup_intent,
             write_status,
         )
         write_status(profile, "failed", request_id=request_id, error=str(exc))
@@ -70,14 +71,21 @@ def main() -> None:
             request_id=request_id, profile=profile, old_pid=old_pid,
             origin=origin, state="failed", error=f"unhandled: {exc}",
         )
-        sys.exit(1)
-    finally:
-        # P0-8: Cleanup in finally — only OUR resources
-        from hermes_cli.gateway_restart_state import cleanup_intent
+        # Clean up only on genuine exceptions (not SystemExit from loser path).
+        # _run_restart_transaction's own finally handles winner cleanup;
+        # _fail_closed handles invalid-request cleanup.
         try:
             cleanup_intent(profile, request_id)
         except Exception:
             pass
+        sys.exit(1)
+    # NOTE: No blanket finally:cleanup_intent here.
+    # - Winner cleanup: _run_restart_transaction inner finally (L175-182)
+    # - Invalid-request cleanup: _fail_closed() does its own cleanup
+    # - Loser (SystemExit from claim_lease failure): must NOT cleanup
+    #   because the winner is actively using the same request directory.
+    # A blanket finally would delete winner's resources when the loser's
+    # sys.exit(1) triggers it (SystemExit bypasses except Exception).
 
 
 def _run_restart_transaction(
