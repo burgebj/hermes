@@ -205,10 +205,9 @@ def _get_command_timeout() -> int:
     cached after the first call and cleared by ``cleanup_all_browsers()``.
     """
     global _cached_command_timeout, _command_timeout_resolved
-    if _command_timeout_resolved:
-        return _cached_command_timeout  # type: ignore[return-value]
+    if _command_timeout_resolved and _cached_command_timeout is not None:
+        return _cached_command_timeout
 
-    _command_timeout_resolved = True
     result = DEFAULT_COMMAND_TIMEOUT
     try:
         from hermes_cli.config import read_raw_config
@@ -218,8 +217,24 @@ def _get_command_timeout() -> int:
             result = max(int(val), 5)  # Floor at 5s to avoid instant kills
     except Exception as e:
         logger.debug("Could not read command_timeout from config: %s", e)
+    # Assign the cached value BEFORE flipping the resolved flag so a
+    # concurrent reader cannot observe ``resolved=True`` while the cache
+    # is still ``None`` (see issue #14331).
     _cached_command_timeout = result
+    _command_timeout_resolved = True
     return result
+
+
+def _safe_command_timeout() -> int:
+    """Like ``_get_command_timeout`` but guaranteed non-None.
+
+    Defense in depth against the race fixed in ``_get_command_timeout``:
+    if anything ever returns ``None`` (e.g. cache reset mid-flight), fall
+    back to ``DEFAULT_COMMAND_TIMEOUT``. Uses ``is not None`` rather than
+    ``or`` so a legitimately configured ``0`` is preserved.
+    """
+    val = _get_command_timeout()
+    return val if val is not None else DEFAULT_COMMAND_TIMEOUT
 
 
 def _get_vision_model() -> Optional[str]:
@@ -1898,7 +1913,7 @@ def _run_browser_command(
         Parsed JSON response from agent-browser
     """
     if timeout is None:
-        timeout = _get_command_timeout()
+        timeout = _safe_command_timeout()
     args = args or []
 
     # Build the command
@@ -2389,7 +2404,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         session_info["_first_nav"] = False
         _maybe_start_recording(nav_session_key)
 
-    result = _run_browser_command(nav_session_key, "open", [url], timeout=max(_get_command_timeout(), 60))
+    result = _run_browser_command(nav_session_key, "open", [url], timeout=max(_safe_command_timeout(), 60))
 
     # Remember which session served this nav so snapshot/click/fill/...
     # on the same task_id hit it (critical when hybrid routing has both a
@@ -3534,8 +3549,10 @@ def cleanup_all_browsers() -> None:
     _cached_agent_browser = None
     _agent_browser_resolved = False
     _discover_homebrew_node_dirs.cache_clear()
-    _cached_command_timeout = None
+    # Flip the resolved flag BEFORE nulling the cache so a concurrent
+    # reader never sees ``resolved=True`` with ``cache=None`` (#14331).
     _command_timeout_resolved = False
+    _cached_command_timeout = None
     _cached_chromium_installed = None
     _cached_browser_engine = None
     _browser_engine_resolved = False
