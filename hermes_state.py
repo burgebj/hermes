@@ -1753,10 +1753,18 @@ class SessionDB:
                 )
                 SELECT s.*,
                     COALESCE(
-                        (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
-                         FROM messages m
-                         WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
-                         ORDER BY m.timestamp, m.id LIMIT 1),
+                        CASE
+                            WHEN s.source IN ('whatsapp', 'telegram', 'discord', 'slack', 'signal', 'matrix', 'email', 'sms', 'bluebubbles', 'weixin', 'wecom', 'feishu', 'dingtalk') THEN
+                                (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
+                                 FROM messages m
+                                 WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                                 ORDER BY m.timestamp DESC, m.id DESC LIMIT 1)
+                            ELSE
+                                (SELECT SUBSTR(REPLACE(REPLACE(m.content, X'0A', ' '), X'0D', ' '), 1, 63)
+                                 FROM messages m
+                                 WHERE m.session_id = s.id AND m.role = 'user' AND m.content IS NOT NULL
+                                 ORDER BY m.timestamp, m.id LIMIT 1)
+                        END,
                         ''
                     ) AS _preview_raw,
                     COALESCE(

@@ -2652,6 +2652,24 @@ class TestListSessionsRich:
             s["id"] for s in db.list_sessions_rich(limit=5, order_by_last_active=True)
         ] == ["old", "new"]
 
+    def test_order_by_last_active_uses_latest_user_preview_for_gateway_sessions(self, db):
+        db.create_session("wa", "whatsapp")
+        db.append_message("wa", "user", "Whats the hostname")
+        db.append_message("wa", "assistant", "DESKTOP")
+        db.append_message("wa", "user", "Why my WhatsApp conversations dont appear")
+
+        sessions = db.list_sessions_rich(order_by_last_active=True)
+        assert sessions[0]["preview"] == "Why my WhatsApp conversations dont appear"
+
+    def test_order_by_last_active_keeps_first_user_preview_for_local_sessions(self, db):
+        db.create_session("cli", "tui")
+        db.append_message("cli", "user", "Initial local task")
+        db.append_message("cli", "assistant", "Working")
+        db.append_message("cli", "user", "Later local follow-up")
+
+        sessions = db.list_sessions_rich(order_by_last_active=True)
+        assert sessions[0]["preview"] == "Initial local task"
+
     def test_order_by_last_active_uses_compression_tip_activity(self, db):
         """A compression root whose tip was touched recently must rank above
         a newer uncompressed session, even when that tip activity lives in a

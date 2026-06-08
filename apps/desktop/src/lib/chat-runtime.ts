@@ -51,8 +51,35 @@ export function createClientSessionState(
   }
 }
 
+const GATEWAY_SESSION_SOURCES = new Set([
+  'whatsapp',
+  'telegram',
+  'discord',
+  'slack',
+  'signal',
+  'matrix',
+  'email',
+  'sms',
+  'bluebubbles',
+  'weixin',
+  'wecom',
+  'feishu',
+  'dingtalk'
+])
+
 export function sessionTitle(session: SessionInfo): string {
-  return session.title?.trim() || session.preview?.trim() || 'Untitled session'
+  const title = session.title?.trim()
+  const preview = session.preview?.trim()
+
+  // Gateway chats often reuse one long session per external conversation, so a
+  // generated title from the first turn ("Hostname…") quickly becomes stale.
+  // Prefer the live preview for messaging sessions so WhatsApp/Telegram rows
+  // describe the current thread instead of hiding under an old title.
+  if (session.source && GATEWAY_SESSION_SOURCES.has(session.source) && preview) {
+    return preview
+  }
+
+  return title || preview || 'Untitled session'
 }
 
 export function coerceGatewayText(value: unknown): string {
