@@ -76,6 +76,53 @@ class _ThreadContextCache:
     parent_text: str = ""  # Raw text of the thread parent (for reply_to_text injection)
 
 
+_SLACK_MEETING_THREAD_TS_RE = re.compile(r"^\d+\.\d+$")
+_SLACK_MEETING_ACTION_ID_TO_CONTROL = {
+    "hermes_meeting_start": "start",
+    "hermes_meeting_next": "next",
+    "hermes_meeting_close": "close",
+}
+_SLACK_MEETING_CONTROL_TO_DISPATCH_ACTION = {
+    "start": "start_meeting_control",
+    "next": "next_turn_control",
+    "close": "close_meeting_control",
+}
+
+
+class SlackMeetingControlError(Exception):
+    """Slack meeting-control boundary contract violation."""
+
+    def __init__(self, code: str, message: str, **extra: Any) -> None:
+        self.code = code
+        self.message = message
+        self.extra = dict(extra)
+        self.errors = [{"code": code, "message": message, **self.extra}]
+        super().__init__(json.dumps(self.errors, ensure_ascii=False))
+
+
+def _slack_meeting_bool(value: Any, *, default: bool = False) -> bool:
+    """Parse a bool-ish Slack meeting-control setting."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off", ""}:
+            return False
+        return default
+    return bool(value)
+
+
+def _slack_meeting_id_set(raw: Any) -> set[str]:
+    """Normalize a list/CSV scalar into a set of Slack user IDs."""
+    if raw is None:
+        return set()
+    if isinstance(raw, (list, tuple, set)):
+        return {str(item).strip() for item in raw if str(item).strip()}
+    return {part.strip() for part in str(raw).split(",") if part.strip()}
+
+
 def check_slack_requirements() -> bool:
     """Check if Slack dependencies are available.
 
@@ -370,6 +417,12 @@ class SlackAdapter(BasePlatformAdapter):
         self._socket_watchdog_task: Optional[asyncio.Task] = None
         self._socket_reconnect_lock = asyncio.Lock()
         self._socket_watchdog_interval_s = 15.0
+        # Meeting-room Block Kit controls. These are a thin boundary only:
+        # feature-flagged off by default and never routed into the agent or
+        # execution lane from a button click.
+        self._meeting_control_dispatches: List[Dict[str, Any]] = []
+        self._meeting_control_thread_state: Dict[str, str] = {}
+        self._meeting_control_seen_actions: set[str] = set()
 
     def _start_socket_mode_handler(self) -> None:
         """Start the Slack Socket Mode background task."""
@@ -943,6 +996,12 @@ class SlackAdapter(BasePlatformAdapter):
                 "hermes_confirm_cancel",
             ):
                 self._app.action(_action_id)(self._handle_slash_confirm_action)
+
+            # Register meeting-room controls. The handler is intentionally
+            # default-off and allowlist-gated, so registering these action IDs
+            # does not enable the feature by itself.
+            for _action_id in _SLACK_MEETING_ACTION_ID_TO_CONTROL:
+                self._app.action(_action_id)(self._handle_meeting_control_action)
 
             # Bring up the handler and watchdog atomically. ``_running`` only
             # flips to True after the handler is alive so the watchdog loop
@@ -2641,6 +2700,333 @@ class SlackAdapter(BasePlatformAdapter):
             self._reacting_message_ids.add(ts)
 
         await self.handle_message(msg_event)
+
+    # ----- Meeting-room controls (Block Kit) -----
+
+    def _slack_meeting_controls_enabled(self) -> bool:
+        """Return whether Slack meeting-room controls are enabled.
+
+        Safe default is off. Set ``gateway.slack.extra.meeting_controls_enabled``
+        or ``SLACK_MEETING_CONTROLS_ENABLED`` truthy to enable the boundary.
+        """
+        raw = self.config.extra.get("meeting_controls_enabled")
+        if raw is None:
+            raw = os.getenv("SLACK_MEETING_CONTROLS_ENABLED")
+        return _slack_meeting_bool(raw, default=False)
+
+    def _slack_meeting_control_allowed_users(self) -> set[str]:
+        """Return the allowlist for Slack meeting control clicks.
+
+        A non-empty allowlist is required once the feature flag is enabled.
+        ``SLACK_ALLOWED_USERS`` is accepted as a fallback so operators can reuse
+        the existing Slack approval-button authorization surface, but the
+        meeting-control feature itself still remains separately default-off.
+        """
+        raw = self.config.extra.get("meeting_control_allowed_users")
+        if raw is None:
+            raw = self.config.extra.get("meeting_controls_allowed_users")
+        if raw is None:
+            raw = os.getenv("SLACK_MEETING_CONTROL_ALLOWED_USERS")
+        if raw is None:
+            raw = os.getenv("SLACK_ALLOWED_USERS")
+        return _slack_meeting_id_set(raw)
+
+    @staticmethod
+    def _meeting_control_decision(
+        action: str,
+        *,
+        normalized: Optional[Dict[str, Any]] = None,
+        dispatched: bool = False,
+        warnings: Optional[List[Dict[str, Any]]] = None,
+        errors: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "action": action,
+            "normalized": normalized,
+            "dispatched": dispatched,
+            "warnings": warnings or [],
+            "errors": errors or [],
+        }
+
+    @staticmethod
+    def _meeting_control_warning(code: str, message: str, **extra: Any) -> Dict[str, Any]:
+        item = {"code": code, "message": message}
+        item.update(extra)
+        return item
+
+    @staticmethod
+    def _required_meeting_object(
+        owner: Dict[str, Any],
+        field_name: str,
+        required: set[str],
+        code: str,
+    ) -> Dict[str, Any]:
+        value = owner.get(field_name)
+        if not isinstance(value, dict):
+            raise SlackMeetingControlError(
+                f"{field_name}_not_object",
+                f"Slack meeting-control field {field_name} must be an object.",
+            )
+        missing = sorted(required - set(value))
+        if missing:
+            raise SlackMeetingControlError(
+                code,
+                f"Slack meeting-control field {field_name} is missing required fields.",
+                fields=missing,
+            )
+        return value
+
+    @staticmethod
+    def _parse_meeting_action_value(raw: Any) -> Dict[str, Any]:
+        if not isinstance(raw, str):
+            raise SlackMeetingControlError(
+                "action_value_not_string",
+                "Slack meeting-control action value must be a JSON string.",
+            )
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SlackMeetingControlError(
+                "invalid_action_value_json",
+                "Slack meeting-control action value JSON failed to parse.",
+                line=exc.lineno,
+                col=exc.colno,
+                detail=exc.msg,
+            ) from exc
+        if not isinstance(value, dict):
+            raise SlackMeetingControlError(
+                "action_value_not_object",
+                "Slack meeting-control action value JSON must decode to an object.",
+            )
+        required = {"meeting_id", "control", "session_key"}
+        missing = sorted(required - set(value))
+        if missing:
+            raise SlackMeetingControlError(
+                "missing_action_value_fields",
+                "Slack meeting-control action value is missing required routing fields.",
+                fields=missing,
+            )
+        return value
+
+    def _normalize_meeting_control_payload(
+        self,
+        body: Dict[str, Any],
+        action: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Normalize and validate a Slack meeting-control Block Kit action."""
+        if not isinstance(body, dict):
+            raise SlackMeetingControlError("payload_not_object", "Slack action body must be an object.")
+        if not isinstance(action, dict):
+            raise SlackMeetingControlError("action_not_object", "Slack action must be an object.")
+        if body.get("type") != "block_actions":
+            raise SlackMeetingControlError(
+                "invalid_payload_type",
+                "Only Slack block_actions payloads are accepted for meeting controls.",
+                value=body.get("type"),
+            )
+
+        user = self._required_meeting_object(body, "user", {"id"}, "missing_user_fields")
+        channel = self._required_meeting_object(body, "channel", {"id"}, "missing_channel_fields")
+        message = self._required_meeting_object(body, "message", {"ts"}, "missing_message_fields")
+        container = self._required_meeting_object(body, "container", {"thread_ts"}, "missing_container_fields")
+
+        action_missing = sorted({"type", "action_id", "action_ts", "value"} - set(action))
+        if action_missing:
+            raise SlackMeetingControlError(
+                "missing_action_fields",
+                "Slack meeting-control action is missing required fields.",
+                fields=action_missing,
+            )
+        if action.get("type") != "button":
+            raise SlackMeetingControlError(
+                "invalid_action_type",
+                "Only button actions are accepted for meeting controls.",
+                value=action.get("type"),
+            )
+        action_id = str(action["action_id"])
+        if action_id not in _SLACK_MEETING_ACTION_ID_TO_CONTROL:
+            raise SlackMeetingControlError(
+                "unknown_meeting_action_id",
+                "Unknown Slack meeting-control action id.",
+                value=action_id,
+            )
+
+        thread_ts = str(container["thread_ts"])
+        if not _SLACK_MEETING_THREAD_TS_RE.match(thread_ts):
+            raise SlackMeetingControlError(
+                "invalid_thread_ts",
+                "Slack meeting controls must preserve a real Slack thread_ts, not a synthetic id.",
+                value=thread_ts,
+            )
+
+        value = self._parse_meeting_action_value(action["value"])
+        expected_control = _SLACK_MEETING_ACTION_ID_TO_CONTROL[action_id]
+        if str(value["control"]) != expected_control:
+            raise SlackMeetingControlError(
+                "action_control_mismatch",
+                "Slack meeting-control action_id and value control disagree.",
+                action_id=action_id,
+                value_control=value["control"],
+            )
+
+        channel_id = str(channel["id"])
+        expected_session_key = f"slack:{channel_id}:{thread_ts}"
+        if str(value["session_key"]) != expected_session_key:
+            raise SlackMeetingControlError(
+                "session_key_mismatch",
+                "Slack meeting-control value session_key must match channel.id and container.thread_ts.",
+                expected=expected_session_key,
+                actual=value["session_key"],
+            )
+
+        return {
+            "payload_type": str(body["type"]),
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+            "message_ts": str(message["ts"]),
+            "user_id": str(user["id"]),
+            "action_id": action_id,
+            "action_ts": str(action["action_ts"]),
+            "control": expected_control,
+            "meeting_id": str(value["meeting_id"]),
+            "session_key": expected_session_key,
+            "value_session_key": str(value["session_key"]),
+        }
+
+    def _record_meeting_control_dispatch(self, normalized: Dict[str, Any], *, action: str) -> None:
+        """Record a safe meeting-control dispatch without entering execution."""
+        self._meeting_control_dispatches.append(
+            {
+                "source": "slack_meeting_control_boundary",
+                "action": action,
+                "session_key": normalized.get("session_key"),
+                "channel_id": normalized.get("channel_id"),
+                "thread_ts": normalized.get("thread_ts"),
+                "actor_id": normalized.get("user_id"),
+                "meeting_id": normalized.get("meeting_id"),
+                "execution_allowed": False,
+            }
+        )
+
+    async def _handle_meeting_control_action(self, ack, body, action) -> Dict[str, Any]:
+        """Handle Slack meeting-room Block Kit controls.
+
+        This boundary deliberately does not call ``handle_message`` or any tool /
+        execution primitive. It only validates, gates, and records the control
+        for future meeting-room wiring.
+        """
+        await ack()
+
+        if not self._slack_meeting_controls_enabled():
+            return self._meeting_control_decision(
+                "feature_disabled",
+                warnings=[self._meeting_control_warning("feature_disabled", "Slack meeting controls are disabled.")],
+            )
+
+        allowed_user_ids = self._slack_meeting_control_allowed_users()
+        if not allowed_user_ids:
+            return self._meeting_control_decision(
+                "allowlist_required",
+                warnings=[
+                    self._meeting_control_warning(
+                        "allowlist_required",
+                        "Enabled Slack meeting controls require a non-empty allowlist.",
+                    )
+                ],
+            )
+
+        try:
+            normalized = self._normalize_meeting_control_payload(body, action)
+        except SlackMeetingControlError as exc:
+            logger.warning("[Slack] Meeting-control payload rejected: %s", exc)
+            return self._meeting_control_decision("contract_error", errors=exc.errors)
+
+        user_id = normalized["user_id"]
+        if "*" not in allowed_user_ids and user_id not in allowed_user_ids:
+            return self._meeting_control_decision(
+                "unauthorized_action_ignored",
+                normalized=normalized,
+                warnings=[
+                    self._meeting_control_warning(
+                        "unauthorized_user_action",
+                        "User is not allowlisted for this meeting-control action.",
+                        user_id=user_id,
+                        action_id=normalized["action_id"],
+                        thread_ts=normalized["thread_ts"],
+                    )
+                ],
+            )
+
+        action_key = ":".join(
+            [
+                normalized["channel_id"],
+                normalized["thread_ts"],
+                normalized["user_id"],
+                normalized["action_id"],
+                normalized["action_ts"],
+            ]
+        )
+        if action_key in self._meeting_control_seen_actions:
+            return self._meeting_control_decision(
+                "duplicate_action_ignored",
+                warnings=[
+                    self._meeting_control_warning(
+                        "duplicate_action",
+                        "Duplicate Slack meeting-control action ignored.",
+                        action_id=normalized["action_id"],
+                        action_ts=normalized["action_ts"],
+                        thread_ts=normalized["thread_ts"],
+                    )
+                ],
+            )
+        self._meeting_control_seen_actions.add(action_key)
+
+        thread_ts = normalized["thread_ts"]
+        session_key = normalized["session_key"]
+        thread_state = self._meeting_control_thread_state.get(session_key)
+        control = normalized["control"]
+
+        if thread_state == "closed":
+            return self._meeting_control_decision(
+                "late_action_ignored",
+                normalized=normalized,
+                warnings=[
+                    self._meeting_control_warning(
+                        "late_action_after_close",
+                        "Meeting control action arrived after the thread was closed.",
+                        action_id=normalized["action_id"],
+                        session_key=session_key,
+                        thread_ts=thread_ts,
+                    )
+                ],
+            )
+
+        if control == "start":
+            self._meeting_control_thread_state[session_key] = "active"
+            dispatch_action = _SLACK_MEETING_CONTROL_TO_DISPATCH_ACTION[control]
+            self._record_meeting_control_dispatch(normalized, action=dispatch_action)
+            return self._meeting_control_decision(dispatch_action, normalized=normalized, dispatched=True)
+
+        if not thread_state:
+            return self._meeting_control_decision(
+                "orphan_action_ignored",
+                normalized=normalized,
+                warnings=[
+                    self._meeting_control_warning(
+                        "orphan_action",
+                        "Manual Start must create meeting state before Next/Close controls are accepted.",
+                        action_id=normalized["action_id"],
+                        session_key=session_key,
+                        thread_ts=thread_ts,
+                    )
+                ],
+            )
+
+        if control == "close":
+            self._meeting_control_thread_state[session_key] = "closed"
+        dispatch_action = _SLACK_MEETING_CONTROL_TO_DISPATCH_ACTION[control]
+        self._record_meeting_control_dispatch(normalized, action=dispatch_action)
+        return self._meeting_control_decision(dispatch_action, normalized=normalized, dispatched=True)
 
     # ----- Approval button support (Block Kit) -----
 
