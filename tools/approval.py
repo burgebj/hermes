@@ -44,6 +44,20 @@ _approval_tool_call_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "approval_tool_call_id",
     default="",
 )
+# Per-context "this turn has a live interactive approver" flag.
+#
+# The CLI/TUI signal interactivity with the process-global ``HERMES_INTERACTIVE``
+# env var, which is fine for a single interactive process. ACP, however, runs
+# several sessions concurrently on a shared ThreadPoolExecutor; a process-global
+# env var is racy there (one session's restore can pop the flag while another
+# session's agent is still running, dropping it onto the non-interactive
+# auto-approve path). Surfaces that fan out should set this context-local flag
+# instead — it rides inside the per-session ``contextvars.copy_context()`` and so
+# can never leak across or be cleared out from under a concurrent session.
+_interactive_approval: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "approval_interactive",
+    default=False,
+)
 
 
 def _fire_approval_hook(hook_name: str, **kwargs) -> None:
@@ -82,6 +96,31 @@ def set_current_session_key(session_key: str) -> contextvars.Token[str]:
 def reset_current_session_key(token: contextvars.Token[str]) -> None:
     """Restore the prior approval session key context."""
     _approval_session_key.reset(token)
+
+
+def set_interactive_approval(value: bool = True) -> contextvars.Token[bool]:
+    """Mark the current context as having a live interactive approver.
+
+    Concurrency-safe alternative to setting ``HERMES_INTERACTIVE`` in
+    ``os.environ`` for surfaces (like ACP) that run multiple sessions in
+    parallel. Pair with ``reset_interactive_approval(token)`` in a ``finally``.
+    """
+    return _interactive_approval.set(value)
+
+
+def reset_interactive_approval(token: contextvars.Token[bool]) -> None:
+    """Restore the prior interactive-approval context flag."""
+    _interactive_approval.reset(token)
+
+
+def _is_interactive_approval_context() -> bool:
+    """Return whether an interactive approver is available for this turn.
+
+    True when either the context-local flag is set (ACP and other concurrent
+    surfaces) or the process-global ``HERMES_INTERACTIVE`` env var is set
+    (CLI / TUI / doctor — single-process interactive entrypoints).
+    """
+    return _interactive_approval.get() or env_var_enabled("HERMES_INTERACTIVE")
 
 
 def set_current_observability_context(
@@ -1028,7 +1067,7 @@ def check_dangerous_command(command: str, env_type: str,
     if is_approved(session_key, pattern_key):
         return {"approved": True, "message": None}
 
-    is_cli = env_var_enabled("HERMES_INTERACTIVE")
+    is_cli = _is_interactive_approval_context()
     is_gateway = _is_gateway_approval_context()
 
     if not is_cli and not is_gateway:
@@ -1262,7 +1301,7 @@ def check_all_command_guards(command: str, env_type: str,
     if _YOLO_MODE_FROZEN or is_current_session_yolo_enabled() or approval_mode == "off":
         return {"approved": True, "message": None}
 
-    is_cli = env_var_enabled("HERMES_INTERACTIVE")
+    is_cli = _is_interactive_approval_context()
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
 

@@ -1397,7 +1397,7 @@ class HermesACPAgent(acp.Agent):
         # Approval callback is per-thread (thread-local, GHSA-qg5c-hvr5-hjgr).
         # Set it INSIDE _run_agent so the TLS write happens in the executor
         # thread — setting it here would write to the event-loop thread's TLS,
-        # not the executor's. Also set HERMES_INTERACTIVE so approval.py
+        # not the executor's. Also flag this turn as interactive so approval.py
         # takes the CLI-interactive path (which calls the registered
         # callback via prompt_dangerous_approval) instead of the
         # non-interactive auto-approve branch (GHSA-96vc-wcxf-jjff).
@@ -1405,12 +1405,12 @@ class HermesACPAgent(acp.Agent):
         # callback shape — not the gateway-queue HERMES_EXEC_ASK path,
         # which requires a notify_cb registered in _gateway_notify_cbs.
         previous_approval_cb = None
-        previous_interactive = None
+        interactive_token = None
         edit_approval_token = None
         previous_session_id = None
 
         def _run_agent() -> dict:
-            nonlocal previous_approval_cb, previous_interactive, edit_approval_token, previous_session_id
+            nonlocal previous_approval_cb, interactive_token, edit_approval_token, previous_session_id
             # Bind HERMES_SESSION_KEY for this session so per-session caches
             # (e.g. the interactive sudo password cache in tools.terminal_tool)
             # scope to the ACP session rather than leaking across sessions
@@ -1442,9 +1442,18 @@ class HermesACPAgent(acp.Agent):
                 except Exception:
                     logger.debug("Could not set ACP edit approval requester", exc_info=True)
             # Signal to tools.approval that we have an interactive callback
-            # and the non-interactive auto-approve path must not fire.
-            previous_interactive = os.environ.get("HERMES_INTERACTIVE")
-            os.environ["HERMES_INTERACTIVE"] = "1"
+            # and the non-interactive auto-approve path must not fire. This
+            # rides the per-session contextvars.copy_context() (below) so it
+            # is isolated from concurrent ACP sessions on the shared executor
+            # — unlike the old process-global HERMES_INTERACTIVE env var, whose
+            # non-stack-safe restore could drop the flag out from under another
+            # still-running session and silently auto-approve its dangerous
+            # commands.
+            try:
+                from tools.approval import set_interactive_approval
+                interactive_token = set_interactive_approval(True)
+            except Exception:
+                logger.debug("Could not set ACP interactive approval flag", exc_info=True)
             # Propagate the originating ACP session id to tools that want to
             # tag side-effects with it (e.g. ``kanban_create`` stamps it on
             # the new task so clients can render a per-session board). Save
@@ -1464,11 +1473,13 @@ class HermesACPAgent(acp.Agent):
                 logger.exception("Agent error in session %s", session_id)
                 return {"final_response": f"Error: {e}", "messages": state.history}
             finally:
-                # Restore HERMES_INTERACTIVE.
-                if previous_interactive is None:
-                    os.environ.pop("HERMES_INTERACTIVE", None)
-                else:
-                    os.environ["HERMES_INTERACTIVE"] = previous_interactive
+                # Restore the interactive-approval context flag.
+                if interactive_token is not None:
+                    try:
+                        from tools.approval import reset_interactive_approval
+                        reset_interactive_approval(interactive_token)
+                    except Exception:
+                        logger.debug("Could not reset ACP interactive approval flag", exc_info=True)
                 # Restore HERMES_SESSION_ID symmetrically.
                 if previous_session_id is None:
                     os.environ.pop("HERMES_SESSION_ID", None)

@@ -241,3 +241,84 @@ class TestAcpExecAskGate:
             "GHSA-96vc-wcxf-jjff"
         )
         assert result["approved"] is True
+
+
+class TestAcpInteractiveApprovalIsolation:
+    """Regression: concurrent ACP sessions must not race on the interactivity
+    signal that decides whether dangerous commands need approval.
+
+    The interactive flag used to be the process-global ``HERMES_INTERACTIVE``
+    env var, set/restored around each agent run with a non-stack-safe
+    save/restore. ACP runs sessions concurrently on a shared
+    ``ThreadPoolExecutor``, so the interleaving below was possible:
+
+        session A: save prev=None, set env=1
+        session B: save prev="1", set env=1
+        session A finishes -> finally pops env (saved prev was None)
+        session B still running -> env now unset -> a dangerous command from
+            B's agent takes the non-interactive auto-approve branch and runs
+            WITHOUT ever prompting the editor user.
+
+    The fix replaces the env var with a context-local flag set inside each
+    session's ``contextvars.copy_context()``, so one session's teardown can
+    never clear another's interactivity.
+    """
+
+    def test_session_teardown_does_not_strip_concurrent_interactivity(self, monkeypatch):
+        import contextvars
+
+        from tools.approval import (
+            check_all_command_guards,
+            reset_interactive_approval,
+            set_interactive_approval,
+        )
+
+        # No process-global flags that would independently force a path.
+        for var in (
+            "HERMES_INTERACTIVE",
+            "HERMES_GATEWAY_SESSION",
+            "HERMES_EXEC_ASK",
+            "HERMES_YOLO_MODE",
+            "HERMES_CRON_SESSION",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+        # Two independent per-session contexts, exactly like the executor wraps
+        # each ACP turn in its own copy_context().
+        ctx_a = contextvars.copy_context()
+        ctx_b = contextvars.copy_context()
+
+        tokens: dict[str, object] = {}
+
+        # Session A enters its turn and marks itself interactive.
+        ctx_a.run(lambda: tokens.__setitem__("a", set_interactive_approval(True)))
+        # Session B enters concurrently and marks itself interactive.
+        ctx_b.run(lambda: tokens.__setitem__("b", set_interactive_approval(True)))
+        # Session A finishes and runs its teardown while B is still active.
+        ctx_a.run(lambda: reset_interactive_approval(tokens["a"]))
+
+        # Inside B's still-active context, a dangerous command must still be
+        # gated through B's callback — A's teardown must not have leaked.
+        called: list[str] = []
+
+        def b_callback(command, description, *, allow_permanent=True):
+            called.append(command)
+            return "once"
+
+        result: dict[str, object] = {}
+
+        def _run_dangerous_in_b():
+            result["r"] = check_all_command_guards(
+                "rm -rf /tmp/acp-race-test",
+                "local",
+                approval_callback=b_callback,
+            )
+
+        ctx_b.run(_run_dangerous_in_b)
+        ctx_b.run(lambda: reset_interactive_approval(tokens["b"]))
+
+        assert called, (
+            "session B's dangerous command was auto-approved without consulting "
+            "its approval callback — session A's teardown leaked into B's turn"
+        )
+        assert result["r"]["approved"] is True
