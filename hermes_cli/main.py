@@ -1363,6 +1363,12 @@ def _tui_need_npm_install(root: Path) -> bool:
         return False
     marker = ws_root / "node_modules" / ".package-lock.json"
     if not marker.is_file():
+        # When the prebuilt TUI bundle exists, npm's dependency-tree
+        # verification is unnecessary — the bundle is self-contained.
+        # Avoid forcing a reinstall when .package-lock.json is missing
+        # (e.g. npm crashes during teardown on some Linux environments).
+        if entry.is_file():
+            return False
         return True
 
     # Compare lockfile contents, not mtimes: git checkouts and npm rewrites
@@ -1662,6 +1668,15 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
     should_build = True
     if termux_startup:
         should_build = did_install or termux_need_rebuild
+
+    # When .package-lock.json is missing but the prebuilt bundle exists,
+    # npm is broken (teardown crash on some Linux environments).
+    # Skip the esbuild step — the self-contained bundle is ready to run
+    # and building would fail too.
+    if not did_install and (tui_dir / "dist" / "entry.js").is_file():
+        ws_root = _workspace_root(tui_dir)
+        if not (ws_root / "node_modules" / ".package-lock.json").is_file():
+            should_build = False
 
     if should_build:
         npm = _node_bin("npm")

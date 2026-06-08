@@ -269,6 +269,12 @@ def test_make_tui_argv_keeps_desktop_always_build_behaviour(
     tmp_path: Path, main_mod, monkeypatch
 ) -> None:
     _touch_tui_entry(tmp_path)
+    # Simulate a working npm install — .package-lock.json exists.
+    # When npm is actually broken (no .package-lock.json), the build
+    # is skipped; this test asserts that when npm IS working, desktop
+    # retains its historical "always rebuild" behaviour.
+    (tmp_path / "node_modules").mkdir(exist_ok=True)
+    (tmp_path / "node_modules" / ".package-lock.json").write_text("{}")
     monkeypatch.delenv("TERMUX_VERSION", raising=False)
     monkeypatch.setenv("PREFIX", "/usr")
     monkeypatch.setattr(main_mod, "_tui_need_npm_install", lambda _root: False)
