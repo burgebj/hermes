@@ -367,9 +367,62 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "- If required context is missing, do NOT guess or hallucinate an answer.\n"
     "- Use the appropriate lookup tool when missing information is retrievable "
     "(search_files, web_search, read_file, etc.).\n"
-    "- Ask a clarifying question only when the information cannot be retrieved by tools.\n"
-    "- If you must proceed with incomplete information, label assumptions explicitly.\n"
+    "Ask a clarifying question only when the information cannot be retrieved by tools.\\n"
+    "- If you must proceed with incomplete information, label assumptions explicitly.\\n"
     "</missing_context>"
+)
+
+# ── Unified tool batch execution guidance ─────────────────────────────────
+# Teaches the LLM to batch multiple independent operations into a single
+# unified tool call, drastically reducing turn count.
+BATCH_EXECUTION_GUIDANCE = (
+    "# Efficient tool usage\n"
+    "<tool_batching_strict>\n"
+    "CRITICAL RULE: Every response MUST call as many tools as possible in "
+    "a SINGLE turn. A response that calls only 1 tool when 3+ are needed "
+    "is a FAILURE. Batch all independent operations together.\n"
+    "\n"
+    "<example_batch>\n"
+    'Need to read 3 files? Call filesystem once with paths=[a,b,c]. '
+    'Need to search AND read? Call filesystem once with operations=['
+    '{"type":"search","pattern":"..."}, {"type":"read","paths":[...]}]. '
+    'Need to search web AND read a file? Call research("search") AND '
+    'filesystem("read") in the SAME response — both will run in parallel.\n'
+    "</example_batch>\n"
+    "\n"
+    "<plan_and_execute>\n"
+    "For any task requiring 3+ steps:\n"
+    "1. FIRST (1st response): Scout — gather all information you need "
+    "(read files, search web, examine structure). Batch all scouting "
+    "operations into ONE response. Do NOT spread them across turns.\n"
+    "2. SECOND (2nd response): Plan — write a complete plan as a comment. "
+    "Then execute the ENTIRE plan in one `code` tool call with "
+    'type:"python". Inside execute_code, import from hermes_tools:\n'
+    "   from hermes_tools import read_file, write_file, search_files, terminal\n"
+    "   data = read_file(path='a.py')\n"
+    "   result = search_files(pattern='class', path='src/')\n"
+    "3. FINAL (3rd response): Verify and summarize results.\n"
+    "</plan_and_execute>\n"
+    "\n"
+    "<aggressive_concurrency>\n"
+    "You may call MULTIPLE unified tools in the same response:\n"
+    '- research({"type":"search","query":"..."}) + '
+    'filesystem({"type":"read","paths":["a.py"]}) — parallel!\n'
+    '- browser({"type":"navigate","url":"..."}) + '
+    'browser({"type":"snapshot"}) — batched browser!\n'
+    '- code({"type":"shell","command":"..."}) + '
+    'filesystem({"type":"read","paths":["out.log"]}) — check command output!\n'
+    "The tool executor runs all of them concurrently. Take advantage.\n"
+    "</aggressive_concurrency>\n"
+    "\n"
+    "<never_waste_turns>\n"
+    "- NEVER say 'Let me check...' then wait. Just CALL the tool.\n"
+    "- NEVER respond with a plan when you could execute it. EXECUTE NOW.\n"
+    "- NEVER spread independent reads across turns. Batch them.\n"
+    "- NEVER stop before the task is complete. If more work remains, "
+    "call another tool. Do not summarize mid-task.\n"
+    "</never_waste_turns>\n"
+    "</tool_batching_strict>"
 )
 
 # Gemini/Gemma-specific operational guidance, adapted from OpenCode's gemini.txt.
@@ -385,9 +438,9 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
     "package.json, requirements.txt, Cargo.toml, etc. before importing.\n"
     "- **Conciseness:** Keep explanatory text brief — a few sentences, not "
     "paragraphs. Focus on actions and results over narration.\n"
-    "- **Parallel tool calls:** When you need to perform multiple independent "
-    "operations (e.g. reading several files), make all the tool calls in a "
-    "single response rather than sequentially.\n"
+    "- **Parallel tool calls:** You MUST call all independent tools in a single "
+    "response. Reading 3 files? Call filesystem once with a paths array. "
+    "Searching AND reading? Batch them. NEVER spread across turns.\n"
     "- **Non-interactive commands:** Use flags like -y, --yes, --non-interactive "
     "to prevent CLI tools from hanging on prompts.\n"
     "- **Keep going:** Work autonomously until the task is fully resolved. "

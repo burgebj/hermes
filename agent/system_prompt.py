@@ -40,6 +40,7 @@ from agent.prompt_builder import (
     TASK_COMPLETION_GUIDANCE,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
+    BATCH_EXECUTION_GUIDANCE,
 )
 from agent.runtime_cwd import resolve_context_cwd
 
@@ -199,6 +200,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         skills_prompt = ""
     if skills_prompt:
         stable_parts.append(skills_prompt)
+
+    # Unified batch execution guidance — always injected to teach the LLM
+    # to batch multiple operations and prefer execute_code for multi-step work.
+    stable_parts.append(BATCH_EXECUTION_GUIDANCE)
 
     # Alibaba Coding Plan API always returns "glm-4.7" as model name regardless
     # of the requested model. Inject explicit model identity into the system prompt
