@@ -53,6 +53,14 @@ def test_format_secret_source_suffix_bitwarden_uses_proper_name():
     )
 
 
+def test_format_secret_source_suffix_onepassword_uses_proper_name():
+    env_loader._SECRET_SOURCES["ANTHROPIC_API_KEY"] = "onepassword"
+    assert (
+        env_loader.format_secret_source_suffix("ANTHROPIC_API_KEY")
+        == " (from 1Password)"
+    )
+
+
 def test_format_secret_source_suffix_generic_label_for_future_sources():
     # Future-proofing: a new secret source (e.g. "vault") should still
     # produce a sensible label without needing to edit every call site.
@@ -173,3 +181,90 @@ def test_apply_external_secret_sources_dedupes_within_process(tmp_path, monkeypa
     env_loader.reset_secret_source_cache()
     env_loader._apply_external_secret_sources(tmp_path)
     assert call_count["n"] == 2
+
+
+def test_apply_external_secret_sources_records_onepassword_origin(tmp_path, monkeypatch):
+    """1Password-applied keys are tracked for UI source labels."""
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "secrets:\n"
+        "  onepassword:\n"
+        "    enabled: true\n"
+        "    env:\n"
+        "      ANTHROPIC_API_KEY: op://Vault/Item/field\n",
+        encoding="utf-8",
+    )
+
+    from agent.secret_sources.onepassword import FetchResult
+
+    fake_result = FetchResult(
+        secrets={"ANTHROPIC_API_KEY": "sk-ant-test"},
+        applied=["ANTHROPIC_API_KEY"],
+    )
+
+    def _fake_apply(**_kwargs):
+        return fake_result
+
+    import agent.secret_sources.onepassword as op_module
+
+    monkeypatch.setattr(op_module, "apply_onepassword_secrets", _fake_apply)
+
+    env_loader._apply_external_secret_sources(tmp_path)
+
+    assert env_loader.get_secret_source("ANTHROPIC_API_KEY") == "onepassword"
+    assert (
+        env_loader.format_secret_source_suffix("ANTHROPIC_API_KEY")
+        == " (from 1Password)"
+    )
+
+
+def test_invalid_onepassword_cache_ttl_does_not_block_startup(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "secrets:\n"
+        "  onepassword:\n"
+        "    enabled: true\n"
+        "    cache_ttl_seconds: definitely-not-a-number\n"
+        "    env:\n"
+        "      ANTHROPIC_API_KEY: op://Vault/Item/field\n",
+        encoding="utf-8",
+    )
+
+    from agent.secret_sources.onepassword import FetchResult
+
+    captured = {}
+    fake_result = FetchResult(
+        secrets={"ANTHROPIC_API_KEY": "sk-ant-test"},
+        applied=["ANTHROPIC_API_KEY"],
+    )
+
+    def _fake_apply(**kwargs):
+        captured.update(kwargs)
+        return fake_result
+
+    import agent.secret_sources.onepassword as op_module
+
+    monkeypatch.setattr(op_module, "apply_onepassword_secrets", _fake_apply)
+
+    env_loader._apply_external_secret_sources(tmp_path)
+
+    assert captured["cache_ttl_seconds"] == 300
+    assert env_loader.get_secret_source("ANTHROPIC_API_KEY") == "onepassword"
+
+
+def test_non_dict_secret_source_sections_do_not_block_startup(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "secrets:\n"
+        "  bitwarden: true\n"
+        "  onepassword: true\n",
+        encoding="utf-8",
+    )
+
+    env_loader._apply_external_secret_sources(tmp_path)
+
+    assert env_loader.get_secret_source("ANTHROPIC_API_KEY") is None
