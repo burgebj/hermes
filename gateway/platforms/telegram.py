@@ -508,6 +508,90 @@ class TelegramAdapter(BasePlatformAdapter):
             return {}
         return {"disable_notification": True}
 
+    def _telegram_user_authorized_fallback(self, user_id: Optional[str]) -> bool:
+        """Fail-closed Telegram user authorization fallback."""
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return False
+
+        allowed_csv = os.getenv("TELEGRAM_ALLOWED_USERS", "").strip()
+        if not allowed_csv:
+            # Fail-closed: no allowlist means deny by default.
+            # The runner auth path in _is_user_authorized() handles
+            # GATEWAY_ALLOW_ALL_USERS; this fallback must not silently
+            # allow everyone (fixes #24457).
+            return os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
+        allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
+        return "*" in allowed_ids or normalized_user_id in allowed_ids
+
+    def _telegram_auth_source_from_message(self, message: Message):
+        """Build the minimal source needed for pre-event Telegram auth.
+
+        This intentionally avoids the full MessageEvent path so unauthorized
+        payload text/media cannot be injected before GatewayRunner auth runs.
+        """
+        from gateway.session import SessionSource
+
+        chat = getattr(message, "chat", None)
+        if chat is None:
+            return None
+
+        telegram_chat_type = str(getattr(chat, "type", "")).split(".")[-1].lower()
+        if telegram_chat_type in {"group", "supergroup"}:
+            chat_type = "group"
+        elif telegram_chat_type == "channel":
+            chat_type = "channel"
+        else:
+            chat_type = "dm"
+
+        thread_id_raw = getattr(message, "message_thread_id", None)
+        thread_id = str(thread_id_raw) if thread_id_raw is not None else None
+        user = getattr(message, "from_user", None)
+        user_id = (
+            str(user.id)
+            if user
+            else (str(chat.id) if chat_type in {"dm", "channel"} else None)
+        )
+        user_name = (
+            getattr(user, "full_name", None)
+            if user
+            else (
+                getattr(chat, "full_name", None)
+                if chat_type == "dm"
+                else (getattr(chat, "title", None) if chat_type == "channel" else None)
+            )
+        )
+
+        return SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id=str(getattr(chat, "id", "")),
+            chat_name=getattr(chat, "title", None) or getattr(chat, "full_name", None),
+            chat_type=chat_type,
+            user_id=user_id,
+            user_name=user_name,
+            thread_id=thread_id,
+            message_id=str(getattr(message, "message_id", "")),
+        )
+
+    def _is_message_sender_authorized(self, message: Message) -> bool:
+        """Authorize a raw Telegram message before event construction/batching."""
+        source = self._telegram_auth_source_from_message(message)
+        if source is None:
+            return False
+
+        runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+        auth_fn = getattr(runner, "_is_user_authorized", None)
+        if callable(auth_fn):
+            try:
+                return bool(auth_fn(source))
+            except Exception:
+                logger.warning(
+                    "[Telegram] Message auth failed closed for user %s",
+                    source.user_id,
+                    exc_info=True,
+                )
+        return False
+
     def _is_callback_user_authorized(
         self,
         user_id: str,
@@ -544,21 +628,14 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
                 return bool(auth_fn(source))
             except Exception:
-                logger.debug(
-                    "[Telegram] Falling back to env-only callback auth for user %s",
+                logger.warning(
+                    "[Telegram] Callback auth failed closed for user %s",
                     normalized_user_id,
                     exc_info=True,
                 )
+                return False
 
-        allowed_csv = os.getenv("TELEGRAM_ALLOWED_USERS", "").strip()
-        if not allowed_csv:
-            # Fail-closed: no allowlist means deny by default.
-            # The runner auth path in _is_user_authorized() handles
-            # GATEWAY_ALLOW_ALL_USERS; this fallback must not silently
-            # allow everyone (fixes #24457).
-            return os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
-        allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
-        return "*" in allowed_ids or normalized_user_id in allowed_ids
+        return self._telegram_user_authorized_fallback(normalized_user_id)
 
     @classmethod
     def _metadata_thread_id(cls, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -5191,6 +5268,13 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
+        if not self._is_message_sender_authorized(msg):
+            logger.warning(
+                "[Telegram] Unauthorized sender rejected before message dispatch: chat=%s user=%s",
+                getattr(getattr(msg, "chat", None), "id", "unknown"),
+                getattr(getattr(msg, "from_user", None), "id", None),
+            )
+            return
         if not self._should_process_message(msg):
             if self._should_observe_unmentioned_group_message(msg):
                 self._observe_unmentioned_group_message(msg, MessageType.TEXT, update_id=update.update_id)
@@ -5207,6 +5291,13 @@ class TelegramAdapter(BasePlatformAdapter):
         msg = self._effective_update_message(update)
         if not msg or not msg.text:
             return
+        if not self._is_message_sender_authorized(msg):
+            logger.warning(
+                "[Telegram] Unauthorized sender rejected before command dispatch: chat=%s user=%s",
+                getattr(getattr(msg, "chat", None), "id", "unknown"),
+                getattr(getattr(msg, "from_user", None), "id", None),
+            )
+            return
         if not self._should_process_message(msg, is_command=True):
             return
         await self._ensure_forum_commands(msg)
@@ -5220,6 +5311,13 @@ class TelegramAdapter(BasePlatformAdapter):
         """Handle incoming location/venue pin messages."""
         msg = self._effective_update_message(update)
         if not msg:
+            return
+        if not self._is_message_sender_authorized(msg):
+            logger.warning(
+                "[Telegram] Unauthorized sender rejected before location dispatch: chat=%s user=%s",
+                getattr(getattr(msg, "chat", None), "id", "unknown"),
+                getattr(getattr(msg, "from_user", None), "id", None),
+            )
             return
         if not self._should_process_message(msg):
             if self._should_observe_unmentioned_group_message(msg):
@@ -5402,6 +5500,13 @@ class TelegramAdapter(BasePlatformAdapter):
     async def _handle_media_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming media messages, downloading images to local cache."""
         if not update.message:
+            return
+        if not self._is_message_sender_authorized(update.message):
+            logger.warning(
+                "[Telegram] Unauthorized sender rejected before media dispatch: chat=%s user=%s",
+                getattr(getattr(update.message, "chat", None), "id", "unknown"),
+                getattr(getattr(update.message, "from_user", None), "id", None),
+            )
             return
         if not self._should_process_message(update.message):
             if self._should_observe_unmentioned_group_message(update.message):

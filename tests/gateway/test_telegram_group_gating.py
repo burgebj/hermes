@@ -68,6 +68,7 @@ def _make_adapter(
     adapter.config = PlatformConfig(enabled=True, token="***", extra=extra)
     adapter._bot = SimpleNamespace(id=999, username=bot_username)
     adapter._message_handler = AsyncMock()
+    adapter._message_handler.__self__ = SimpleNamespace(_is_user_authorized=lambda _source: True)
     adapter._pending_text_batches = {}
     adapter._pending_text_batch_tasks = {}
     adapter._text_batch_delay_seconds = 0.01
@@ -77,11 +78,8 @@ def _make_adapter(
     adapter._forum_command_registered = set()
     adapter._active_sessions = {}
     adapter._pending_messages = {}
-    # Trigger-gating tests don't exercise the allowlist gate (added by
-    # #23795 + #24468).  Force-authorize all senders so the trigger logic
-    # under test runs.  Without this, every fake message hits the new
-    # fail-closed auth path and gets dropped before trigger evaluation.
-    adapter._is_callback_user_authorized = lambda user_id, **_kw: True
+    # Trigger-gating tests don't exercise the allowlist gate. Force-authorize
+    # all senders through the same runner-shaped seam as production intake.
     return adapter
 
 

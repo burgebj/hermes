@@ -91,10 +91,10 @@ def telegram_adapter_cls(monkeypatch):
 
 def _make_adapter(telegram_adapter_cls):
     a = telegram_adapter_cls(PlatformConfig(enabled=True, token="***", extra={}))
-    # Channel posts have from_user=None.  After PR #28494's fail-closed
-    # auth, the empty-allowlist adapter rejects all messages including
-    # channel posts.  These tests focus on routing, not auth gating.
-    a._is_callback_user_authorized = lambda user_id, **_kw: True
+    # Channel-post tests focus on routing, so fake senders are authorized
+    # through the same runner-shaped seam as production intake.
+    a._message_handler = AsyncMock()
+    a._message_handler.__self__ = SimpleNamespace(_is_user_authorized=lambda _source: True)
     return a
 
 
