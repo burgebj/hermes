@@ -885,3 +885,44 @@ class TestTeamsStandaloneSend:
         assert "error" in result
         assert "Bot Framework conversation ID" in result["error"]
         assert len(session.calls) == 0
+
+
+class TestExtractTeamsGraphIds:
+    def test_channel_activity_extracts_aad_group_and_channel(self):
+        activity = SimpleNamespace(
+            channel_data=SimpleNamespace(
+                team=SimpleNamespace(
+                    aad_group_id="929251d7-2427-4a4a-a633-435589d4508c",
+                ),
+                channel=SimpleNamespace(
+                    id="19:44dcb7bdc60149c3b0a5a169cbeb98dc@thread.tacv2",
+                ),
+            ),
+        )
+        team_id, channel_id = _teams_mod.extract_teams_graph_ids(
+            activity,
+            conversation_type="channel",
+            conversation_id="19:44dcb7bdc60149c3b0a5a169cbeb98dc@thread.tacv2",
+        )
+        assert team_id == "929251d7-2427-4a4a-a633-435589d4508c"
+        assert channel_id == "19:44dcb7bdc60149c3b0a5a169cbeb98dc@thread.tacv2"
+
+    def test_channel_falls_back_to_conversation_id_without_channel_info(self):
+        activity = SimpleNamespace(channel_data=SimpleNamespace(team=None, channel=None))
+        team_id, channel_id = _teams_mod.extract_teams_graph_ids(
+            activity,
+            conversation_type="channel",
+            conversation_id="19:abc@thread.tacv2",
+        )
+        assert team_id is None
+        assert channel_id == "19:abc@thread.tacv2"
+
+    def test_missing_channel_data_degrades_gracefully(self):
+        activity = SimpleNamespace()
+        team_id, channel_id = _teams_mod.extract_teams_graph_ids(
+            activity,
+            conversation_type="personal",
+            conversation_id="dm-id",
+        )
+        assert team_id is None
+        assert channel_id is None

@@ -116,6 +116,48 @@ def _parse_bool(value: Any, *, default: bool = False) -> bool:
     return default
 
 
+def extract_teams_graph_ids(
+    activity: Any,
+    *,
+    conversation_type: str,
+    conversation_id: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """Parse Graph team/channel ids from Teams ``channelData`` on an inbound activity.
+
+    The microsoft-teams-apps SDK exposes ``activity.channel_data`` with
+    ``team.aad_group_id`` (Graph team / AAD group id) and ``channel.id`` (Graph
+    channel id). There is no ``get_team_details`` helper on the SDK App class —
+    channelData is the zero-permission source of truth for the current scope.
+
+    Returns ``(teams_graph_team_id, teams_graph_channel_id)``. Either value may
+    be ``None`` when channelData is absent (Web Chat / Emulator) or the message
+    is not in a team channel.
+    """
+    teams_graph_team_id: Optional[str] = None
+    teams_graph_channel_id: Optional[str] = None
+    try:
+        channel_data = getattr(activity, "channel_data", None)
+        if channel_data is not None:
+            team = getattr(channel_data, "team", None)
+            if team is not None:
+                raw_team = getattr(team, "aad_group_id", None)
+                if raw_team:
+                    teams_graph_team_id = str(raw_team).strip() or None
+            channel_info = getattr(channel_data, "channel", None)
+            if channel_info is not None:
+                raw_channel = getattr(channel_info, "id", None)
+                if raw_channel:
+                    teams_graph_channel_id = str(raw_channel).strip() or None
+        if conversation_type == "channel" and not teams_graph_channel_id and conversation_id:
+            teams_graph_channel_id = str(conversation_id).strip() or None
+    except Exception:
+        logger.debug(
+            "[teams] Failed to extract Graph ids from channelData; continuing without them",
+            exc_info=True,
+        )
+    return teams_graph_team_id, teams_graph_channel_id
+
+
 def _coerce_port(value: Any, *, default: int = _DEFAULT_PORT) -> int:
     try:
         return int(value)
@@ -770,6 +812,12 @@ class TeamsAdapter(BasePlatformAdapter):
         user_id = getattr(from_account, "aad_object_id", None) or getattr(from_account, "id", "")
         user_name = getattr(from_account, "name", None) or ""
 
+        teams_graph_team_id, teams_graph_channel_id = extract_teams_graph_ids(
+            activity,
+            conversation_type=conv_type,
+            conversation_id=str(getattr(conv, "id", None) or ""),
+        )
+
         source = self.build_source(
             chat_id=conv.id,
             chat_name=getattr(conv, "name", None) or "",
@@ -777,6 +825,9 @@ class TeamsAdapter(BasePlatformAdapter):
             user_id=str(user_id),
             user_name=user_name,
             guild_id=getattr(conv, "tenant_id", None) or self._tenant_id,
+            teams_graph_team_id=teams_graph_team_id,
+            teams_graph_channel_id=teams_graph_channel_id,
+            message_id=str(msg_id) if msg_id else None,
         )
 
         # Handle image attachments

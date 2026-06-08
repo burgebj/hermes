@@ -42,6 +42,20 @@ class TestSessionSourceRoundtrip:
         assert restored.user_name == "alice"
         assert restored.thread_id == "t1"
 
+    def test_teams_graph_ids_roundtrip(self):
+        source = SessionSource(
+            platform=Platform("teams"),
+            chat_id="19:abc@thread.tacv2",
+            chat_type="channel",
+            teams_graph_team_id="929251d7-2427-4a4a-a633-435589d4508c",
+            teams_graph_channel_id="19:44dcb7bdc60149c3b0a5a169cbeb98dc@thread.tacv2",
+        )
+        restored = SessionSource.from_dict(source.to_dict())
+        assert restored.teams_graph_team_id == "929251d7-2427-4a4a-a633-435589d4508c"
+        assert restored.teams_graph_channel_id == (
+            "19:44dcb7bdc60149c3b0a5a169cbeb98dc@thread.tacv2"
+        )
+
     def test_full_roundtrip_with_chat_topic(self):
         """chat_topic should survive to_dict/from_dict roundtrip."""
         source = SessionSource(
@@ -313,6 +327,30 @@ class TestBuildSessionContextPrompt:
 
         assert "Local" in prompt
         assert "machine running this agent" in prompt
+
+    def test_teams_prompt_injects_graph_ids_for_cap_m365(self):
+        config = GatewayConfig(
+            platforms={
+                Platform("teams"): PlatformConfig(enabled=True, extra={}),
+            },
+        )
+        source = SessionSource(
+            platform=Platform("teams"),
+            chat_id="19:chat@thread.v2",
+            chat_name="General",
+            chat_type="channel",
+            user_name="alice",
+            teams_graph_team_id="929251d7-2427-4a4a-a633-435589d4508c",
+            teams_graph_channel_id="19:44dcb7bdc60149c3b0a5a169cbeb98dc@thread.tacv2",
+        )
+        ctx = build_session_context(source, config)
+        prompt = build_session_context_prompt(ctx)
+
+        assert "Teams IDs" in prompt
+        assert "929251d7-2427-4a4a-a633-435589d4508c" in prompt
+        assert "19:44dcb7bdc60149c3b0a5a169cbeb98dc@thread.tacv2" in prompt
+        assert "teams_get_channel_messages" in prompt
+        assert "Never use the 32-hex segment" in prompt
 
     def test_local_delivery_path_uses_display_hermes_home(self):
         config = GatewayConfig()

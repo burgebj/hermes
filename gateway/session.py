@@ -91,6 +91,8 @@ class SessionSource:
     guild_id: Optional[str] = None  # Discord guild / Slack workspace / Matrix server scope
     parent_chat_id: Optional[str] = None  # Parent channel when chat_id refers to a thread
     message_id: Optional[str] = None  # ID of the triggering message (for pin/reply/react)
+    teams_graph_team_id: Optional[str] = None  # Teams: Graph team (AAD group) id from channelData
+    teams_graph_channel_id: Optional[str] = None  # Teams: Graph channel id from channelData
     
     @property
     def description(self) -> str:
@@ -134,6 +136,10 @@ class SessionSource:
             d["parent_chat_id"] = self.parent_chat_id
         if self.message_id:
             d["message_id"] = self.message_id
+        if self.teams_graph_team_id:
+            d["teams_graph_team_id"] = self.teams_graph_team_id
+        if self.teams_graph_channel_id:
+            d["teams_graph_channel_id"] = self.teams_graph_channel_id
         return d
 
     @classmethod
@@ -152,6 +158,8 @@ class SessionSource:
             guild_id=data.get("guild_id"),
             parent_chat_id=data.get("parent_chat_id"),
             message_id=data.get("message_id"),
+            teams_graph_team_id=data.get("teams_graph_team_id"),
+            teams_graph_channel_id=data.get("teams_graph_channel_id"),
         )
     
 
@@ -373,6 +381,33 @@ def build_session_context_prompt(
             "Use target='yuanbao:direct:<account_id>' for DM "
             "and target='yuanbao:group:<group_code>' for group chat."
         )
+    elif context.source.platform.value == "teams":
+        src = context.source
+        id_lines: list[str] = []
+        if src.teams_graph_team_id:
+            id_lines.append(
+                f"  - Team (Graph group) id: `{src.teams_graph_team_id}` "
+                "— use as `team_id` in `teams_get_channel_messages`"
+            )
+        if src.teams_graph_channel_id:
+            id_lines.append(
+                f"  - Channel id: `{src.teams_graph_channel_id}` "
+                "— use as `channel_id` in `teams_get_channel_messages`"
+            )
+        if src.chat_type in ("dm", "group") and src.chat_id:
+            id_lines.append(
+                f"  - Chat id: `{src.chat_id}` — use as `chat_id` in `teams_get_chat_messages`"
+            )
+        if id_lines:
+            lines.extend(
+                [
+                    "",
+                    "**Teams IDs (Microsoft Graph team/channel context):**",
+                    *id_lines,
+                    "  - Never use the 32-hex segment inside a channel id "
+                    "(e.g. `19:<hex>@thread.tacv2`) as `team_id`; it is not the team (group) GUID.",
+                ]
+            )
 
     # Connected platforms
     platforms_list = ["local (files on this machine)"]
