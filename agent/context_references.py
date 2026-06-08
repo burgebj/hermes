@@ -474,20 +474,25 @@ def _iter_visible_entries(path: Path, cwd: Path, limit: int) -> list[Path]:
     return output
 
 
+def _decode_fs_lines(data: bytes) -> list[str]:
+    """Decode subprocess file listings using filesystem semantics."""
+    return [os.fsdecode(line) for line in data.splitlines() if line]
+
+
 def _rg_files(path: Path, cwd: Path, limit: int) -> list[Path] | None:
     try:
         result = subprocess.run(
             ["rg", "--files", str(path.relative_to(cwd))],
             cwd=cwd,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=10,
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
         return None
-    files = [Path(line.strip()) for line in result.stdout.splitlines() if line.strip()]
+    files = [Path(line) for line in _decode_fs_lines(result.stdout)]
     return files[:limit]
 
 
