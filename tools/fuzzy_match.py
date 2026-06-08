@@ -341,7 +341,9 @@ def _apply_replacements(content: str, matches: List[Tuple[int, int]],
 # =============================================================================
 
 def _strategy_exact(content: str, pattern: str) -> List[Tuple[int, int]]:
-    """Strategy 1: Exact string match."""
+    """Strategy 1: Exact string match (non-overlapping)."""
+    if not pattern:
+        return []
     matches = []
     start = 0
     while True:
@@ -349,7 +351,11 @@ def _strategy_exact(content: str, pattern: str) -> List[Tuple[int, int]]:
         if pos == -1:
             break
         matches.append((pos, pos + len(pattern)))
-        start = pos + 1
+        # Advance past the whole match so self-overlapping patterns (e.g.
+        # "\n\n", "aa") don't yield overlapping spans. _apply_replacements
+        # slices the original content at these positions and only produces
+        # correct output for disjoint spans.
+        start = pos + len(pattern)
     return matches
 
 

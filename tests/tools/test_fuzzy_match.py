@@ -167,6 +167,41 @@ class TestReplaceAll:
         assert new == "ccc bbb ccc"
 
 
+class TestSelfOverlappingMatches:
+    """_strategy_exact must return non-overlapping spans, otherwise
+    _apply_replacements splices the original content at positions that
+    overlap and corrupts the file (and over-counts replacements)."""
+
+    def test_exact_spans_do_not_overlap(self):
+        from tools.fuzzy_match import _strategy_exact
+        # "a\n\n\nb" contains "\n\n" once as a disjoint match, not twice.
+        assert _strategy_exact("a\n\n\nb", "\n\n") == [(1, 3)]
+
+    def test_collapse_blank_lines_replace_all(self):
+        # Collapsing a run of blank lines: "\n\n" -> "\n" on a 3-newline run
+        # must replace exactly one disjoint occurrence, not both newlines.
+        new, count, _, err = fuzzy_find_and_replace(
+            "a\n\n\nb", "\n\n", "\n", replace_all=True
+        )
+        assert err is None
+        assert count == 1
+        assert new == "a\n\nb"
+
+    def test_repeated_chars_replace_all(self):
+        # "aa" -> "b" on "aaaa" must match the two disjoint pairs, not three
+        # overlapping ones (which would yield "b" and a wrong count of 3).
+        new, count, _, err = fuzzy_find_and_replace(
+            "aaaa", "aa", "b", replace_all=True
+        )
+        assert err is None
+        assert count == 2
+        assert new == "bb"
+
+    def test_empty_pattern_strategy_returns_no_matches(self):
+        from tools.fuzzy_match import _strategy_exact
+        assert _strategy_exact("abc", "") == []
+
+
 class TestUnicodeNormalized:
     """Tests for the unicode_normalized strategy (Bug 5)."""
 
