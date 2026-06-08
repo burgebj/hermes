@@ -17703,8 +17703,12 @@ class GatewayRunner(GatewayKanbanWatchersMixin):
                             "Gateway auto-title failure suppressed (not user-visible): %s: %s",
                             task, exc,
                         )
+                    from agent.auxiliary_client import _get_task_timeout
+                    _title_timeout = _get_task_timeout("title_generation")
+
                     maybe_auto_title_kwargs = {
                         "failure_callback": _title_failure_cb,
+                        "timeout": _title_timeout,
                         "main_runtime": {
                             "model": getattr(agent, "model", None),
                             "provider": getattr(agent, "provider", None),
