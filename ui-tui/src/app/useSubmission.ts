@@ -359,7 +359,17 @@ export function useSubmission(opts: UseSubmissionOptions) {
           const text = value.startsWith('/') && row.text.startsWith('/') ? row.text.slice(1) : row.text
           const next = value.slice(0, composerState.compReplace) + text
 
-          if (next !== value) {
+          // Completion differs from current input in a meaningful way
+          // (not just trailing whitespace from SlashCommandCompleter).
+          if (next !== value && next.trimEnd() !== value) {
+            // For slash commands: dispatch the completed command directly
+            // instead of just inserting it — the user selected it from the
+            // popup, so one Enter should be enough.
+            if (looksLikeSlashCommand(next)) {
+              composerActions.clearIn()
+              return dispatchSubmission([...composerState.inputBuf, next].join('\n'))
+            }
+
             return composerActions.setInput(next)
           }
         }
