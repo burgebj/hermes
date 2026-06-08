@@ -45,7 +45,9 @@ class TestManagedUvPath:
 
 class TestResolveUv:
     def test_missing_returns_none(self, tmp_path):
-        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path):
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv._candidate_paths", return_value=[]), \
+             patch("hermes_cli.managed_uv.shutil.which", return_value=None):
             from hermes_cli.managed_uv import resolve_uv
             assert resolve_uv() is None
 
@@ -62,9 +64,26 @@ class TestResolveUv:
         uv.write_text("not a binary")
         # Ensure no execute bit
         uv.chmod(0o644)
-        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path):
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv._candidate_paths", return_value=[]), \
+             patch("hermes_cli.managed_uv.shutil.which", return_value=None):
             from hermes_cli.managed_uv import resolve_uv
             assert resolve_uv() is None
+
+    def test_falls_back_to_venv_uv(self, tmp_path):
+        """When the managed uv is missing, resolve_uv falls back to the venv copy."""
+        from hermes_cli.managed_uv import _candidate_paths
+        candidates = _candidate_paths()
+        # Should have at least 4 candidates (managed, venv, ~/.local, ~/.cargo)
+        assert len(candidates) >= 4
+
+    def test_falls_back_to_shutil_which(self, tmp_path):
+        """When no candidate paths have uv, falls back to shutil.which."""
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv._candidate_paths", return_value=[]), \
+             patch("hermes_cli.managed_uv.shutil.which", return_value="/usr/bin/uv"):
+            from hermes_cli.managed_uv import resolve_uv
+            assert resolve_uv() == "/usr/bin/uv"
 
 
 # ---------------------------------------------------------------------------
@@ -80,12 +99,18 @@ class TestEnsureUv:
             assert path == str(tmp_path / "bin" / "uv")
 
     def test_installs_if_missing(self, tmp_path):
+        target = tmp_path / "bin" / "uv"
+
+        def fake_install(t):
+            _make_executable(t)
+
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
-             patch("hermes_cli.managed_uv._install_uv") as mock_install:
-            # Simulate the installer creating the binary
-            def fake_install(target):
-                _make_executable(target)
-            mock_install.side_effect = fake_install
+             patch("hermes_cli.managed_uv._candidate_paths") as mock_candidates, \
+             patch("hermes_cli.managed_uv.shutil.which", return_value=None), \
+             patch("hermes_cli.managed_uv._install_uv", side_effect=fake_install) as mock_install:
+            # First call: no candidates (triggers install)
+            # After install: return the installed path
+            mock_candidates.side_effect = [[], [target]]
 
             from hermes_cli.managed_uv import ensure_uv
             path = ensure_uv()
@@ -94,6 +119,8 @@ class TestEnsureUv:
 
     def test_install_failure_returns_falsy(self, tmp_path):
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv._candidate_paths", return_value=[]), \
+             patch("hermes_cli.managed_uv.shutil.which", return_value=None), \
              patch("hermes_cli.managed_uv._install_uv", side_effect=RuntimeError("network down")):
             from hermes_cli.managed_uv import ensure_uv
             path = ensure_uv()
@@ -143,6 +170,8 @@ class TestEnsureUvUpdateBoundary:
     def test_failure_unpacks_without_raising(self, tmp_path):
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
              patch("hermes_cli.managed_uv.platform.system", return_value="Linux"), \
+             patch("hermes_cli.managed_uv._candidate_paths", return_value=[]), \
+             patch("hermes_cli.managed_uv.shutil.which", return_value=None), \
              patch("hermes_cli.managed_uv._install_uv", side_effect=RuntimeError("network down")):
             from hermes_cli.managed_uv import ensure_uv
             uv_bin, fresh = ensure_uv()
@@ -191,6 +220,8 @@ class TestEnsureUvWindowsSafe:
     def test_windows_failure_returns_none(self, tmp_path):
         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
              patch("hermes_cli.managed_uv.platform.system", return_value="Windows"), \
+             patch("hermes_cli.managed_uv._candidate_paths", return_value=[]), \
+             patch("hermes_cli.managed_uv.shutil.which", return_value=None), \
              patch("hermes_cli.managed_uv._install_uv", side_effect=RuntimeError("network down")):
             from hermes_cli.managed_uv import ensure_uv
             assert ensure_uv() is None
@@ -202,7 +233,9 @@ class TestEnsureUvWindowsSafe:
 
 class TestUpdateManagedUv:
     def test_no_uv_returns_none(self, tmp_path):
-        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path):
+        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
+             patch("hermes_cli.managed_uv._candidate_paths", return_value=[]), \
+             patch("hermes_cli.managed_uv.shutil.which", return_value=None):
             from hermes_cli.managed_uv import update_managed_uv
             assert update_managed_uv() is None
 

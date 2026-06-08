@@ -1,11 +1,18 @@
-"""Managed uv — one path, no guessing.
+"""Managed uv resolution and bootstrap.
 
-Hermes owns its own uv binary at ``$HERMES_HOME/bin/uv`` (or ``uv.exe`` on
-Windows).  Every code path that needs uv resolves it from that single location.
-If the binary is missing, ``ensure_uv()`` bootstraps it via the official
-standalone installer with ``UV_UNMANAGED_INSTALL`` / ``UV_INSTALL_DIR`` pointed
-at ``$HERMES_HOME/bin`` so the installer writes directly there — no PATH
-probing, no conda guards, no multi-location resolution chains.
+``hermes update`` and the other dependency-install paths need a *known-good*
+``uv`` to drive ``uv pip install`` against the Hermes venv. Resolution prefers
+trusted locations and only falls back to PATH when nothing trusted exists:
+
+    1. ``$HERMES_HOME/bin/uv[.exe]``        (our managed copy — preferred)
+    2. ``PROJECT_ROOT/venv/{Scripts,bin}/uv[.exe]``  (the Hermes venv's own uv)
+    3. ``~/.local/bin/uv[.exe]``            (uv's official installer target)
+    4. ``~/.cargo/bin/uv[.exe]``            (cargo-installed uv)
+    5. ``shutil.which("uv")``               (PATH fallback — last resort)
+
+If the managed binary is missing, ``ensure_uv()`` bootstraps it via the
+official standalone installer with ``UV_UNMANAGED_INSTALL`` / ``UV_INSTALL_DIR``
+pointed at ``$HERMES_HOME/bin`` so the installer writes directly there.
 """
 
 from __future__ import annotations
@@ -40,15 +47,38 @@ def managed_uv_path() -> Path:
     return home / "bin" / "uv"
 
 
-def resolve_uv() -> Optional[str]:
-    """Return the managed uv path if it exists, else ``None``.
+def _candidate_paths() -> list[Path]:
+    """Trusted ``uv`` locations, in preference order (managed → PATH)."""
+    exe = "uv.exe" if platform.system() == "Windows" else "uv"
+    bindir = "Scripts" if platform.system() == "Windows" else "bin"
 
-    No side effects — pure lookup.
+    # Project root: hermes_cli/ -> repo root
+    project_root = Path(__file__).resolve().parent.parent
+
+    candidates: list[Path] = [
+        managed_uv_path(),                                      # 1. managed copy
+        project_root / "venv" / bindir / exe,                   # 2. hermes venv own uv
+    ]
+
+    home = Path(os.path.expanduser("~"))
+    candidates += [
+        home / ".local" / "bin" / exe,                          # 3. official installer target
+        home / ".cargo" / "bin" / exe,                          # 4. cargo-installed
+    ]
+    return candidates
+
+
+def resolve_uv() -> Optional[str]:
+    """Return a path to a known-good ``uv``, or ``None`` if none is found.
+
+    Probes the trusted locations first (managed copy, venv, official installer
+    dirs) and only then falls back to ``shutil.which("uv")``. Pure lookup — no
+    install, no network, no side effects. Safe to call from hot paths.
     """
-    p = managed_uv_path()
-    if p.is_file() and os.access(p, os.X_OK):
-        return str(p)
-    return None
+    for cand in _candidate_paths():
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return shutil.which("uv")
 
 
 class _UvResult(str):
