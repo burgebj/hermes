@@ -481,6 +481,35 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     # Azure Foundry: user-provided endpoint and model.
     # Empty list because models depend on the endpoint configuration.
     "azure-foundry": [],
+    "cloudflare": [
+        # 2026 frontier models
+        "@cf/meta/llama-4-scout-17b",
+        "@cf/meta/llama-4-70b",
+        "@cf/meta/llama-3.1-8b-instruct",
+        "@cf/meta/llama-3.1-70b-instruct",
+        "@cf/meta/llama-3-8b-instruct",
+        "@cf/meta/llama-3-70b-instruct",
+        "@cf/mistral/mistral-7b-instruct-v0.1",
+        "@cf/mistral/mistral-small-3.1-24b-instruct-2503",
+        # Google models on CF
+        "@cf/google/gemma-4-26b-a4b-it",
+        "@cf/google/gemma-4-2b-it",
+        "@cf/google/gemma-3-27b-it",
+        "@cf/google/gemma-27b-it",
+        "@cf/google/gemma-7b-it",
+        # Moonshot / Kimi on CF
+        "@cf/moonshotai/kimi-k2.6",
+        "@cf/moonshotai/kimi-k2.5",
+        # NVIDIA on CF
+        "@cf/nvidia/nemotron-mini-4b-instruct",
+        # Hermes fine-tunes
+        "@hf/nousresearch/hermes-2-pro-llama-3-8b",
+        "@hf/nousresearch/hermes-3-llama-3.1-8b",
+        # Open-weight community models
+        "@cf/qwen/qwen1.5-7b-chat-awq",
+        "@cf/qwen/qwen2.5-7b-instruct",
+        "@cf/phi-2/phi-2",
+    ],
     "novita": [
         "moonshotai/kimi-k2.5",
         "minimax/minimax-m2.7",
@@ -1106,6 +1135,8 @@ _PROVIDER_ALIASES = {
     "zen": "opencode-zen",
     "go": "opencode-go",
     "opencode-go-sub": "opencode-go",
+    "cf": "cloudflare",
+    "cloudflare-ai": "cloudflare",
     "kilo": "kilocode",
     "kilo-code": "kilocode",
     "kilo-gateway": "kilocode",
@@ -3286,6 +3317,34 @@ def fetch_api_models(
     be reached (network error, timeout, auth failure, etc.).
     """
     return probe_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode).get("models")
+
+
+def _fetch_cloudflare_models(api_token: str, account_id: str, timeout: float = 8.0) -> Optional[list[str]]:
+    """Fetch Text Generation models from Cloudflare Workers AI search API."""
+    url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/models/search"
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "User-Agent": _HERMES_USER_AGENT,
+    }
+    # Filter for Text Generation models by default
+    params = {"task": "Text Generation", "page": 1, "per_page": 100}
+    try:
+        import httpx
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.get(url, headers=headers, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            result = data.get("result", [])
+            if not isinstance(result, list):
+                return None
+            models = []
+            for m in result:
+                model_id = m.get("id", "")
+                if model_id:
+                    models.append(model_id)
+            return models if models else None
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
