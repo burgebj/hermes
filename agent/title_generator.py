@@ -29,7 +29,7 @@ _TITLE_PROMPT = (
 def generate_title(
     user_message: str,
     assistant_response: str,
-    timeout: float = 30.0,
+    timeout: Optional[float] = None,
     failure_callback: Optional[FailureCallback] = None,
     main_runtime: dict = None,
 ) -> Optional[str]:
@@ -43,6 +43,10 @@ def generate_title(
     auxiliary call raises — the caller typically wires this to
     ``AIAgent._emit_auxiliary_failure`` so the user sees a warning instead
     of silently accumulating untitled sessions.
+
+    ``timeout`` defaults to ``None``, which makes ``call_llm()`` resolve it
+    from ``auxiliary.title_generation.timeout`` in config.yaml (falling
+    back to 30 s).  Pass a float to override programmatically.
     """
     # Truncate long messages to keep the request small
     user_snippet = user_message[:500] if user_message else ""
