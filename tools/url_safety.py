@@ -120,7 +120,7 @@ _TRUSTED_PRIVATE_IP_HOSTS = frozenset({
 # ipaddress.is_private — it returns False for both is_private and is_global.
 # Must be blocked explicitly. Used by carrier-grade NAT, Tailscale/WireGuard
 # VPNs, and some cloud internal networks.
-_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+from agent.networks import CGNAT_NETWORK
 
 # ---------------------------------------------------------------------------
 # Global toggle: allow private/internal IP resolution
@@ -197,7 +197,7 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         return (embedded_ip.is_private or embedded_ip.is_loopback or
                 embedded_ip.is_link_local or embedded_ip.is_reserved or
                 embedded_ip.is_multicast or embedded_ip.is_unspecified or
-                embedded_ip in _CGNAT_NETWORK)
+                embedded_ip in CGNAT_NETWORK)
 
     # Standard IPv4/IPv6 address checking
     if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
@@ -205,7 +205,7 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     if ip.is_multicast or ip.is_unspecified:
         return True
     # CGNAT range not covered by is_private
-    if ip in _CGNAT_NETWORK:
+    if ip in CGNAT_NETWORK:
         return True
     return False
 
