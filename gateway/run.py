@@ -39,6 +39,7 @@ import threading
 import time
 import sqlite3
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
@@ -65,6 +66,16 @@ _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
+# Agent turns run on a dedicated thread pool (see _run_in_executor_with_context)
+# instead of asyncio's default executor. A turn that is parked waiting for a
+# gateway HITL approval (tools/approval.py _await_gateway_decision) blocks its
+# worker thread for up to the approval timeout (default 300s). On the shared
+# default pool (min(32, cpu+4) threads, also used by compression/MCP discovery)
+# enough concurrent pending approvals starve every other session's new turn.
+# A dedicated, larger pool isolates agent turns and gives parked-approval
+# headroom. Override via agent.gateway_max_concurrent_turns / env
+# HERMES_GATEWAY_MAX_CONCURRENT_TURNS.
+_GATEWAY_AGENT_WORKERS_DEFAULT = 64
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
@@ -1927,6 +1938,16 @@ class GatewayRunner:
         self._restart_command_source: Optional[SessionSource] = None
         self._stop_task: Optional[asyncio.Task] = None
         
+        # Dedicated thread pool for agent turns. Kept separate from asyncio's
+        # default executor so a turn parked on a HITL approval (which blocks its
+        # worker thread for up to the approval timeout) cannot starve other
+        # sessions' turns — nor compete with compression / MCP discovery, which
+        # stay on the default pool. See _run_in_executor_with_context.
+        self._agent_executor = ThreadPoolExecutor(
+            max_workers=self._load_agent_executor_workers(),
+            thread_name_prefix="hermes-agent-turn",
+        )
+
         # Track running agents per session for interrupt support
         # Key: session_key, Value: AIAgent instance
         self._running_agents: Dict[str, Any] = {}
@@ -3232,6 +3253,41 @@ class GatewayRunner:
             cfg_get(cfg, "display", "show_reasoning"),
             default=False,
         )
+
+    @staticmethod
+    def _load_agent_executor_workers() -> int:
+        """Load the dedicated agent-turn thread pool size from config/env.
+
+        Precedence: env HERMES_GATEWAY_MAX_CONCURRENT_TURNS, then config
+        agent.gateway_max_concurrent_turns, then _GATEWAY_AGENT_WORKERS_DEFAULT.
+        Invalid or non-positive values fall back to the default (with a warning),
+        so a misconfiguration can never produce a 0-worker (deadlocked) pool.
+        """
+        raw = os.getenv("HERMES_GATEWAY_MAX_CONCURRENT_TURNS", "").strip()
+        if not raw:
+            cfg = _load_gateway_runtime_config()
+            raw = str(
+                cfg_get(cfg, "agent", "gateway_max_concurrent_turns", default="") or ""
+            ).strip()
+        if not raw:
+            return _GATEWAY_AGENT_WORKERS_DEFAULT
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid agent.gateway_max_concurrent_turns '%s', using default %d",
+                raw,
+                _GATEWAY_AGENT_WORKERS_DEFAULT,
+            )
+            return _GATEWAY_AGENT_WORKERS_DEFAULT
+        if value < 1:
+            logger.warning(
+                "agent.gateway_max_concurrent_turns must be >= 1 (got %d), using default %d",
+                value,
+                _GATEWAY_AGENT_WORKERS_DEFAULT,
+            )
+            return _GATEWAY_AGENT_WORKERS_DEFAULT
+        return value
 
     @staticmethod
     def _load_busy_input_mode() -> str:
@@ -6807,6 +6863,14 @@ class GatewayRunner:
                     else 0
                 )
                 self._exit_reason = self._exit_reason or "Gateway restart requested"
+
+            # Tear down the dedicated agent thread pool. Don't block teardown on
+            # in-flight turns (they've already been interrupted above); cancel
+            # any still-queued work so shutdown stays bounded.
+            try:
+                self._agent_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception as e:
+                logger.debug("Agent executor shutdown error: %s", e)
 
             self._draining = False
             self._update_runtime_status("stopped", self._exit_reason)
@@ -15788,10 +15852,18 @@ class GatewayRunner:
         clear_session_vars(tokens)
 
     async def _run_in_executor_with_context(self, func, *args):
-        """Run blocking work in the thread pool while preserving session contextvars."""
+        """Run an agent turn in the dedicated agent thread pool while preserving
+        session contextvars.
+
+        Uses ``self._agent_executor`` (not asyncio's default executor) so a turn
+        parked on a HITL approval can't starve other sessions or contend with
+        compression / MCP discovery. Falls back to the default pool if the
+        executor isn't set up yet (defensive; both call sites run post-__init__).
+        """
         loop = asyncio.get_running_loop()
         ctx = copy_context()
-        return await loop.run_in_executor(None, ctx.run, func, *args)
+        executor = getattr(self, "_agent_executor", None)
+        return await loop.run_in_executor(executor, ctx.run, func, *args)
 
     def _decide_image_input_mode(self) -> str:
         """Resolve the image-input routing for the currently active model.
