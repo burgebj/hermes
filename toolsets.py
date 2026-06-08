@@ -47,13 +47,13 @@ _HERMES_CORE_TOOLS = [
     # Text-to-speech
     "text_to_speech",
     # Planning & memory
-    "todo", "memory",
+    "todo", "memory", "dream",
     # Session history search
     "session_search",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
-    "execute_code", "delegate_task",
+    "execute_code", "delegate_task", "orchestrator",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -187,7 +187,7 @@ TOOLSETS = {
     
     "messaging": {
         "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
-        "tools": ["send_message"],
+        "tools": ["send_message", "webhook_manage"],
         "includes": []
     },
 
@@ -211,8 +211,20 @@ TOOLSETS = {
     },
     
     "memory": {
-        "description": "Persistent memory across sessions (personal notes + user profile)",
-        "tools": ["memory"],
+        "description": "Persistent memory across sessions (personal notes + user profile) + dream consolidation",
+        "tools": ["memory", "dream"],
+        "includes": []
+    },
+
+    "dreaming": {
+        "description": "Memory consolidation: review past sessions and extract durable insights",
+        "tools": ["dream"],
+        "includes": []
+    },
+
+    "sloop": {
+        "description": "Sloop loop system - feedback collection, health dashboard, self-healing, and rubric-based outcome grading",
+        "tools": ["outcomes"],
         "includes": []
     },
 
@@ -242,7 +254,7 @@ TOOLSETS = {
     
     "delegation": {
         "description": "Spawn subagents with isolated context for complex subtasks",
-        "tools": ["delegate_task"],
+        "tools": ["delegate_task", "orchestrator"],
         "includes": []
     },
 
