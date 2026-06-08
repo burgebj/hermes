@@ -32,6 +32,8 @@ from agent.model_metadata import is_local_endpoint
 from agent.message_sanitization import (
     _sanitize_surrogates,
     _repair_tool_call_arguments,
+    repair_tool_call_arguments,
+    _is_mutation_tool,
 )
 from tools.terminal_tool import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname, env_int
@@ -1916,16 +1918,18 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         # Models like GLM-5.1 via Ollama produce trailing
                         # commas, unclosed brackets, Python None, etc.
                         # Without repair, these hit the truncation handler
-                        # and kill the session.  _repair_tool_call_arguments
-                        # returns "{}" for unrepairable args, which is far
-                        # better than a crashed session.
-                        repaired = _repair_tool_call_arguments(arguments, tool_name)
-                        if repaired != "{}":
+                        # and kill the session.
+                        repair_result = repair_tool_call_arguments(arguments, tool_name)
+                        if repair_result["repaired_args"] != "{}":
                             # Successfully repaired — use the fixed args
-                            arguments = repaired
-                        else:
-                            # Unrepairable — flag for truncation handling
+                            arguments = repair_result["repaired_args"]
+                        elif repair_result["unrepairable"] and _is_mutation_tool(tool_name):
+                            # Mutation tool with unrepairable args — keep a
+                            # sanitized preview for structured block result.
                             has_truncated_tool_args = True
+                        else:
+                            # Unrepairable non-mutation tool — use "{}" (legacy).
+                            arguments = "{}"
                 mock_tool_calls.append(SimpleNamespace(
                     id=tc["id"],
                     type=tc["type"],

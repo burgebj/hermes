@@ -279,6 +279,157 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     return "{}"
 
 
+def _is_mutation_tool(tool_name: str) -> bool:
+    """Return True for edit/mutation tools that need structured block results."""
+    return tool_name in {"write_file", "patch", "execute_code"}
+
+
+def repair_tool_call_arguments(
+    raw_args: str,
+    tool_name: str,
+) -> dict:
+    """Attempt to repair malformed tool_call argument JSON.
+
+    Returns a dict with:
+        repaired_args: str — repaired JSON string (always valid JSON or "{}")
+        unrepairable: bool — True if all repair passes failed
+        unrepairable_preview: str | None — truncated preview of bad payload
+        was_empty: bool — True if raw_args was empty/whitespace/None
+
+    For mutation tools (write_file, patch, execute_code), the unrepairable
+    preview is preserved so the caller can emit a structured blocked result
+    instead of silently passing {}.  For other tools, the legacy behavior
+    (unrepairable → "{}") is preserved for backward compatibility.
+    """
+    raw_stripped = raw_args.strip() if isinstance(raw_args, str) else ""
+    was_empty = not raw_stripped
+
+    # Fast-path: empty / whitespace-only -> empty object
+    if was_empty:
+        logger.warning("Sanitized empty tool_call arguments for %s", tool_name)
+        return {
+            "repaired_args": "{}",
+            "unrepairable": False,
+            "unrepairable_preview": None,
+            "was_empty": True,
+        }
+
+    # Python-literal None -> normalise to {}
+    if raw_stripped == "None":
+        logger.warning("Sanitized Python-None tool_call arguments for %s", tool_name)
+        return {
+            "repaired_args": "{}",
+            "unrepairable": False,
+            "unrepairable_preview": None,
+            "was_empty": True,
+        }
+
+    # Repair pass 0: llama.cpp backends sometimes emit literal control
+    # characters (tabs, newlines) inside JSON string values.
+    try:
+        parsed = json.loads(raw_stripped, strict=False)
+        reserialised = json.dumps(parsed, separators=(",", ":"))
+        if reserialised != raw_stripped:
+            logger.warning(
+                "Repaired unescaped control chars in tool_call arguments for %s",
+                tool_name,
+            )
+        return {
+            "repaired_args": reserialised,
+            "unrepairable": False,
+            "unrepairable_preview": None,
+            "was_empty": False,
+        }
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+      # Attempt common JSON repairs
+    fixed = raw_stripped
+    # Strip trailing commas before closing delimiters or at string end
+    fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+    fixed = re.sub(r',\s*$', '', fixed)
+    open_curly = fixed.count('{') - fixed.count('}')
+    open_bracket = fixed.count('[') - fixed.count(']')
+    # Close brackets inside braces to keep valid JSON structure.
+    # Insert closing brackets just before the final closing brace, so
+    # e.g. {"keys": ["a", "b"}  becomes {"keys": ["a", "b"]}.
+    if open_bracket > 0 and fixed.endswith('}'):
+        fixed = fixed[:-1] + ']' * open_bracket + '}'
+    elif open_bracket > 0:
+        fixed += ']' * open_bracket
+    if open_curly > 0:
+        fixed += '}' * open_curly
+    for _ in range(50):
+        try:
+            json.loads(fixed)
+            break
+        except json.JSONDecodeError:
+            if fixed.endswith('}') and fixed.count('}') > fixed.count('{'):
+                fixed = fixed[:-1]
+            elif fixed.endswith(']') and fixed.count(']') > fixed.count('['):
+                fixed = fixed[:-1]
+            else:
+                break
+
+    try:
+        json.loads(fixed)
+        logger.warning(
+            "Repaired malformed tool_call arguments for %s: %s → %s",
+            tool_name, raw_stripped[:80], fixed[:80],
+        )
+        return {
+            "repaired_args": fixed,
+            "unrepairable": False,
+            "unrepairable_preview": None,
+            "was_empty": False,
+        }
+    except json.JSONDecodeError:
+        pass
+
+    # Repair pass 4: escape unescaped control chars inside JSON strings
+    try:
+        escaped = _escape_invalid_chars_in_json_strings(fixed)
+        if escaped != fixed:
+            json.loads(escaped)
+            logger.warning(
+                "Repaired control-char-laced tool_call arguments for %s: %s → %s",
+                tool_name, raw_stripped[:80], escaped[:80],
+            )
+            return {
+                "repaired_args": escaped,
+                "unrepairable": False,
+                "unrepairable_preview": None,
+                "was_empty": False,
+            }
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+    # Last resort — unrepairable.  Preserve a truncated preview for
+    # mutation tools so the caller can emit a structured blocked result
+    # instead of silently replacing args with "{}".
+    unrepairable_preview = raw_stripped[:200]
+    logger.warning(
+        "Unrepairable tool_call arguments for %s — "
+        "replaced with empty object (was: %s)",
+        tool_name, unrepairable_preview[:80],
+    )
+    if _is_mutation_tool(tool_name):
+        # Mutation tools get the truncated preview as repaired_args
+        # so the runtime can detect and block the tool call.
+        return {
+            "repaired_args": unrepairable_preview,
+            "unrepairable": True,
+            "unrepairable_preview": unrepairable_preview,
+            "was_empty": False,
+        }
+    return {
+        "repaired_args": "{}",
+        "unrepairable": True,
+        "unrepairable_preview": None,
+        "was_empty": False,
+    }
+
+
 def _strip_non_ascii(text: str) -> str:
     """Remove non-ASCII characters, replacing with closest ASCII equivalent or removing.
 
@@ -436,6 +587,8 @@ __all__ = [
     "_sanitize_messages_surrogates",
     "_escape_invalid_chars_in_json_strings",
     "_repair_tool_call_arguments",
+    "_is_mutation_tool",
+    "repair_tool_call_arguments",
     "_strip_non_ascii",
     "_sanitize_messages_non_ascii",
     "_sanitize_tools_non_ascii",
