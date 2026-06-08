@@ -2090,6 +2090,89 @@ class SessionDB:
 
         return self._execute_write(_do)
 
+    def append_messages_batch(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+    ) -> int:
+        """Append multiple messages in a single transaction.
+
+        Takes a list of message dicts with keys matching append_message's
+        keyword arguments (role, content, tool_name, tool_calls,
+        tool_call_id, finish_reason, reasoning, reasoning_content,
+        reasoning_details, codex_reasoning_items, codex_message_items).
+
+        Returns the row ID of the last inserted message.
+        All inserts and the session counters update happen atomically
+        in one BEGIN IMMEDIATE / commit pair.
+        """
+        now_ts = time.time()
+        total_tool_calls = 0
+
+        def _do(conn):
+            nonlocal total_tool_calls
+            last_id = None
+            for msg in messages:
+                role = msg.get("role", "unknown")
+                content = msg.get("content")
+                tool_calls = msg.get("tool_calls")
+                tool_call_id = msg.get("tool_call_id")
+                tool_name = msg.get("tool_name")
+                finish_reason = msg.get("finish_reason")
+                reasoning = msg.get("reasoning") if role == "assistant" else None
+                reasoning_content = msg.get("reasoning_content") if role == "assistant" else None
+                reasoning_details = msg.get("reasoning_details") if role == "assistant" else None
+                codex_reasoning_items = msg.get("codex_reasoning_items") if role == "assistant" else None
+                codex_message_items = msg.get("codex_message_items") if role == "assistant" else None
+
+                reasoning_details_json = (
+                    json.dumps(reasoning_details) if reasoning_details else None
+                )
+                codex_items_json = (
+                    json.dumps(codex_reasoning_items) if codex_reasoning_items else None
+                )
+                codex_message_items_json = (
+                    json.dumps(codex_message_items) if codex_message_items else None
+                )
+                tool_calls_json = json.dumps(tool_calls) if tool_calls else None
+                stored_content = self._encode_content(content)
+
+                num_tc = 0
+                if tool_calls is not None:
+                    num_tc = len(tool_calls) if isinstance(tool_calls, list) else 1
+                total_tool_calls += num_tc
+
+                cursor = conn.execute(
+                    """INSERT INTO messages (session_id, role, content, tool_call_id,
+                       tool_calls, tool_name, timestamp, token_count, finish_reason,
+                       reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
+                       codex_message_items)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id, role, stored_content, tool_call_id,
+                        tool_calls_json, tool_name, now_ts, None, finish_reason,
+                        reasoning, reasoning_content, reasoning_details_json,
+                        codex_items_json, codex_message_items_json,
+                    ),
+                )
+                last_id = cursor.lastrowid
+
+            # Single counter update with aggregated tool call count
+            if total_tool_calls > 0:
+                conn.execute(
+                    """UPDATE sessions SET message_count = message_count + ?,
+                       tool_call_count = tool_call_count + ? WHERE id = ?""",
+                    (len(messages), total_tool_calls, session_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE sessions SET message_count = message_count + ? WHERE id = ?",
+                    (len(messages), session_id),
+                )
+            return last_id
+
+        return self._execute_write(_do)
+
     def replace_messages(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         """Atomically replace every message for a session.
 
