@@ -175,10 +175,19 @@ class TestProviderEnvBlocklist:
             "SIGNAL_ACCOUNT": "+15555550124",
             "HASS_TOKEN": "ha-secret",
             "EMAIL_PASSWORD": "email-secret",
+            "MATRIX_PASSWORD": "matrix-secret",
+            "TWILIO_ACCOUNT_SID": "twilio-sid",
+            "TWILIO_AUTH_TOKEN": "twilio-secret",
             "FIRECRAWL_API_KEY": "fc-secret",
             "HERMES_DASHBOARD_SESSION_TOKEN": "dashboard-session-secret",
             "BROWSERBASE_PROJECT_ID": "bb-project",
             "ELEVENLABS_API_KEY": "el-secret",
+            "DINGTALK_CLIENT_SECRET": "dingtalk-secret",
+            "FEISHU_APP_SECRET": "feishu-secret",
+            "WECOM_SECRET": "wecom-secret",
+            "WECOM_CALLBACK_CORP_SECRET": "wecom-corp-secret",
+            "WEIXIN_TOKEN": "weixin-token",
+            "YUANBAO_APP_SECRET": "yuanbao-secret",
             "GITHUB_TOKEN": "ghp_secret",
             "GH_TOKEN": "gh_alias_secret",
             "GATEWAY_ALLOW_ALL_USERS": "true",
@@ -363,8 +372,32 @@ class TestBlocklistCoverage:
             "EMAIL_SMTP_HOST",
             "EMAIL_HOME_ADDRESS",
             "EMAIL_HOME_ADDRESS_NAME",
+            "MATRIX_PASSWORD",
+            "TWILIO_ACCOUNT_SID",
+            "TWILIO_AUTH_TOKEN",
+            "TWILIO_PHONE_NUMBER",
+            "TWILIO_PHONE_NUMBER_SID",
             "HERMES_DASHBOARD_SESSION_TOKEN",
             "GATEWAY_ALLOWED_USERS",
+            "DINGTALK_CLIENT_ID",
+            "DINGTALK_CLIENT_SECRET",
+            "FEISHU_APP_ID",
+            "FEISHU_APP_SECRET",
+            "FEISHU_ENCRYPT_KEY",
+            "FEISHU_VERIFICATION_TOKEN",
+            "WECOM_BOT_ID",
+            "WECOM_SECRET",
+            "WECOM_CALLBACK_CORP_ID",
+            "WECOM_CALLBACK_CORP_SECRET",
+            "WECOM_CALLBACK_AGENT_ID",
+            "WECOM_CALLBACK_TOKEN",
+            "WECOM_CALLBACK_ENCODING_AES_KEY",
+            "WEIXIN_TOKEN",
+            "WEIXIN_ACCOUNT_ID",
+            "YUANBAO_APP_ID",
+            "YUANBAO_APP_KEY",
+            "YUANBAO_APP_SECRET",
+            "YUANBAO_BOT_ID",
             "GH_TOKEN",
             "GITHUB_APP_ID",
             "GITHUB_APP_PRIVATE_KEY_PATH",
@@ -374,6 +407,35 @@ class TestBlocklistCoverage:
             "DAYTONA_API_KEY",
         }
         assert extras.issubset(_HERMES_PROVIDER_ENV_BLOCKLIST)
+
+    def test_gateway_ghsa_m4m8_xjp4_5rmm_credentials_are_stripped_from_all_local_env_paths(self):
+        """GHSA-m4m8-xjp4-5rmm: gateway credentials must not leak to subprocesses."""
+        from tools.environments.local import _make_run_env, _sanitize_subprocess_env
+
+        secrets = {
+            "DINGTALK_CLIENT_SECRET": "dingtalk-secret",
+            "FEISHU_APP_SECRET": "feishu-secret",
+            "FEISHU_ENCRYPT_KEY": "feishu-encrypt-key",
+            "FEISHU_VERIFICATION_TOKEN": "feishu-verification-token",
+            "MATRIX_PASSWORD": "matrix-password",
+            "TWILIO_AUTH_TOKEN": "twilio-auth-token",
+            "WECOM_CALLBACK_CORP_SECRET": "wecom-callback-secret",
+            "WECOM_CALLBACK_TOKEN": "wecom-callback-token",
+            "WECOM_CALLBACK_ENCODING_AES_KEY": "wecom-callback-aes-key",
+            "WECOM_SECRET": "wecom-secret",
+            "WEIXIN_TOKEN": "weixin-token",
+            "YUANBAO_APP_SECRET": "yuanbao-secret",
+        }
+
+        with patch.dict(os.environ, secrets | {"PATH": "/usr/bin:/bin"}, clear=True):
+            run_env = _make_run_env({})
+        bg_env = _sanitize_subprocess_env(secrets | {"PATH": "/usr/bin:/bin"})
+
+        for env_name in secrets:
+            assert env_name not in run_env, f"{env_name} leaked through _make_run_env"
+            assert env_name not in bg_env, (
+                f"{env_name} leaked through _sanitize_subprocess_env"
+            )
 
 
 class TestSanePathIncludesHomebrew:
