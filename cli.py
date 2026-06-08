@@ -1875,7 +1875,6 @@ except Exception:
     pass
 
 
-
 class _SkinAwareAnsi:
     """Lazy ANSI escape that resolves from the skin engine on first use.
 
@@ -2404,9 +2403,6 @@ def _resolve_attachment_path(raw_path: str) -> Path | None:
     return resolved
 
 
-
-
-
 def _detect_file_drop(user_input: str) -> "dict | None":
     """Detect if *user_input* starts with a real local file path.
 
@@ -2868,7 +2864,6 @@ HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀�
 [#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]"""
 
 
-
 def _build_compact_banner() -> str:
     """Build a compact banner that fits the current terminal width."""
     try:
@@ -2916,7 +2911,6 @@ def _build_compact_banner() -> str:
         f"[bold {border_color}]║[/] [dim {dim_color}]{line2}[/] [bold {border_color}]║[/]\n"
         f"[bold {border_color}]╚{bar}╝[/]\n"
     )
-
 
 
 # ============================================================================
@@ -3061,8 +3055,6 @@ def save_config_value(key_path: str, value: any) -> bool:
     except Exception as e:
         logger.error("Failed to save config: %s", e)
         return False
-
-
 
 
 # ============================================================================
@@ -3764,7 +3756,6 @@ class HermesCLI(CLICommandsMixin):
             snapshot["active_background_processes"] = process_registry.count_running()
         except Exception:
             pass
-
 
         if not agent:
             return snapshot
@@ -5786,7 +5777,6 @@ class HermesCLI(CLICommandsMixin):
         self._image_counter -= 1
         return False
 
-
     def _resolve_checkpoint_ref(self, ref: str, checkpoints: list) -> str | None:
         """Resolve a checkpoint number or hash to a full commit hash."""
         try:
@@ -5799,10 +5789,6 @@ class HermesCLI(CLICommandsMixin):
         except ValueError:
             # Treat as a git hash
             return ref
-
-
-
-
 
     def _write_osc52_clipboard(self, text: str) -> None:
         """Copy *text* to terminal clipboard via OSC 52."""
@@ -5851,8 +5837,6 @@ class HermesCLI(CLICommandsMixin):
                 f"  {_DIM}Recovered terminal input modes after leaked mouse reports. "
                 f"If this repeats, run /new or restart this tab.{_RST}"
             )
-
-
 
     def _preprocess_images_with_vision(self, text: str, images: list, *, announce: bool = True) -> str:
         """Analyze attached images via the vision tool and return enriched text.
@@ -6146,7 +6130,6 @@ class HermesCLI(CLICommandsMixin):
         print(f"  Total: {len(tools)} tools  ヽ(^o^)ノ")
         print()
 
-
     def show_toolsets(self):
         """Display available toolsets with kawaii ASCII art."""
         all_toolsets = get_all_toolsets()
@@ -6178,7 +6161,6 @@ class HermesCLI(CLICommandsMixin):
         print("  Example: python cli.py --toolsets web,terminal")
         print()
     
-
     def show_config(self):
         """Display current configuration with kawaii ASCII art."""
         # Get terminal config from environment (which was set from cli-config.yaml)
@@ -6467,8 +6449,6 @@ class HermesCLI(CLICommandsMixin):
             else:
                 print("(^_^)v New session started!")
 
-
-
     def _consume_pending_resume_selection(self, text: str) -> bool:
         """Resolve a bare numeric reply that follows a bare ``/resume`` prompt.
 
@@ -6506,8 +6486,6 @@ class HermesCLI(CLICommandsMixin):
 
         self._handle_resume_command(f"/resume {index}")
         return True
-
-
 
     def save_conversation(self):
         """Save the current conversation to a JSON snapshot under ~/.hermes/sessions/saved/.
@@ -7528,12 +7506,6 @@ class HermesCLI(CLICommandsMixin):
             return "\n".join(p for p in parts if p)
         return str(value)
 
-
-    
-
-
-
-
     def _show_gateway_status(self):
         """Show status of the gateway and connected messaging platforms."""
         from gateway.config import load_gateway_config, Platform
@@ -8117,7 +8089,6 @@ class HermesCLI(CLICommandsMixin):
         
         return True
     
-
     @staticmethod
     def _try_launch_chrome_debug(port: int, system: str) -> bool:
         """Try to launch a Chromium-family browser with remote debugging enabled.
@@ -8128,8 +8099,6 @@ class HermesCLI(CLICommandsMixin):
         Returns True if a launch command was executed (doesn't guarantee success).
         """
         return try_launch_chrome_debug(port, system)
-
-
 
     # ────────────────────────────────────────────────────────────────
     # /goal — persistent cross-turn goals (Ralph-style loop)
@@ -8166,8 +8135,6 @@ class HermesCLI(CLICommandsMixin):
         mgr = GoalManager(session_id=sid, default_max_turns=max_turns)
         self._goal_manager = mgr
         return mgr
-
-
 
     def _maybe_continue_goal_after_turn(self) -> None:
         """Hook run after every CLI turn. Judges + maybe re-queues.
@@ -8284,8 +8251,6 @@ class HermesCLI(CLICommandsMixin):
                     self._pending_input.put(prompt)
                 except Exception as exc:
                     logging.debug("goal continuation enqueue failed: %s", exc)
-
-
 
     def _toggle_verbose(self):
         """Cycle tool progress mode: off → new → all → verbose → off.
@@ -8410,9 +8375,6 @@ class HermesCLI(CLICommandsMixin):
                 f"  ⚡ YOLO mode {_Colors.BOLD}{_Colors.GREEN}ON{_Colors.RESET}"
                 " — all commands auto-approved. Use with caution."
             )
-
-
-
 
     def _on_reasoning(self, reasoning_text: str):
         """Callback for intermediate reasoning display during tool-call loops."""
@@ -8568,8 +8530,6 @@ class HermesCLI(CLICommandsMixin):
 
             except Exception as e:
                 print(f"  ❌ Compression failed: {e}")
-
-
 
     def _show_usage(self):
         """Rate limits + session token usage (when a live agent exists) + Nous credits.
@@ -9592,7 +9552,6 @@ class HermesCLI(CLICommandsMixin):
             _cprint(f"{_DIM}TTS playback failed: {e}{_RST}")
         finally:
             self._voice_tts_done.set()
-
 
     def _voice_beeps_enabled(self) -> bool:
         """Return whether CLI voice mode should play record start/stop beeps."""
@@ -10731,7 +10690,6 @@ class HermesCLI(CLICommandsMixin):
                         width=self._scrollback_box_width(),
                     ))
 
-
             # Play terminal bell when agent finishes (if enabled).
             # Works over SSH — the bell propagates to the user's terminal.
             if self.bell_on_complete:
@@ -10753,7 +10711,6 @@ class HermesCLI(CLICommandsMixin):
             # Skip batch TTS when streaming TTS already handled it
             if self._voice_tts and response and not use_streaming_tts:
                 self._voice_speak_response_async(response)
-
 
             # Re-queue the interrupt message (and any that arrived while we were
             # processing the first) as the next prompt for process_loop.
@@ -12214,7 +12171,6 @@ class HermesCLI(CLICommandsMixin):
 
         # Create the input area with multiline (Alt+Enter), autocomplete, and paste handling
         from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-
 
         _completer = SlashCommandCompleter(
             skill_commands_provider=lambda: get_skill_commands(),

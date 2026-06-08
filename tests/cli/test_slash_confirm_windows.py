@@ -21,7 +21,6 @@ import time
 from unittest.mock import MagicMock, patch
 
 
-
 def _make_cli():
     """Minimal HermesCLI shell exposing prompt/modal helpers."""
     import cli as cli_mod

@@ -131,7 +131,6 @@ def test_honcho_prefetch_returns_without_waiting_for_first_context_fetch():
     assert fetch_started.is_set()
 
 
-
 def test_honcho_sync_turn_does_not_start_network_write_before_session_init():
     """Session-end sync must not create a blocking writer before init finishes."""
     provider = HonchoMemoryProvider()

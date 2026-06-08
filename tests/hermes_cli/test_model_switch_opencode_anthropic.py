@@ -252,7 +252,6 @@ class TestAgentSwitchModelDefenseInDepth:
         )
 
 
-
 class TestStaleConfigDefaultDoesNotWedgeResolver:
     """Regression for the real bug Quentin hit.
 

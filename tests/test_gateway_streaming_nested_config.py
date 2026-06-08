@@ -3,7 +3,6 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 
-
 def _load_with_yaml_dict(yaml_dict: dict):
     """Patch filesystem so load_gateway_config() sees *yaml_dict* as config.yaml."""
     from gateway.config import load_gateway_config

@@ -161,7 +161,6 @@ class TestSlashCommands:
         runner._handle_message_with_agent.assert_not_awaited()
 
 
-
 class TestSessionLifecycle:
     """Verify session state changes across command sequences."""
 

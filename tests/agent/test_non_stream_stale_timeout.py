@@ -14,7 +14,6 @@ from __future__ import annotations
 from pathlib import Path
 
 
-
 def _write_config(tmp_path: Path, body: str) -> None:
     hermes_home = tmp_path
     (hermes_home / "config.yaml").write_text(body or "{}\n", encoding="utf-8")

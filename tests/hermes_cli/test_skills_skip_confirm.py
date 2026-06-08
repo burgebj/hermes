@@ -13,7 +13,6 @@ Updated for PR #3586 (cache-aware install/uninstall).
 from unittest.mock import patch
 
 
-
 class TestHandleSkillsSlashInstallFlags:
     """Test flag parsing in handle_skills_slash for install."""
 

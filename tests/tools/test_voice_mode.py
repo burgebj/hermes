@@ -322,7 +322,6 @@ class TestDetectAudioEnvironment:
         assert result["available"] is False
         assert any("Termux:API Android app is not installed" in w for w in result["warnings"])
 
-
     def test_docker_with_pulse_server_allows_voice(self, monkeypatch):
         """Docker with PULSE_SERVER set should NOT block voice mode (#21203)."""
         monkeypatch.delenv("SSH_CLIENT", raising=False)

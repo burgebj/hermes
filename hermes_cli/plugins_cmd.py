@@ -1156,7 +1156,6 @@ def _run_composite_ui(curses, plugin_names, plugin_labels, plugin_selected,
             # We need to map logical cursor positions to screen rows
             # accounting for non-navigable separator/headers
 
-
             # --- General Plugins section ---
             if n_plugins > 0:
                 # Section header

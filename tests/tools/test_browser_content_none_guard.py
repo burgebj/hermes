@@ -12,7 +12,6 @@ import types
 from unittest.mock import patch
 
 
-
 # ── helpers ────────────────────────────────────────────────────────────────
 
 def _make_response(content):

@@ -43,7 +43,6 @@ class TestCreateSession:
         state = manager.create_session(cwd="/tmp/work")
         assert calls == [(state.session_id, "/tmp/work")]
 
-
     def test_register_task_cwd_translates_windows_drive_for_wsl_tools(self, monkeypatch):
         captured = {}
 
@@ -76,8 +75,6 @@ class TestCreateSession:
 
     def test_get_nonexistent_session_returns_none(self, manager):
         assert manager.get_session("does-not-exist") is None
-
-
 
 
 # ---------------------------------------------------------------------------

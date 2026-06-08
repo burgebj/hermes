@@ -9,7 +9,6 @@ import os
 from unittest.mock import patch
 
 
-
 class TestDiscordThreadPersistence:
     """Thread IDs are saved to disk and reloaded on init."""
 

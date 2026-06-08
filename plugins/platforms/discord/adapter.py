@@ -5819,7 +5819,6 @@ def _define_discord_view_classes() -> None:
                 except Exception:
                     pass
 
-
     class ClarifyChoiceView(discord.ui.View):
         """Interactive button view for the clarify tool's multiple-choice prompts.
 

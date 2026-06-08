@@ -279,7 +279,6 @@ async def test_send_to_forum_create_thread_failure():
     assert "rate limited" in result.error
 
 
-
 # ---------------------------------------------------------------------------
 # Forum follow-up chunk failure reporting + media on forum paths
 # ---------------------------------------------------------------------------

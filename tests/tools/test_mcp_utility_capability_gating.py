@@ -30,7 +30,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
-
 def _make_init_result(*, resources: bool, prompts: bool):
     """Build a fake ``InitializeResult`` whose ``capabilities`` sub-object
     matches a server that advertises exactly the given capability set.

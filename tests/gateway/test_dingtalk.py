@@ -940,10 +940,6 @@ class TestMessageContextIsolation:
         assert adapter._message_contexts["chat-B"] is msg_b
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # Card lifecycle: finalize via metadata["streaming"]
 # ---------------------------------------------------------------------------
@@ -1097,7 +1093,6 @@ class TestCardLifecycle:
         a._fire_done_reaction("chat-1")
         assert len(captured) == 1
         captured[0].close()
-
 
 
 # ---------------------------------------------------------------------------

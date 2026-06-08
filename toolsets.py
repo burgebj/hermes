@@ -551,7 +551,6 @@ TOOLSETS = {
 }
 
 
-
 def get_toolset(name: str) -> Optional[Dict[str, Any]]:
     """
     Get a toolset definition by name.
@@ -768,8 +767,6 @@ def get_toolset_names() -> List[str]:
     return sorted(names)
 
 
-
-
 def validate_toolset(name: str) -> bool:
     """
     Check if a toolset name is valid.
@@ -812,8 +809,6 @@ def create_custom_toolset(
     }
 
 
-
-
 def get_toolset_info(name: str) -> Dict[str, Any]:
     """
     Get detailed information about a toolset including resolved tools.
@@ -839,8 +834,6 @@ def get_toolset_info(name: str) -> Dict[str, Any]:
         "tool_count": len(resolved_tools),
         "is_composite": bool(toolset["includes"])
     }
-
-
 
 
 if __name__ == "__main__":

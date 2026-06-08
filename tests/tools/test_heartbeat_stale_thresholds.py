@@ -1,7 +1,6 @@
 """Tests for delegate heartbeat stale threshold configuration."""
 
 
-
 class TestHeartbeatStaleThresholds:
     """Verify the heartbeat stale threshold constants are correct."""
 

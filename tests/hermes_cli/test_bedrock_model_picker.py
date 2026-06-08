@@ -21,11 +21,9 @@ from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 
-
 # ---------------------------------------------------------------------------
 # Shared helpers / fixtures
 # ---------------------------------------------------------------------------
-
 
 
 @contextmanager

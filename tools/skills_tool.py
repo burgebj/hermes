@@ -545,7 +545,6 @@ def _parse_tags(tags_value) -> List[str]:
     return [t.strip().strip("\"'") for t in tags_value.split(",") if t.strip()]
 
 
-
 def _get_disabled_skill_names() -> Set[str]:
     """Load disabled skill names from config.
 
@@ -1471,8 +1470,6 @@ def skill_view(
 
     except Exception as e:
         return tool_error(str(e), success=False)
-
-
 
 
 if __name__ == "__main__":

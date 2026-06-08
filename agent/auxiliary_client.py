@@ -452,7 +452,6 @@ def build_nvidia_nim_headers(base_url: str | None) -> dict:
     return {}
 
 
-
 # Nous Portal extra_body for product attribution.
 # Callers should pass this as extra_body in chat.completions.create()
 # when the auxiliary client is backed by Nous Portal.
@@ -1538,7 +1537,6 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
 
 
 # ── Provider resolution helpers ─────────────────────────────────────────────
-
 
 
 def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Optional[OpenAI], Optional[str]]:
@@ -4916,7 +4914,6 @@ def _convert_openai_images_to_anthropic(messages: list) -> list:
                 new_content.append(block)
         converted.append({**msg, "content": new_content} if changed else msg)
     return converted
-
 
 
 def _build_call_kwargs(

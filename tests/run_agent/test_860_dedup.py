@@ -13,7 +13,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-
 # ---------------------------------------------------------------------------
 # Test: _flush_messages_to_session_db only writes new messages
 # ---------------------------------------------------------------------------

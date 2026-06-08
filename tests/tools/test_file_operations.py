@@ -167,7 +167,6 @@ class TestIsWriteDenied:
         assert _is_write_denied(str(root / "pairing")) is True
 
 
-
 # =========================================================================
 # Result dataclasses
 # =========================================================================

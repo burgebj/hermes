@@ -308,7 +308,6 @@ def test_strip_none_returns_zero():
     assert stripped == 0
 
 
-
 def test_strip_responses_format_strips_format_keyword():
     """Responses-format:  keyword should be stripped."""
     from tools.schema_sanitizer import strip_pattern_and_format

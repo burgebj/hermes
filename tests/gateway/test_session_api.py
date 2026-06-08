@@ -356,7 +356,6 @@ async def test_session_chat_stream_run_completed_carries_turn_transcript(adapter
     assert any(m.get("tool_calls") for m in messages)
 
 
-
 @pytest.mark.asyncio
 async def test_session_endpoints_require_auth_when_key_configured(auth_adapter):
     app = _create_session_app(auth_adapter)

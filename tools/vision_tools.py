@@ -1107,7 +1107,6 @@ def check_vision_requirements() -> bool:
         return False
 
 
-
 if __name__ == "__main__":
     """
     Simple test/demo when run directly

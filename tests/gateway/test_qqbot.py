@@ -1624,7 +1624,6 @@ class TestDefaultInteractionDispatch:
 
         assert resolve_calls == [("agent:main:qqbot:c2c:u", "deny", False)]
 
-
     @pytest.mark.asyncio
     async def test_approval_click_rejects_unauthorized_operator(self):
         adapter = self._make_adapter()

@@ -20,7 +20,6 @@ import threading
 from unittest.mock import MagicMock
 
 
-
 def _make_runner():
     """Bare GatewayRunner wired with just the state the helper touches."""
     from gateway.run import GatewayRunner

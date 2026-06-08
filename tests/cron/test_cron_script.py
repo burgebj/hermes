@@ -212,7 +212,6 @@ class TestBuildJobPromptWithScript:
         assert "Simple job." in prompt
 
 
-
 class TestCronjobToolScript:
     """Test the cronjob tool's script parameter."""
 

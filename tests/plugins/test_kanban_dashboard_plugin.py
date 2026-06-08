@@ -1341,7 +1341,6 @@ def test_event_dict_includes_run_id(client):
     assert comp[0]["run_id"] == run_id
 
 
-
 # ---------------------------------------------------------------------------
 # Per-task force-loaded skills via REST
 # ---------------------------------------------------------------------------
@@ -1392,7 +1391,6 @@ def test_create_task_with_toolset_name_in_skills_is_rejected(client):
     )
     assert r.status_code == 400, r.text
     assert "toolset name" in r.json()["detail"]
-
 
 
 # ---------------------------------------------------------------------------
@@ -1540,7 +1538,6 @@ def test_create_task_probe_error_does_not_break_create(client, monkeypatch):
     )
     assert r.status_code == 200
     assert r.json()["task"]["title"] == "resilient"
-
 
 
 # ---------------------------------------------------------------------------

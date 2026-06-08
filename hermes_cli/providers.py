@@ -488,8 +488,6 @@ def get_label(provider_id: str) -> str:
     return canonical
 
 
-
-
 def is_aggregator(provider: str) -> bool:
     """Return True when the provider is a multi-model aggregator."""
     pdef = get_provider(provider)

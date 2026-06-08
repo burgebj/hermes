@@ -1338,7 +1338,6 @@ def list_diagnostics(
         conn.close()
 
 
-
 # ---------------------------------------------------------------------------
 # Worker visibility — cross-task active-worker list and per-run inspection
 # ---------------------------------------------------------------------------

@@ -3049,7 +3049,6 @@ class TestCORS:
             assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:3000"
             assert "Authorization" in resp.headers.get("Access-Control-Allow-Headers", "")
 
-
     @pytest.mark.asyncio
     async def test_cors_preflight_sets_max_age(self):
         adapter = _make_adapter(cors_origins=["http://localhost:3000"])

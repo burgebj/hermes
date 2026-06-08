@@ -774,7 +774,6 @@ def test_curator_review_prompt_preserves_skill_package_integrity():
         assert dirname in CURATOR_REVIEW_PROMPT
 
 
-
 def test_curator_review_prompt_offers_support_file_actions():
     """Support-file demotion (references/templates/scripts) must be one of
     the three consolidation methods, alongside merge-into-existing and
@@ -786,7 +785,6 @@ def test_curator_review_prompt_offers_support_file_actions():
     assert "write_file" in CURATOR_REVIEW_PROMPT
     # Must offer creating a brand-new umbrella when no existing one fits
     assert "action=create" in CURATOR_REVIEW_PROMPT or "create a new umbrella" in CURATOR_REVIEW_PROMPT.lower()
-
 
 
 def test_cli_unpin_refuses_bundled_skill(curator_env, capsys):

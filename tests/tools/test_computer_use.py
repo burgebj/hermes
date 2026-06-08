@@ -441,7 +441,6 @@ class TestCaptureResponse:
 
         return FakeBackend()
 
-
     def test_capture_ax_caps_elements_at_default_for_dense_trees(self):
         """Regression for #22865: an Electron-style 600-element AX tree must
         not emit the entire array verbatim into the tool result.

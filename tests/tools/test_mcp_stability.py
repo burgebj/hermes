@@ -8,7 +8,6 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 
-
 # ---------------------------------------------------------------------------
 # Fix 1: MCP event loop exception handler
 # ---------------------------------------------------------------------------

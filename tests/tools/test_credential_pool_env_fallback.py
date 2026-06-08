@@ -107,7 +107,6 @@ class TestCredentialPoolSeedsFromDotEnv:
         assert entries == []
 
 
-
 class TestAuthResolvesFromDotEnv:
     """_resolve_api_key_provider_secret must also read from ~/.hermes/.env."""
 

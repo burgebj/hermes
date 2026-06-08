@@ -115,7 +115,6 @@ def generate_file_id() -> str:
     return secrets.token_hex(16)
 
 
-
 # ============ 图片尺寸解析（纯 Python，无需 Pillow） ============
 
 def parse_image_size(data: bytes) -> Optional[dict[str, int]]:

@@ -15,7 +15,6 @@ import sys
 from unittest.mock import MagicMock
 
 
-
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _make_pool(provider, n_entries=1):

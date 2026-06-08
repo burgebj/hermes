@@ -299,7 +299,6 @@ class TestExecute:
         assert "print" in cmd
         assert "hi" in cmd
 
-
     def test_daytona_error_triggers_retry(self, make_env, daytona_sdk):
         sb = _make_sandbox()
         sb.state = "started"

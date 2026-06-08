@@ -6,7 +6,6 @@ serving a stale cache (models.dev only, no live API probe) for up to an hour.
 from __future__ import annotations
 
 
-
 def test_setup_ollama_cloud_passes_force_refresh(monkeypatch):
     """The provider-setup model-fetch for ollama-cloud must pass ``force_refresh=True``."""
     import hermes_cli.main as main_mod

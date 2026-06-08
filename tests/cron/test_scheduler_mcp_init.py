@@ -18,11 +18,6 @@ from __future__ import annotations
 from unittest.mock import patch
 
 
-
-
-
-
-
 def test_no_agent_cron_job_does_not_initialize_mcp():
     """Cron jobs with no_agent=True are script-only — no AIAgent, no MCP
     tools needed. We must NOT pay the MCP init cost for those."""

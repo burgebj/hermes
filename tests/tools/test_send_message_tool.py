@@ -1849,7 +1849,6 @@ class TestSendDiscordForum:
         assert "403" in result["error"]
 
 
-
 class TestSendToPlatformDiscordForum:
     """_send_to_platform delegates forum detection to _send_discord."""
 

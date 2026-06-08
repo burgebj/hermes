@@ -3971,7 +3971,6 @@ class APIServerAdapter(BasePlatformAdapter):
 
         return response
 
-
     async def _handle_run_approval(self, request: "web.Request") -> "web.Response":
         """POST /v1/runs/{run_id}/approval — resolve a pending run approval."""
         auth_err = self._check_auth(request)

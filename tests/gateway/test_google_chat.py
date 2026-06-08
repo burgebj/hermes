@@ -262,10 +262,6 @@ class TestEnvConfigLoading:
         for v in self._ENV_VARS:
             monkeypatch.delenv(v, raising=False)
 
-
-
-
-
     def test_missing_subscription_does_not_enable(self, monkeypatch):
         self._clean_env(monkeypatch)
         monkeypatch.setenv("GOOGLE_CHAT_PROJECT_ID", "p")
@@ -279,8 +275,6 @@ class TestEnvConfigLoading:
                            "projects/p/subscriptions/s")
         cfg = load_gateway_config()
         assert _GC not in cfg.platforms
-
-
 
 
 # ===========================================================================

@@ -244,7 +244,6 @@ def test_library_remove_uses_generic_library_endpoint(
     ]
 
 
-
 def test_spotify_library_tracks_list_routes_to_saved_tracks(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 

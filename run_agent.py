@@ -199,7 +199,6 @@ from agent.tool_dispatch_helpers import (
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, is_truthy_value
 
 
-
 _MAX_TOOL_WORKERS = 8
 
 # Guard so the OpenRouter metadata pre-warm thread is only spawned once per
@@ -2259,7 +2258,6 @@ class AIAgent:
             if self.verbose_logging:
                 logging.warning(f"Failed to save session log: {e}")
 
-
     def interrupt(self, message: str = None) -> None:
         """
         Request the agent to interrupt its current tool-calling loop.
@@ -3123,15 +3121,6 @@ class AIAgent:
     def is_interrupted(self) -> bool:
         """Check if an interrupt has been requested."""
         return self._interrupt_requested
-
-
-
-
-
-
-
-
-
 
     def _build_system_prompt_parts(self, system_message: str = None) -> Dict[str, str]:
         """Forwarder — see ``agent.system_prompt.build_system_prompt_parts``."""
@@ -5197,7 +5186,6 @@ def main(
         for name, info in scenario_toolsets:
             print(f"  • {name:20} - {info['description']}")
             print(f"    Total tools: {info['tool_count']}")
-        
         
         # Show legacy toolset compatibility
         print("\n📦 Legacy Toolsets (for backward compatibility):")

@@ -648,7 +648,6 @@ def _pip_install(
     )
 
 
-
 def _check_cua_driver_asset_for_arch() -> bool:
     """Check whether the latest CUA release ships an asset for this architecture.
 

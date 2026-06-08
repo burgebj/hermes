@@ -621,9 +621,6 @@ def get_nous_subscription_features(
     )
 
 
-
-
-
 def apply_nous_managed_defaults(
     config: Dict[str, object],
     *,

@@ -20,7 +20,6 @@ import base64
 from types import SimpleNamespace
 
 
-
 def _png_bytes():
     """Return a minimal valid PNG byte sequence.
 

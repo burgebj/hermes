@@ -337,7 +337,6 @@ def cmd_mcp_add(args):
         if explicit_env:
             server_config["env"] = explicit_env
 
-
     # ── Authentication ────────────────────────────────────────────────
 
     if url and auth_type == "oauth":

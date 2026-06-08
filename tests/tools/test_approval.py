@@ -175,8 +175,6 @@ class TestSessionKeyContext:
         assert "reset_current_session_key" in called_names
 
 
-
-
 class TestRmFalsePositiveFix:
     """Regression tests: filenames starting with 'r' must NOT trigger recursive delete."""
 

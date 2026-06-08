@@ -1186,7 +1186,6 @@ class MatrixAdapter(BasePlatformAdapter):
             except Exception:
                 pass
 
-
     async def edit_message(
         self, chat_id: str, message_id: str, content: str, *, finalize: bool = False
     ) -> SendResult:

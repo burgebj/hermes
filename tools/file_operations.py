@@ -927,7 +927,6 @@ class ShellFileOperations(FileOperations):
             return False
         return _has_bom(head_result.stdout)
 
-
     def _unified_diff(self, old_content: str, new_content: str, filename: str) -> str:
         """Generate unified diff between old and new content."""
         old_lines = old_content.splitlines(keepends=True)
@@ -2282,7 +2281,6 @@ class ShellFileOperations(FileOperations):
                             content=parsed[2][:500]
                         ))
 
-            
             total = len(matches)
             page = matches[offset:offset + limit]
             return SearchResult(

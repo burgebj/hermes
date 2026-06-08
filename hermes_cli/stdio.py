@@ -191,7 +191,6 @@ def _default_windows_editor() -> str:
     return ""
 
 
-
 def _augment_path_with_known_tools() -> None:
     """Prepend well-known Hermes-managed tool directories to os.environ['PATH'].
 
@@ -215,7 +214,6 @@ def _augment_path_with_known_tools() -> None:
     """
     if not is_windows():
         return
-
 
     local_appdata = os.environ.get("LOCALAPPDATA", "")
     if not local_appdata:

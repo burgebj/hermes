@@ -21,7 +21,6 @@ import asyncio
 from unittest.mock import patch
 
 
-
 async def _hanging_run(self, cfg):
     """Stand-in transport that hangs forever so we can cancel it."""
     await asyncio.sleep(3600)

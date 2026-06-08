@@ -6057,7 +6057,6 @@ def _dispatch_all_via_service_manager_if_s6(action: str) -> bool:
     return True
 
 
-
 def gateway_command(args):
     """Handle gateway subcommands."""
     try:

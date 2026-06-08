@@ -4,7 +4,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
-
 def _make_cli_stub():
     """Create a minimal HermesCLI-like object with stream state."""
     from cli import HermesCLI

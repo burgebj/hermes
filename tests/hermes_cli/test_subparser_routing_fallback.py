@@ -14,7 +14,6 @@ import io
 import sys
 
 
-
 def _build_parser():
     """Build a minimal replica of the hermes top-level parser."""
     parser = argparse.ArgumentParser(prog="hermes")

@@ -396,7 +396,6 @@ def test_docker_env_and_forward_env_merge_in_init_args(monkeypatch):
     assert "TOKEN=secret123" in args_str
 
 
-
 def test_normalize_env_dict_filters_invalid_keys():
     """_normalize_env_dict should reject invalid variable names."""
     result = docker_env._normalize_env_dict({

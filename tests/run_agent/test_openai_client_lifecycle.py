@@ -174,7 +174,6 @@ def test_concurrent_requests_do_not_break_each_other_when_one_client_closes(monk
     assert len(factory.calls) == 2
 
 
-
 def test_streaming_call_recreates_closed_shared_client_before_request(monkeypatch):
     chunks = iter([
         SimpleNamespace(

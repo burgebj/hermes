@@ -9,8 +9,6 @@ build helper assembles a server when the SDK is present.
 from __future__ import annotations
 
 
-
-
 class TestModuleSurface:
     def test_module_imports_clean(self):
         from agent.transports import hermes_tools_mcp_server as m

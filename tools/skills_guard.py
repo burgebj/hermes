@@ -31,8 +31,6 @@ from pathlib import Path
 from typing import List, Tuple
 
 
-
-
 # ---------------------------------------------------------------------------
 # Hardcoded trust configuration
 # ---------------------------------------------------------------------------
@@ -945,7 +943,6 @@ def _unicode_char_name(char: str) -> str:
         '\u2069': "pop directional isolate",
     }
     return names.get(char, f"U+{ord(char):04X}")
-
 
 
 # ---------------------------------------------------------------------------

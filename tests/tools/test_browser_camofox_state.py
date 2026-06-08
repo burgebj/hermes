@@ -3,7 +3,6 @@
 from unittest.mock import patch
 
 
-
 def _load_module():
     from tools import browser_camofox_state as state
     return state

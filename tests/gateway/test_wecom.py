@@ -866,7 +866,6 @@ class TestWeComZombieSessionFix:
         assert cmd == APP_CMD_SEND
 
 
-
 class TestTextBatchFlushRace:
     """Regression tests for the cancel-delivery race in _flush_text_batch.
 

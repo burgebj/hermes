@@ -850,7 +850,6 @@ class TestExternalSkillMutations:
         assert not (external / "fresh-skill").exists()
 
 
-
 # ---------------------------------------------------------------------------
 # Pinned-skill guard — skill_manage refuses only `delete` on pinned skills.
 # Patches and edits go through so pinned skills can still evolve as pitfalls

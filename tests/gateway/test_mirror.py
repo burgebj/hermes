@@ -150,7 +150,6 @@ class TestFindSessionId:
         assert result == "sess_1"
 
 
-
 class TestMirrorToSession:
     def test_successful_mirror(self, tmp_path):
         sessions_dir, index_file = _setup_sessions(tmp_path, {

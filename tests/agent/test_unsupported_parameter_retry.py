@@ -115,7 +115,6 @@ class TestMaxTokensRetryHardening:
         # Only the initial attempt — no retry because the gate blocked it
         assert client.chat.completions.create.call_count == 1
 
-
     @pytest.mark.asyncio
     async def test_async_max_tokens_retry_skipped_when_max_tokens_is_none(self):
         client = MagicMock()

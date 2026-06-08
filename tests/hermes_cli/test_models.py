@@ -19,7 +19,6 @@ LIVE_OPENROUTER_MODELS = [
 ]
 
 
-
 class TestModelIds:
     def test_returns_non_empty_list(self):
         with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
@@ -43,9 +42,6 @@ class TestModelIds:
         with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
             ids = model_ids()
         assert len(ids) == len(set(ids)), "Duplicate model IDs found"
-
-
-
 
 
 class TestOpenRouterModels:

@@ -149,7 +149,6 @@ class TestIRCInteractiveSetup:
         out = capsys.readouterr().out
         assert "IRC setup complete!" in out
 
-
     def test_configure_platform_fallback_when_no_setup_fn(self, monkeypatch, capsys):
         """A plugin with no setup_fn falls back to env-var instructions."""
         import hermes_cli.gateway as gateway_mod

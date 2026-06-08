@@ -346,7 +346,6 @@ class NousDashboardAuthProvider(DashboardAuthProvider):
             refresh_token = ""
         return self._session_from_claims(access_token, refresh_token, claims)
 
-
     def verify_session(self, *, access_token: str) -> Optional[Session]:
         # Contract: returns None on expiry/invalidity (the middleware then
         # tries refresh_session with the RT cookie, falling back to

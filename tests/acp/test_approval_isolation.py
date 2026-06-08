@@ -16,7 +16,6 @@ Both fixed together by:
 import threading
 
 
-
 class TestThreadLocalApprovalCallback:
     """GHSA-qg5c-hvr5-hjgr: set_approval_callback must be per-thread so
     concurrent ACP sessions don't stomp on each other's handlers."""

@@ -317,7 +317,6 @@ class TestProviderPersistsAfterModelSave:
         assert model.get("api_mode") == "anthropic_messages"
 
 
-
 class TestBaseUrlValidation:
     """Reject non-URL values in the base URL prompt (e.g. shell commands)."""
 

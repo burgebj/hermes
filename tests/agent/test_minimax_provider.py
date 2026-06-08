@@ -91,7 +91,6 @@ class TestMinimaxM3StaleCacheGuard:
             assert ctx == 204_800, f"{slug} should stay 204800, got {ctx}"
 
 
-
 class TestMinimaxThinkingSupport:
     """Verify that MiniMax gets manual thinking (not adaptive).
 

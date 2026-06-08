@@ -231,7 +231,6 @@ class DCFModelValidator:
             self.warnings.append(f"Could not validate terminal value proportion: {str(e)}")
     
 
-
 def validate_dcf_model(excel_path: str) -> dict:
     """
     Validate a DCF model Excel file

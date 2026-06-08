@@ -3,9 +3,6 @@
 import contextvars
 
 
-
-
-
 def test_set_and_get_origin():
     from tools.skill_provenance import (
         set_current_write_origin,

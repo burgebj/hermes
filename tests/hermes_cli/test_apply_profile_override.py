@@ -16,7 +16,6 @@ import sys
 from pathlib import Path
 
 
-
 def _run_apply_profile_override(
     tmp_path, monkeypatch, *, hermes_home: str | None, active_profile: str | None,
     argv: list[str] | None = None,

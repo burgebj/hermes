@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
-
 # ---------------------------------------------------------------------------
 # _query_local_context_length — unit tests with mocked httpx
 # ---------------------------------------------------------------------------

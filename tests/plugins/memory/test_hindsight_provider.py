@@ -407,7 +407,6 @@ class TestPostSetup:
         assert profile_env.exists()
         assert "HINDSIGHT_API_LLM_API_KEY=existing-key\n" in profile_env.read_text()
 
-
     def test_local_embedded_setup_blank_inputs_preserve_existing_config(self, tmp_path, monkeypatch):
         """Pressing Enter through setup should keep existing Hindsight values."""
         hermes_home = tmp_path / "hermes-home"
@@ -454,7 +453,6 @@ class TestPostSetup:
         assert saved["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] == "0"
         assert saved["HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE"] == "1"
         assert saved["timeout"] == 120
-
 
 
 # ---------------------------------------------------------------------------

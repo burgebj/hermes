@@ -284,9 +284,6 @@ def _resolve_observation(
     }
 
 
-
-
-
 @dataclass
 class HonchoClientConfig:
     """Configuration for Honcho client, resolved for a specific host."""

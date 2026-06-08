@@ -191,9 +191,6 @@ class TestNotifyOtherToolCall(unittest.TestCase):
         notify_other_tool_call("nonexistent_task")  # Should not raise
 
 
-
-
-
 class TestSearchLoopDetection(unittest.TestCase):
     """Verify that search_tool detects and blocks consecutive repeated searches."""
 

@@ -454,7 +454,6 @@ class TestCodexNormalizeResponse:
         assert '"command"' in tc.arguments
 
 
-
 class TestCodexTransportTimeout:
     """Forward per-request timeout from build_kwargs to the SDK kwargs."""
 

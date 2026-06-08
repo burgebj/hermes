@@ -298,7 +298,6 @@ class TestBuildJobPromptContextFrom:
         assert "198.51.100.7" in message
 
 
-
 class TestUpdateContextFrom:
     """Verify the cronjob tool's `update` action wires context_from through.
 

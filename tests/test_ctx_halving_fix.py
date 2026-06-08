@@ -30,7 +30,6 @@ from unittest.mock import MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
-
 # ---------------------------------------------------------------------------
 # parse_available_output_tokens_from_error — unit tests
 # ---------------------------------------------------------------------------

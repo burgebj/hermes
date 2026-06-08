@@ -116,7 +116,6 @@ _local_model_name: Optional[str] = None
 # ---------------------------------------------------------------------------
 
 
-
 def _load_stt_config() -> dict:
     """Load the ``stt`` section from user config, falling back to defaults."""
     try:
@@ -1236,7 +1235,6 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
             else:
                 subprocess.run(shlex.split(command), check=True, capture_output=True, text=True, timeout=300)
             
-
             txt_files = sorted(Path(output_dir).glob("*.txt"))
             if not txt_files:
                 return {

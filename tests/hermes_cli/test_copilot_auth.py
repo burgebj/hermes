@@ -35,7 +35,6 @@ class TestTokenValidation:
         assert valid is False
 
 
-
 class TestResolveToken:
     """Token resolution with env var priority."""
 

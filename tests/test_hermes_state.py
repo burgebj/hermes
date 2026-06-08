@@ -78,7 +78,6 @@ class TestSessionLifecycle:
         assert session["model"] == "test-model"
         assert session["ended_at"] is None
 
-
     def test_get_nonexistent_session(self, db):
         assert db.get_session("nonexistent") is None
 
@@ -3849,7 +3848,6 @@ class TestSessionArchive:
         both = {s["id"] for s in db.list_sessions_rich(include_archived=True)}
         assert both == {"live", "hidden"}
         assert db.session_count(include_archived=True) == 2
-
 
 
 class TestSessionIdSearch:

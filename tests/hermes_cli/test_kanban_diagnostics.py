@@ -615,7 +615,6 @@ def test_stranded_in_ready_works_on_real_db_row(kanban_home):
         conn.close()
 
 
-
 # ---------------------------------------------------------------------------
 # triage_aux_unavailable rule — auto-decompose aware
 # ---------------------------------------------------------------------------

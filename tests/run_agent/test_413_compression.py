@@ -10,7 +10,6 @@ import pytest
 #pytestmark = pytest.mark.skip(reason="Hangs in non-interactive environments")
 
 
-
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 

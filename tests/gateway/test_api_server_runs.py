@@ -304,8 +304,6 @@ class TestRunEvents:
                 assert "run.completed" in body
                 assert "Hello!" in body
 
-
-
     @pytest.mark.asyncio
     async def test_approval_response_without_pending_returns_409(self, adapter):
         app = _create_runs_app(adapter)

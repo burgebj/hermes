@@ -8,7 +8,6 @@ while also providing the enriched ``tools`` list with results.
 import asyncio
 
 
-
 class TestStepCallbackNormalization:
     """The gateway's _step_callback_sync normalizes prev_tools from run_agent."""
 

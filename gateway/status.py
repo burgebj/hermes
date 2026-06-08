@@ -410,7 +410,6 @@ def _pid_exists(pid: int) -> bool:
             return False
 
 
-
 def _release_file_lock(handle) -> None:
     try:
         if _IS_WINDOWS:

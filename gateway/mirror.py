@@ -149,7 +149,6 @@ def _find_session_id(
     return best_entry.get("session_id")
 
 
-
 def _append_to_sqlite(session_id: str, message: dict) -> None:
     """Append a message to the SQLite session database."""
     db = None

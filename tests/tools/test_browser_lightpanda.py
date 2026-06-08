@@ -250,8 +250,6 @@ class TestConfigIntegration:
         assert entry["advanced"] is True
 
 
-
-
 class TestLightpandaRequirements:
     """Lightpanda should expose browser tools without local Chromium."""
 
@@ -298,8 +296,6 @@ class TestCleanupResetsEngineCache:
         assert bt._browser_engine_resolved is False
 
 
-
-
 # ---------------------------------------------------------------------------
 # fallback warning annotation
 # ---------------------------------------------------------------------------
@@ -325,7 +321,6 @@ class TestLightpandaFallbackWarning:
         }
         assert annotated["data"]["fallback_warning"] == annotated["fallback_warning"]
         assert annotated["data"]["browser_engine"] == "chrome"
-
 
     def test_browser_navigate_surfaces_fallback_warning(self):
         import json
@@ -397,7 +392,6 @@ class TestLightpandaFallbackWarning:
         assert response["browser_engine"] == "chrome"
         bt._last_active_session_key.pop("warn-test3", None)
 
-
     def test_browser_vision_lightpanda_uses_chrome_capture_and_normal_call_llm_shape(self, tmp_path):
         import json
         import tools.browser_tool as bt
@@ -436,7 +430,6 @@ class TestLightpandaFallbackWarning:
         assert "messages" in captured_kwargs
         assert "images" not in captured_kwargs
         assert captured_kwargs["task"] == "vision"
-
 
     def test_browser_get_images_preserves_fallback_warning(self):
         import json

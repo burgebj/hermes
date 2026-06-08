@@ -101,7 +101,6 @@ def _entry(name: str):
     return e
 
 
-
 # ---------------------------------------------------------------------------
 # Manifest parsing
 # ---------------------------------------------------------------------------
@@ -513,8 +512,6 @@ class TestToolSelection:
 
         # Invalid manifests are silently skipped at list_catalog level
         assert list_catalog() == []
-
-
 
 
 # ---------------------------------------------------------------------------

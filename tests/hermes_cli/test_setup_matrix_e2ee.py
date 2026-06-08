@@ -2,7 +2,6 @@
 import ast
 
 
-
 def _parse_setup_imports():
     """Parse setup.py and return top-level import names."""
     with open("hermes_cli/setup.py") as f:

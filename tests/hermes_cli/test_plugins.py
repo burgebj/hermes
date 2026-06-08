@@ -1126,7 +1126,6 @@ class TestPluginManagerList:
             assert "hooks" in p
 
 
-
 class TestPreLlmCallTargetRouting:
     """Tests for pre_llm_call hook return format with target-aware routing.
 

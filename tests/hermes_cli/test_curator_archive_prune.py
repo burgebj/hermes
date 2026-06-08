@@ -15,7 +15,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 
-
 def _ns(**kwargs):
     return SimpleNamespace(**kwargs)
 

@@ -81,7 +81,6 @@ def test_kilo_overlay_uses_hermes_slug():
     assert kilo_mdev is None, "kilo slug should not appear (resolved to kilocode)"
 
 
-
 def test_mapped_provider_credential_pool_visibility(monkeypatch):
     """Mapped providers should appear when credentials live only in auth-store credential_pool."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {"google-ai-studio": {"env": ["GEMINI_API_KEY"]}})

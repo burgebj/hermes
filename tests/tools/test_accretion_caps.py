@@ -19,7 +19,6 @@ These tests pin the new caps + prune hooks.
 """
 
 
-
 class TestReadTrackerCaps:
     def setup_method(self):
         from tools import file_tools

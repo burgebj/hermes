@@ -30,8 +30,6 @@ from agent.usage_pricing import (
 )
 
 
-
-
 def _estimate_cost(
     session_or_model: Dict[str, Any] | str,
     input_tokens: int = 0,
@@ -69,8 +67,6 @@ def _estimate_cost(
         base_url=base_url,
     )
     return float(result.amount_usd or 0.0), result.status
-
-
 
 
 def _bar_chart(values: List[int], max_width: int = 20) -> List[str]:

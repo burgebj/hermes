@@ -103,7 +103,6 @@ class TestAgentLoopSourceStillHasCarveOut:
         )
 
 
-
 class TestNoneTypeNotIterableIsRetryable:
     """Regression for #33136 / closes lingering Telegram \"Non-retryable error (HTTP None)\".
 

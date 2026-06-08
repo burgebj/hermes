@@ -79,7 +79,6 @@ def _safe_int(value: Any) -> Any:
         return _SENTINEL
 
 
-
 def _validate_usd(value: Optional[str]) -> bool:
     """Return True iff value is a non-None string matching ^-?\\d+\\.\\d{2}$."""
     if value is None:

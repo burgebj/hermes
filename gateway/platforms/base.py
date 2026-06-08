@@ -2287,7 +2287,6 @@ class BasePlatformAdapter(ABC):
         """
         return None
 
-
     async def edit_message(
         self,
         chat_id: str,
@@ -2807,7 +2806,6 @@ class BasePlatformAdapter(ABC):
                 logger.warning("Skipping unsafe local file path: %s", _log_safe_path(raw))
         return safe_paths
 
-
     @staticmethod
     def _mask_protected_spans(content: str) -> str:
         """Replace content inside fenced code blocks, inline code spans,
@@ -2847,7 +2845,6 @@ class BasePlatformAdapter(ABC):
                     chars[i] = ' '
 
         return ''.join(chars)
-
 
     @staticmethod
     def _mask_json_string_media(content: str) -> str:
@@ -4273,7 +4270,6 @@ class BasePlatformAdapter(ABC):
                         )
                     except Exception as batch_err:
                         logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
-
 
                 # Send extracted media files — route by file type
                 _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}

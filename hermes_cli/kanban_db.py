@@ -4164,7 +4164,6 @@ def block_task(
         return True
 
 
-
 def promote_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -5337,7 +5336,6 @@ def detect_stale_running(
     """
     if stale_timeout_seconds <= 0:
         return []
-
 
     now = int(time.time())
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
