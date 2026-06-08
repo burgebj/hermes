@@ -202,6 +202,43 @@ class TestCreateProfile:
             / "SKILL.md"
         ).read_text() == "---\nname: installed-skill\n---\n"
 
+    def test_clone_config_excludes_archive_and_bytecode_from_skills(self, profile_env):
+        """``skills/.archive`` and ``__pycache__`` must be filtered when cloning
+        the skills/ subtree.  Documented in
+        ``skills/devops/kanban-orchestrator/SKILL.md`` as a known cause of
+        ``hermes profile create --clone`` failures (dangling entries inside
+        archived snapshots make ``copytree`` raise instead of producing a
+        usable profile).  The active skill content must still be copied.
+        """
+        tmp_path = profile_env
+        default_home = tmp_path / ".hermes"
+
+        # Active skill — should be copied
+        active = default_home / "skills" / "my-skill"
+        active.mkdir(parents=True)
+        (active / "SKILL.md").write_text("---\nname: my-skill\n---\n")
+
+        # Archived skill snapshot at root of skills/ — must be filtered
+        archive_dir = default_home / "skills" / ".archive" / "20260430-old-snapshot"
+        archive_dir.mkdir(parents=True)
+        (archive_dir / "SKILL.md").write_text("retired")
+
+        # Bytecode caches at nested depth — must be filtered
+        (active / "__pycache__").mkdir()
+        (active / "__pycache__" / "module.cpython-311.pyc").write_text("stale")
+        (active / "helper.pyc").write_text("stale")
+
+        profile_dir = create_profile("coder", clone_config=True, no_alias=True)
+
+        # Active skill copied
+        assert (profile_dir / "skills" / "my-skill" / "SKILL.md").read_text() == (
+            "---\nname: my-skill\n---\n"
+        )
+        # Universal exclusions filtered out at any depth
+        assert not (profile_dir / "skills" / ".archive").exists()
+        assert not (profile_dir / "skills" / "my-skill" / "__pycache__").exists()
+        assert not (profile_dir / "skills" / "my-skill" / "helper.pyc").exists()
+
     def test_clone_all_copies_entire_tree(self, profile_env):
         tmp_path = profile_env
         default_home = tmp_path / ".hermes"
@@ -267,6 +304,9 @@ class TestCreateProfile:
         (default_home / "skills" / "my-skill" / "module.pyo").write_text("stale")
         (default_home / "data.sock").write_text("socket")
         (default_home / "data.tmp").write_text("tmp")
+        # Archived skill snapshots (universal exclusion)
+        (default_home / "skills" / ".archive" / "20260430-old").mkdir(parents=True)
+        (default_home / "skills" / ".archive" / "20260430-old" / "SKILL.md").write_text("retired")
         # Profile data that SHOULD be copied
         (default_home / "skills" / "my-skill").mkdir(parents=True, exist_ok=True)
         (default_home / "skills" / "my-skill" / "SKILL.md").write_text("skill")
@@ -291,6 +331,7 @@ class TestCreateProfile:
         assert not (profile_dir / "skills" / "my-skill" / "__pycache__").exists()
         assert not (profile_dir / "skills" / "my-skill" / "module.pyc").exists()
         assert not (profile_dir / "skills" / "my-skill" / "module.pyo").exists()
+        assert not (profile_dir / "skills" / ".archive").exists()
         # All profile data must be present
         assert (profile_dir / "skills" / "my-skill" / "SKILL.md").read_text() == "skill"
         assert (profile_dir / "config.yaml").read_text() == "model: gpt-4"

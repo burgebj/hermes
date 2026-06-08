@@ -116,6 +116,37 @@ def has_bundled_skills_opt_out(profile_dir: Path) -> bool:
         return False
 
 
+# Entries we never want to copy at any depth during a clone:
+#   - ``__pycache__`` / ``*.pyc`` / ``*.pyo`` — Python bytecode caches
+#     (stale, regenerable, sometimes corrupt across Python versions)
+#   - ``*.sock`` / ``*.tmp``               — runtime sockets and temp files
+#   - ``.archive``                         — skill-author convention for
+#     retired skill contents. Documented in
+#     ``skills/devops/kanban-orchestrator/SKILL.md`` as a known cause of
+#     ``hermes profile create --clone`` failures (dangling entries inside
+#     archived snapshots make ``copytree`` raise instead of producing a
+#     usable profile). ``.archive`` is never an active part of any
+#     profile's skill set, so dropping it from the clone is safe.
+_CLONE_UNIVERSAL_IGNORE_NAMES: frozenset[str] = frozenset({"__pycache__", ".archive"})
+_CLONE_UNIVERSAL_IGNORE_SUFFIXES: tuple[str, ...] = (".pyc", ".pyo", ".sock", ".tmp")
+
+
+def _is_universal_clone_ignore(entry: str) -> bool:
+    """True if *entry* should be excluded from any profile clone, at any depth."""
+    if entry in _CLONE_UNIVERSAL_IGNORE_NAMES:
+        return True
+    return entry.endswith(_CLONE_UNIVERSAL_IGNORE_SUFFIXES)
+
+
+def _clone_skills_copytree_ignore(directory: str, names: List[str]) -> List[str]:
+    """``copytree`` ignore callable for the ``skills/`` subtree.
+
+    Applies only the universal exclusions — no root-level Hermes-infrastructure
+    set, because the source is a skills directory, not a whole profile home.
+    """
+    return [n for n in names if _is_universal_clone_ignore(n)]
+
+
 def _clone_all_copytree_ignore(source_dir: Path):
     """Exclude infrastructure artifacts when cloning a profile via --clone-all.
 
@@ -125,9 +156,8 @@ def _clone_all_copytree_ignore(source_dir: Path):
          (``~/.hermes``) ever contains.  Gated on ``source_dir`` actually
          being the default profile so a named-profile source never has its
          own data silently dropped.
-      2. Universal exclusions at any depth — Python bytecode caches that
-         are stale or regenerable (``__pycache__``, ``*.pyc``, ``*.pyo``)
-         and runtime sockets / temp files (``*.sock``, ``*.tmp``).
+      2. Universal exclusions at any depth — see
+         ``_is_universal_clone_ignore``.
 
     The export-side ignore (``_default_export_ignore``) uses the same
     two-tier pattern with the broader ``_DEFAULT_EXPORT_EXCLUDE_ROOT`` set
@@ -141,10 +171,7 @@ def _clone_all_copytree_ignore(source_dir: Path):
         ignored: list[str] = []
         for entry in names:
             # Universal exclusions at any depth.
-            if (
-                entry == "__pycache__"
-                or entry.endswith((".pyc", ".pyo", ".sock", ".tmp"))
-            ):
+            if _is_universal_clone_ignore(entry):
                 ignored.append(entry)
                 continue
             # Root-level exclusions only apply when cloning the default profile.
@@ -821,9 +848,17 @@ def create_profile(
             # "clone from default" flow is expected to preserve both bundled
             # and user-installed skills so the new profile immediately has the
             # same agent capabilities as the source profile.
+            # ``_clone_skills_copytree_ignore`` drops universal-ignore entries
+            # (``__pycache__``, ``.archive``, ``*.pyc`` …) so dirty bytecode
+            # caches or archived skill snapshots can't make this raise.
             source_skills = source_dir / "skills"
             if source_skills.is_dir():
-                shutil.copytree(source_skills, profile_dir / "skills", dirs_exist_ok=True)
+                shutil.copytree(
+                    source_skills,
+                    profile_dir / "skills",
+                    dirs_exist_ok=True,
+                    ignore=_clone_skills_copytree_ignore,
+                )
 
             # Clone memory and other subdirectory files
             for relpath in _CLONE_SUBDIR_FILES:
