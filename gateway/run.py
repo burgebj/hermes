@@ -13620,14 +13620,6 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 _fut.add_done_callback(_track_status_id)
 
         def run_sync():
-            # The conditional re-assignment of `message` further below
-            # (prepending model-switch notes) makes Python treat it as a
-            # local variable in the entire function.  `nonlocal` lets us
-            # read *and* reassign the outer `_run_agent` parameter without
-            # triggering an UnboundLocalError on the earlier read at
-            # `_resolve_turn_agent_config(message, …)`.
-            nonlocal message
-
             # session_key is now set via contextvars in _set_session_env()
             # (concurrency-safe). Keep os.environ as fallback for CLI/cron.
             os.environ["HERMES_SESSION_KEY"] = session_key or ""
@@ -14161,10 +14153,11 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     logger.error("Failed to send approval request: %s", _e)
 
             # Prepend pending model switch note so the model knows about the switch
+            run_message_text = message
             _pending_notes = getattr(self, '_pending_model_notes', {})
             _msn = _pending_notes.pop(session_key, None) if session_key else None
             if _msn:
-                message = _msn + "\n\n" + message
+                run_message_text = _msn + "\n\n" + run_message_text
 
             # Auto-continue: if the loaded history ends with a tool result,
             # the previous agent turn was interrupted mid-work (gateway
@@ -14220,22 +14213,22 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     if _reason == "shutdown_timeout"
                     else "a gateway interruption"
                 )
-                message = (
+                run_message_text = (
                     f"[System note: Your previous turn in this session was interrupted "
                     f"by {_reason_phrase}. The conversation history below is intact. "
                     f"If it contains unfinished tool result(s), process them first and "
                     f"summarize what was accomplished, then address the user's new "
                     f"message below.]\n\n"
-                    + message
+                    + run_message_text
                 )
             elif _has_fresh_tool_tail:
-                message = (
+                run_message_text = (
                     "[System note: Your previous turn was interrupted before you could "
                     "process the last tool result(s). The conversation history contains "
                     "tool outputs you haven't responded to yet. Please finish processing "
                     "those results and summarize what was accomplished, then address the "
                     "user's new message below.]\n\n"
-                    + message
+                    + run_message_text
                 )
 
             # Consume one-shot /reload-skills note (if the user ran
@@ -14247,7 +14240,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             if _pending_notes and session_key and session_key in _pending_notes:
                 _srn = _pending_notes.pop(session_key, None)
                 if _srn:
-                    message = _srn + "\n\n" + message
+                    run_message_text = _srn + "\n\n" + run_message_text
 
             _approval_session_key = session_key or ""
             _approval_session_token = set_current_session_key(_approval_session_key)
@@ -14262,7 +14255,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     try:
                         from agent.image_routing import build_native_content_parts
                         _parts, _skipped = build_native_content_parts(
-                            message,
+                            run_message_text,
                             _native_imgs,
                         )
                         if _skipped:
@@ -14274,15 +14267,15 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                             _run_message: Any = _parts
                         else:
                             # All images failed to read — fall back to plain text.
-                            _run_message = message
+                            _run_message = run_message_text
                     except Exception as _img_exc:
                         logger.warning(
                             "Native image attachment failed, falling back to text: %s",
                             _img_exc,
                         )
-                        _run_message = message
+                        _run_message = run_message_text
                 else:
-                    _run_message = message
+                    _run_message = run_message_text
 
                 _api_run_message = _wrap_current_message_with_observed_context(
                     _run_message,
@@ -14293,7 +14286,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     "task_id": session_id,
                 }
                 if observed_group_context:
-                    _conversation_kwargs["persist_user_message"] = message
+                    _conversation_kwargs["persist_user_message"] = run_message_text
                 result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
             finally:
                 unregister_gateway_notify(_approval_session_key)
