@@ -369,7 +369,7 @@ def test_auth_add_nous_oauth_honors_custom_label(tmp_path, monkeypatch):
     assert payload["providers"]["nous"]["label"] == "my-nous"
 
 
-def test_auth_add_codex_oauth_persists_pool_entry(tmp_path, monkeypatch):
+def test_auth_add_codex_oauth_persists_manual_pool_entry(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     _write_auth_store(tmp_path, {"version": 1, "providers": {}})
     token = _jwt_with_email("codex@example.com")
@@ -397,13 +397,67 @@ def test_auth_add_codex_oauth_persists_pool_entry(tmp_path, monkeypatch):
 
     payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
     entries = payload["credential_pool"]["openai-codex"]
-    entry = next(item for item in entries if item["source"] == "device_code")
+    entry = next(item for item in entries if item["source"] == "manual:device_code")
     assert payload["active_provider"] == "openai-codex"
-    assert payload["providers"]["openai-codex"]["tokens"]["access_token"] == token
+    assert "openai-codex" not in payload.get("providers", {})
     assert entry["label"] == "codex@example.com"
-    assert entry["source"] == "device_code"
+    assert entry["source"] == "manual:device_code"
+    assert entry["access_token"] == token
     assert entry["refresh_token"] == "refresh-token"
     assert entry["base_url"] == "https://chatgpt.com/backend-api/codex"
+
+
+def test_auth_add_codex_second_oauth_preserves_existing_token(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    first_token = _jwt_with_email("first@example.com")
+    second_token = _jwt_with_email("second@example.com")
+    _write_auth_store(tmp_path, {
+        "version": 1,
+        "providers": {
+            "openai-codex": {
+                "tokens": {
+                    "access_token": first_token,
+                    "refresh_token": "first-refresh",
+                },
+                "last_refresh": "2026-03-23T09:00:00Z",
+                "auth_mode": "chatgpt",
+                "label": "first@example.com",
+            }
+        },
+        "credential_pool": {},
+    })
+    monkeypatch.setattr(
+        "hermes_cli.auth._codex_device_code_login",
+        lambda: {
+            "tokens": {
+                "access_token": second_token,
+                "refresh_token": "second-refresh",
+            },
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "last_refresh": "2026-03-23T10:00:00Z",
+        },
+    )
+
+    from hermes_cli.auth_commands import auth_add_command
+
+    class _Args:
+        provider = "openai-codex"
+        auth_type = "oauth"
+        api_key = None
+        label = None
+
+    auth_add_command(_Args())
+
+    payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    entries = payload["credential_pool"]["openai-codex"]
+    by_source = {entry["source"]: entry for entry in entries}
+    assert payload["active_provider"] == "openai-codex"
+    assert payload["providers"]["openai-codex"]["tokens"]["access_token"] == first_token
+    assert by_source["device_code"]["access_token"] == first_token
+    assert by_source["device_code"]["refresh_token"] == "first-refresh"
+    assert by_source["manual:device_code"]["access_token"] == second_token
+    assert by_source["manual:device_code"]["refresh_token"] == "second-refresh"
+    assert len(entries) == 2
 
 
 def test_auth_add_xai_oauth_sets_active_provider(tmp_path, monkeypatch):
@@ -1315,7 +1369,7 @@ def test_auth_add_codex_clears_suppression_marker(tmp_path, monkeypatch):
     assert "openai-codex" not in payload.get("suppressed_sources", {})
     # New pool entry must be present
     entries = payload["credential_pool"]["openai-codex"]
-    assert any(e["source"] == "device_code" for e in entries)
+    assert any(e["source"] == "manual:device_code" for e in entries)
     assert payload["active_provider"] == "openai-codex"
 
 

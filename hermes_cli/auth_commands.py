@@ -308,19 +308,40 @@ def auth_add_command(args) -> None:
 
     if provider == "openai-codex":
         creds = auth_mod._codex_device_code_login()
+        tokens = creds["tokens"]
         label = (getattr(args, "label", None) or "").strip() or label_from_token(
-            creds["tokens"]["access_token"],
+            tokens["access_token"],
             _oauth_default_label(provider, len(pool.entries()) + 1),
         )
-        auth_mod._save_codex_tokens(
-            creds["tokens"],
-            last_refresh=creds.get("last_refresh"),
+        # `hermes auth add openai-codex` is explicitly a credential-pool
+        # operation. Do not write through `_save_codex_tokens()` here: that
+        # function updates the singleton `providers.openai-codex` state and
+        # deliberately syncs every device-code-backed pool entry to the fresh
+        # token. That is correct for a re-auth of the singleton path, but it
+        # destroys multi-login pools by replacing the first account's token
+        # when the user adds a second account. Store new logins as independent
+        # manual pool entries instead.
+        entry = PooledCredential(
+            provider=provider,
+            id=uuid.uuid4().hex[:6],
             label=label,
+            auth_type=AUTH_TYPE_OAUTH,
+            priority=0,
+            source=f"{SOURCE_MANUAL}:device_code",
+            access_token=tokens["access_token"],
+            refresh_token=tokens.get("refresh_token"),
+            base_url=creds.get("base_url") or _provider_base_url(provider),
+            last_refresh=creds.get("last_refresh"),
         )
-        pool = load_pool(provider)
-        entry = next((item for item in pool.entries() if item.source == "device_code"), None)
-        shown_label = entry.label if entry is not None else label
-        print(f'Saved {provider} OAuth device-code credentials: "{shown_label}"')
+        pool.add_entry(entry)
+        # Keep the provider selected without mutating/syncing the singleton
+        # token block. Runtime resolution checks the pool first and falls back
+        # to the pool if no singleton exists.
+        with auth_mod._auth_store_lock():
+            auth_store = auth_mod._load_auth_store()
+            auth_store["active_provider"] = provider
+            auth_mod._save_auth_store(auth_store)
+        print(f'Added {provider} OAuth credential #{len(pool.entries())}: "{entry.label}"')
         return
 
     if provider == "xai-oauth":
