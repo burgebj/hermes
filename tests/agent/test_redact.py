@@ -482,3 +482,177 @@ class TestXaiToken:
     def test_prefix_visible_in_masked_output(self):
         result = redact_sensitive_text(self.KEY, force=True)
         assert result.startswith("xai-AB")
+
+
+class TestLooksLikeRedactedSecret:
+    """Regression tests for #30962 — detect masked-placeholder copy-paste.
+
+    The patch tool calls ``looks_like_redacted_secret`` on its inputs to
+    reject ``old_string`` / ``new_string`` that look like they were copied
+    from redacted ``read_file`` output. False negatives there cause silent
+    patch mismatches or, worse, write the masked placeholder back over a
+    real secret.
+    """
+
+    def test_masked_openai_key_detected(self):
+        from agent.redact import looks_like_redacted_secret
+        hit = looks_like_redacted_secret("api_key: sk-exa...hars")
+        assert hit == "sk-exa...hars"
+
+    def test_masked_github_pat_detected(self):
+        from agent.redact import looks_like_redacted_secret
+        hit = looks_like_redacted_secret("token = 'ghp_ab...wxyz'")
+        assert hit == "ghp_ab...wxyz"
+
+    def test_masked_jwt_detected(self):
+        from agent.redact import looks_like_redacted_secret
+        hit = looks_like_redacted_secret("Authorization: Bearer eyJabc...XYZA")
+        assert hit and hit.startswith("eyJ") and "..." in hit
+
+    def test_literal_private_key_marker_detected(self):
+        from agent.redact import looks_like_redacted_secret
+        hit = looks_like_redacted_secret("ssh_key: [REDACTED PRIVATE KEY]\n")
+        assert hit == "[REDACTED PRIVATE KEY]"
+
+    def test_plain_code_with_ellipsis_passes(self):
+        from agent.redact import looks_like_redacted_secret
+        # Real code can legitimately contain `...` (e.g. typing.Literal, docs).
+        assert looks_like_redacted_secret("def foo(...): ...") is None
+        assert looks_like_redacted_secret("see docs for more...") is None
+
+    def test_raw_secret_value_passes(self):
+        from agent.redact import looks_like_redacted_secret
+        # A real, un-redacted key has no `...` in the middle.
+        assert looks_like_redacted_secret("api_key: sk-example-real-key-with-more-than-13-chars") is None
+
+    def test_empty_and_none_pass(self):
+        from agent.redact import looks_like_redacted_secret
+        assert looks_like_redacted_secret("") is None
+        assert looks_like_redacted_secret(None) is None
+
+    def test_full_yaml_block_with_masked_key_detected(self):
+        """The motivating example from the issue."""
+        from agent.redact import looks_like_redacted_secret
+        block = (
+            "auxiliary:\n"
+            "  title_generation:\n"
+            "    api_key: sk-exa...hars\n"
+            "    model: title-generator\n"
+        )
+        hit = looks_like_redacted_secret(block)
+        assert hit == "sk-exa...hars"
+
+
+class TestLooksLikeRedactedSecretV2:
+    """#30962 round 2 — extended coverage for opaque tokens and `***` shapes
+    that the prefix-only detector missed.
+
+    Background: the redactor emits FOUR distinct placeholder shapes via
+    `_mask_token` / `_DB_CONNSTR_RE` / `_TELEGRAM_RE` / query-string
+    redaction, not just the vendor-prefix `sk-exa...hars` case from the
+    original issue example. A copy-paste of any of them into a write tool
+    is the same corruption class.
+    """
+
+    # --- opaque tokens behind a sensitive key (no vendor prefix) ---
+
+    def test_opaque_password_in_yaml_detected(self):
+        from agent.redact import looks_like_redacted_secret
+        hit = looks_like_redacted_secret('password: abc123...wxyz')
+        assert hit and "...wxyz" in hit
+
+    def test_opaque_apikey_json_field_detected(self):
+        from agent.redact import looks_like_redacted_secret
+        hit = looks_like_redacted_secret('"apiKey": "abcdef...wxyz"')
+        assert hit and "abcdef...wxyz" in hit
+
+    def test_authorization_bearer_masked_detected(self):
+        from agent.redact import looks_like_redacted_secret
+        hit = looks_like_redacted_secret("Authorization: Bearer abcdef...wxyz")
+        assert hit and "abcdef...wxyz" in hit
+
+    def test_env_assignment_masked_detected(self):
+        from agent.redact import looks_like_redacted_secret
+        hit = looks_like_redacted_secret("MY_API_KEY=abcdef...wxyz")
+        assert hit and "abcdef...wxyz" in hit
+
+    def test_password_eq_masked_detected(self):
+        from agent.redact import looks_like_redacted_secret
+        hit = looks_like_redacted_secret("DATABASE_PASSWORD=abcdef...wxyz")
+        assert hit and "abcdef...wxyz" in hit
+
+    # --- bare `***` placeholders ---
+
+    def test_db_connstring_triple_star_detected(self):
+        from agent.redact import looks_like_redacted_secret
+        hit = looks_like_redacted_secret("DATABASE_URL: postgres://user:***@host/db")
+        assert hit == "postgres://user:***@"
+
+    def test_mongodb_srv_triple_star_detected(self):
+        from agent.redact import looks_like_redacted_secret
+        hit = looks_like_redacted_secret(
+            "MONGO_URL=mongodb+srv://bob:***@cluster0.mongodb.net/myDb"
+        )
+        assert hit and "***" in hit
+
+    def test_redis_triple_star_detected(self):
+        from agent.redact import looks_like_redacted_secret
+        hit = looks_like_redacted_secret("redis://default:***@redis.internal:6379")
+        assert hit and "***" in hit
+
+    # --- documentation placeholders we DELIBERATELY allow through ---
+    #
+    # `api_key: ***`, `OPENAI_API_KEY=***`, `"apiKey": "***"` are exactly how
+    # real `.env.example` / README / config-template files document
+    # placeholders. The redactor also emits these shapes when masking a
+    # sub-floor-length value, but the corruption window is narrow (real
+    # production secrets are almost always long enough to be masked as
+    # `head...tail` — caught by `_CONTEXT_MASKED_RE`). Refusing every edit to
+    # a template file is worse than that narrow window, so we deliberately
+    # let these through. See `looks_like_redacted_secret` docstring.
+
+    def test_yaml_template_placeholder_passes(self):
+        from agent.redact import looks_like_redacted_secret
+        assert looks_like_redacted_secret("api_key: ***") is None
+
+    def test_env_example_placeholder_passes(self):
+        from agent.redact import looks_like_redacted_secret
+        assert looks_like_redacted_secret("OPENAI_API_KEY=***") is None
+
+    def test_json_template_placeholder_passes(self):
+        from agent.redact import looks_like_redacted_secret
+        assert looks_like_redacted_secret('"apiKey": "***"') is None
+
+    # --- false positives we must NOT trigger ---
+
+    def test_markdown_bold_emphasis_passes(self):
+        """`***strong emphasis***` in Markdown must not trigger any rule."""
+        from agent.redact import looks_like_redacted_secret
+        assert looks_like_redacted_secret("This is ***important*** text") is None
+
+    def test_path_with_ellipsis_passes(self):
+        """`foo/bar.../baz.py` style paths (no known prefix, no sensitive key
+        context) must not trigger the masked-token rules."""
+        from agent.redact import looks_like_redacted_secret
+        assert looks_like_redacted_secret("see foo/bar.../baz.py for details") is None
+
+    def test_non_secret_key_with_ellipsis_passes(self):
+        """An ordinary identifier ending in a sensitive substring shouldn't
+        match if it's not actually a sensitive key (word boundary + suffix)."""
+        from agent.redact import looks_like_redacted_secret
+        # `not_a_token` is not a token; `token_count: 42` is fine.
+        # (Word boundary prevents matching `not_a_token: abc...wxyz`.)
+        assert looks_like_redacted_secret("token_count: 42") is None
+
+    def test_word_in_prose_not_followed_by_assignment_passes(self):
+        """Prose mentioning `password` without `=` or `:` shouldn't trigger."""
+        from agent.redact import looks_like_redacted_secret
+        assert looks_like_redacted_secret("The password section is important.") is None
+
+    def test_db_connstring_without_triple_star_passes(self):
+        """Real DB connstring with a real password shouldn't trigger the
+        `***` rule (which is anchored on literal `:***@`)."""
+        from agent.redact import looks_like_redacted_secret
+        assert looks_like_redacted_secret(
+            "postgres://user:realpassword@host/db"
+        ) is None
