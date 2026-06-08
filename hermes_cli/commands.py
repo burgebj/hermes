@@ -550,12 +550,72 @@ need to survive the visible menu cap ahead of lower-priority built-ins.
 """
 
 
+def _configured_telegram_menu_priority() -> list[str]:
+    """Return user-configured Telegram menu priority command names.
+
+    Users can place custom plugin/skill commands ahead of the built-in priority
+    list with ``telegram.menu_priority`` in config.yaml. The value may be a YAML
+    list or a comma-separated string. Unknown commands are harmless: they are
+    ignored naturally when sorting because only commands present in the menu are
+    ranked.
+    """
+    try:
+        from hermes_cli.config import read_raw_config
+
+        cfg = read_raw_config()
+    except Exception:
+        return []
+
+    value: Any = None
+    telegram_cfg = cfg.get("telegram") if isinstance(cfg, dict) else None
+    if isinstance(telegram_cfg, dict):
+        value = telegram_cfg.get("menu_priority")
+
+    if value is None:
+        # Backward-compatible with early user docs/examples that nested
+        # Telegram settings under gateway.telegram. Hermes' canonical config
+        # keeps platform blocks at the top level, but accepting both shapes
+        # makes this knob forgiving.
+        gateway_cfg = cfg.get("gateway") if isinstance(cfg, dict) else None
+        if isinstance(gateway_cfg, dict):
+            nested_telegram = gateway_cfg.get("telegram")
+            if isinstance(nested_telegram, dict):
+                value = nested_telegram.get("menu_priority")
+
+    if isinstance(value, str):
+        raw_items = [item.strip() for item in value.split(",")]
+    elif isinstance(value, (list, tuple)):
+        raw_items = [str(item).strip() for item in value]
+    else:
+        return []
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        name = _sanitize_telegram_name(item.lstrip("/"))
+        if name and name not in seen:
+            result.append(name)
+            seen.add(name)
+    return result
+
+
+def _telegram_menu_priority() -> list[str]:
+    """Return configured priority followed by built-in operational priority."""
+    configured = _configured_telegram_menu_priority()
+    seen = set(configured)
+    return configured + [
+        _sanitize_telegram_name(name)
+        for name in _TELEGRAM_MENU_PRIORITY
+        if _sanitize_telegram_name(name) not in seen
+    ]
+
+
 def _prioritize_telegram_menu_commands(
     commands: list[tuple[str, str]],
 ) -> list[tuple[str, str]]:
     priority = {
-        _sanitize_telegram_name(name): index
-        for index, name in enumerate(_TELEGRAM_MENU_PRIORITY)
+        name: index
+        for index, name in enumerate(_telegram_menu_priority())
     }
     return [
         command

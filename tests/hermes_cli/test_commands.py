@@ -981,6 +981,60 @@ class TestTelegramMenuCommands:
         ):
             assert name in names
 
+
+    def test_configured_menu_priority_can_pin_plugin_commands(self, tmp_path, monkeypatch):
+        """telegram.menu_priority lets custom commands survive the visible menu cap."""
+        from unittest.mock import patch
+        import hermes_cli.plugins as plugins_mod
+
+        plugin_dir = tmp_path / "plugins" / "shortcut-plugin"
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        (plugin_dir / "plugin.yaml").write_text(
+            "name: shortcut-plugin\nversion: 0.1.0\ndescription: Test shortcuts\n"
+        )
+        (plugin_dir / "__init__.py").write_text(
+            "def register(ctx):\n"
+            "    for name in ['specialists', 'research', 'edit', 'field', 'hdebug', 'review']:\n"
+            "        ctx.register_command(name, lambda args, name=name: name, description=f'{name} shortcut')\n"
+        )
+        (tmp_path / "config.yaml").write_text(
+            "plugins:\n"
+            "  enabled:\n"
+            "    - shortcut-plugin\n"
+            "telegram:\n"
+            "  menu_priority:\n"
+            "    - specialists\n"
+            "    - research\n"
+            "    - edit\n"
+            "    - field\n"
+            "    - hdebug\n"
+            "    - review\n"
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        with patch.object(plugins_mod, "_plugin_manager", None):
+            menu, hidden = telegram_menu_commands(max_commands=6)
+
+        assert [name for name, _desc in menu] == [
+            "specialists",
+            "research",
+            "edit",
+            "field",
+            "hdebug",
+            "review",
+        ]
+        assert hidden > 0
+
+    def test_configured_menu_priority_accepts_comma_string_and_sanitizes(self, tmp_path, monkeypatch):
+        (tmp_path / "config.yaml").write_text(
+            "telegram:\n  menu_priority: '/Status, /new, status, debug'\n"
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        menu, _hidden = telegram_menu_commands(max_commands=4)
+
+        assert [name for name, _desc in menu][:4] == ["status", "new", "debug", "help"]
+
     def test_includes_plugin_commands_via_lazy_discovery(self, tmp_path, monkeypatch):
         """Telegram menu generation should discover plugin slash commands on first access."""
         from unittest.mock import patch

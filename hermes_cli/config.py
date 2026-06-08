@@ -1888,6 +1888,10 @@ DEFAULT_CONFIG = {
         "reactions": False,            # Add 👀/✅/❌ reactions to messages during processing
         "channel_prompts": {},         # Per-chat/topic ephemeral system prompts (topics inherit from parent group)
         "allowed_chats": "",           # If set, bot ONLY responds in these group/supergroup chat IDs (whitelist)
+        # Optional command names to pin first in Telegram's capped BotCommand
+        # menu. Useful for custom plugin/skill shortcuts; unknown names are
+        # ignored. Example: ["help", "new", "my_plugin_command"].
+        "menu_priority": [],
     },
 
     # Mattermost platform settings (gateway mode)
