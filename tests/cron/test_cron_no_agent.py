@@ -329,3 +329,215 @@ def test_run_job_script_path_traversal_still_blocked(hermes_env):
     ok, output = _run_job_script("/etc/passwd")
     assert ok is False
     assert "Blocked" in output or "outside" in output
+
+
+# ---------------------------------------------------------------------------
+# no_agent session lifecycle (issue #41935)
+# ---------------------------------------------------------------------------
+
+
+def test_no_agent_success_closes_session(hermes_env, monkeypatch):
+    """A successful no_agent run must call end_session on the session row."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job
+
+    script_path = hermes_env / "scripts" / "ok.sh"
+    script_path.write_text("#!/bin/bash\necho hello\n")
+
+    calls = []
+
+    class FakeSessionDB:
+        def create_session(self, *a, **kw):
+            calls.append(("create", a, kw))
+
+        def end_session(self, sid, reason):
+            calls.append(("end", sid, reason))
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(
+        "hermes_state.SessionDB", lambda: FakeSessionDB(), raising=False
+    )
+
+    job = create_job(
+        prompt=None, schedule="every 5m", script="ok.sh", no_agent=True, deliver="local"
+    )
+    success, doc, final_response, error = run_job(job)
+    assert success is True
+
+    end_calls = [c for c in calls if c[0] == "end"]
+    assert len(end_calls) == 1
+    assert end_calls[0][2] == "cron_complete"
+
+
+def test_no_agent_script_failure_closes_session(hermes_env, monkeypatch):
+    """A failed no_agent script must still call end_session."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job
+
+    script_path = hermes_env / "scripts" / "fail.sh"
+    script_path.write_text("#!/bin/bash\necho boom >&2\nexit 1\n")
+
+    calls = []
+
+    class FakeSessionDB:
+        def create_session(self, *a, **kw):
+            calls.append(("create", a, kw))
+
+        def end_session(self, sid, reason):
+            calls.append(("end", sid, reason))
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(
+        "hermes_state.SessionDB", lambda: FakeSessionDB(), raising=False
+    )
+
+    job = create_job(
+        prompt=None, schedule="every 5m", script="fail.sh", no_agent=True, deliver="local"
+    )
+    success, doc, final_response, error = run_job(job)
+    assert success is False
+
+    end_calls = [c for c in calls if c[0] == "end"]
+    assert len(end_calls) == 1
+    assert end_calls[0][2] == "cron_script_failed"
+
+
+def test_no_agent_wake_gate_closes_session(hermes_env, monkeypatch):
+    """wakeAgent=false silent run must still call end_session."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job, SILENT_MARKER
+
+    script_path = hermes_env / "scripts" / "gate.sh"
+    script_path.write_text('#!/bin/bash\necho \'{"wakeAgent": false}\'\n')
+
+    calls = []
+
+    class FakeSessionDB:
+        def create_session(self, *a, **kw):
+            calls.append(("create", a, kw))
+
+        def end_session(self, sid, reason):
+            calls.append(("end", sid, reason))
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(
+        "hermes_state.SessionDB", lambda: FakeSessionDB(), raising=False
+    )
+
+    job = create_job(
+        prompt=None, schedule="every 5m", script="gate.sh", no_agent=True, deliver="local"
+    )
+    success, doc, final_response, error = run_job(job)
+    assert success is True
+    assert final_response == SILENT_MARKER
+
+    end_calls = [c for c in calls if c[0] == "end"]
+    assert len(end_calls) == 1
+    assert end_calls[0][2] == "cron_silent_wake"
+
+
+def test_no_agent_empty_output_closes_session(hermes_env, monkeypatch):
+    """Empty stdout silent run must still call end_session."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job, SILENT_MARKER
+
+    script_path = hermes_env / "scripts" / "empty.sh"
+    script_path.write_text("#!/bin/bash\n# silent\n")
+
+    calls = []
+
+    class FakeSessionDB:
+        def create_session(self, *a, **kw):
+            calls.append(("create", a, kw))
+
+        def end_session(self, sid, reason):
+            calls.append(("end", sid, reason))
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(
+        "hermes_state.SessionDB", lambda: FakeSessionDB(), raising=False
+    )
+
+    job = create_job(
+        prompt=None,
+        schedule="every 5m",
+        script="empty.sh",
+        no_agent=True,
+        deliver="local",
+    )
+    success, doc, final_response, error = run_job(job)
+    assert success is True
+    assert final_response == SILENT_MARKER
+
+    end_calls = [c for c in calls if c[0] == "end"]
+    assert len(end_calls) == 1
+    assert end_calls[0][2] == "cron_silent_empty"
+
+
+def test_no_agent_multiple_runs_no_zombie_sessions(hermes_env, monkeypatch):
+    """Running a no_agent job N times must call end_session N times."""
+    from cron.jobs import create_job
+    from cron.scheduler import run_job
+
+    script_path = hermes_env / "scripts" / "tick.sh"
+    script_path.write_text("#!/bin/bash\necho tick\n")
+
+    calls = []
+
+    class FakeSessionDB:
+        def create_session(self, *a, **kw):
+            calls.append(("create", a, kw))
+
+        def end_session(self, sid, reason):
+            calls.append(("end", sid, reason))
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(
+        "hermes_state.SessionDB", lambda: FakeSessionDB(), raising=False
+    )
+
+    job = create_job(
+        prompt=None, schedule="every 5m", script="tick.sh", no_agent=True, deliver="local"
+    )
+    for _ in range(5):
+        success, _, _, _ = run_job(job)
+        assert success is True
+
+    end_calls = [c for c in calls if c[0] == "end"]
+    assert len(end_calls) == 5
+    for c in end_calls:
+        assert c[2] == "cron_complete"
+
+
+def test_end_no_agent_session_handles_none_db():
+    """_end_no_agent_session must be safe when SessionDB is None."""
+    from cron.scheduler import _end_no_agent_session
+
+    # Should not raise.
+    _end_no_agent_session(None, None, "cron_complete")
+    _end_no_agent_session(None, "some_id", "cron_complete")
+
+
+def test_end_no_agent_session_handles_none_session_id():
+    """_end_no_agent_session must be safe when session_id is None."""
+    from cron.scheduler import _end_no_agent_session
+
+    class FakeDB:
+        def end_session(self, *a, **kw):
+            raise RuntimeError("should not be called")
+
+        def close(self):
+            raise RuntimeError("should not be called")
+
+    # Should not raise even though session_id is None.
+    _end_no_agent_session(FakeDB(), None, "cron_complete")
