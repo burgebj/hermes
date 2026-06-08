@@ -1121,6 +1121,7 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".log": "text/plain",
     ".json": "application/json",
     ".xml": "application/xml",
+    ".fb2": "application/xml",
     ".yaml": "application/yaml",
     ".yml": "application/yaml",
     ".toml": "application/toml",
