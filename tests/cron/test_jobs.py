@@ -408,6 +408,41 @@ class TestResolveJobRef:
         assert result is not None
         assert result["id"] == job["id"]
 
+    def test_trigger_sets_scheduled_next_run_at(self, tmp_cron_dir):
+        """trigger_job must store the real next scheduled run so user-facing
+        output can distinguish 'running now' from 'next scheduled'."""
+        pytest.importorskip("croniter")
+        from cron.jobs import trigger_job
+
+        job = create_job(prompt="A", schedule="0 9 * * 1-5", name="vault")
+        result = trigger_job("vault")
+        assert result is not None
+        # next_run_at should be ~now (forced-tick value)
+        assert result["next_run_at"] is not None
+        # scheduled_next_run_at should be the real next 09:00 weekday
+        assert result["scheduled_next_run_at"] is not None
+        assert result["scheduled_next_run_at"] != result["next_run_at"]
+        # The scheduled next run must be in the future
+        from datetime import datetime, timezone
+        scheduled = datetime.fromisoformat(result["scheduled_next_run_at"])
+        now = datetime.now(timezone.utc)
+        # Allow 6 days margin (if triggered on Friday, next weekday is Monday)
+        assert scheduled > now - timedelta(seconds=5)
+
+    def test_trigger_clears_scheduled_next_run_on_execution(self, tmp_cron_dir):
+        """After mark_job_run, scheduled_next_run_at should be cleared."""
+        pytest.importorskip("croniter")
+        from cron.jobs import trigger_job
+
+        job = create_job(prompt="A", schedule="0 9 * * 1-5", name="vault")
+        trigger_job("vault")
+        mark_job_run(job["id"], success=True)
+        updated = get_job(job["id"])
+        assert updated is not None
+        assert "scheduled_next_run_at" not in updated
+        # next_run_at should now be the real croniter-computed value
+        assert updated["next_run_at"] is not None
+
     def test_pause_by_name(self, tmp_cron_dir):
         job = create_job(prompt="A", schedule="1h", name="alpha")
         result = pause_job("alpha", reason="manual")

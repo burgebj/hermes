@@ -873,6 +873,9 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
     job = resolve_job_ref(job_id)
     if not job:
         return None
+    # Compute the real next scheduled run from the cron expression so
+    # user-facing output can distinguish "running now" from "next scheduled".
+    scheduled_next = compute_next_run(job["schedule"], last_run_at=job.get("last_run_at"))
     return update_job(
         job["id"],
         {
@@ -881,6 +884,7 @@ def trigger_job(job_id: str) -> Optional[Dict[str, Any]]:
             "paused_at": None,
             "paused_reason": None,
             "next_run_at": _hermes_now().isoformat(),
+            "scheduled_next_run_at": scheduled_next,
         },
     )
 
@@ -944,6 +948,9 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                 
                 # Compute next run
                 job["next_run_at"] = compute_next_run(job["schedule"], now)
+                # Clear the forced-tick display hint — it was only needed
+                # between trigger_job and the actual execution.
+                job.pop("scheduled_next_run_at", None)
 
                 # If no next run, decide whether this is terminal completion
                 # (one-shot) or a transient failure (recurring schedule couldn't

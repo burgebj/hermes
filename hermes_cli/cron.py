@@ -319,10 +319,14 @@ def _job_action(action: str, job_id: str, success_verb: str) -> int:
         return 1
     job = result.get("job") or result.get("removed_job") or {}
     print(color(f"{success_verb} job: {job.get('name', job_id)} ({job_id})", Colors.GREEN))
-    if action in {"resume", "run"} and result.get("job", {}).get("next_run_at"):
-        print(f"  Next run: {result['job']['next_run_at']}")
     if action == "run":
-        print("  It will run on the next scheduler tick.")
+        scheduled = job.get("scheduled_next_run_at")
+        if scheduled:
+            print(f"  Running now; next scheduled: {scheduled}")
+        else:
+            print("  It will run on the next scheduler tick.")
+    elif action == "resume" and job.get("next_run_at"):
+        print(f"  Next run: {job['next_run_at']}")
     return 0
 
 

@@ -443,6 +443,10 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
         "paused_at": job.get("paused_at"),
         "paused_reason": job.get("paused_reason"),
     }
+    # Include the real scheduled next run when trigger_job stored it
+    # (distinguishes "running now" from "next scheduled fire time").
+    if job.get("scheduled_next_run_at"):
+        result["scheduled_next_run_at"] = job["scheduled_next_run_at"]
     if job.get("script"):
         result["script"] = job["script"]
     if job.get("no_agent"):
