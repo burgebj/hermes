@@ -349,7 +349,15 @@ def _strategy_exact(content: str, pattern: str) -> List[Tuple[int, int]]:
         if pos == -1:
             break
         matches.append((pos, pos + len(pattern)))
-        start = pos + 1
+        # Advance past the whole match so self-overlapping patterns (runs of
+        # repeated chars like ``--``/``AAA``) enumerate non-overlapping
+        # occurrences, matching str.count/str.replace semantics. Using
+        # ``pos + 1`` returned overlapping ranges, which corrupted/deleted
+        # content in _apply_replacements (replace_all=True) and falsely
+        # rejected unique edits as "Found N matches" (replace_all=False).
+        # old_string is guaranteed non-empty (early return in
+        # fuzzy_find_and_replace), so there is no zero-length-loop risk.
+        start = pos + len(pattern)
     return matches
 
 

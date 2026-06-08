@@ -167,6 +167,37 @@ class TestReplaceAll:
         assert new == "ccc bbb ccc"
 
 
+class TestSelfOverlappingPattern:
+    """Patterns that can overlap themselves must enumerate non-overlapping
+    occurrences, matching str.count/str.replace — otherwise overlapping
+    ranges corrupt content (replace_all=True) or falsely reject unique
+    edits (replace_all=False)."""
+
+    def test_replace_all_does_not_lose_tail(self):
+        # 'xAAAAy' contains 'AAA' exactly once (non-overlapping); the tail
+        # 'Ay' must survive instead of being spliced away by a phantom
+        # overlapping match.
+        content = "xAAAAy"
+        new, count, _, err = fuzzy_find_and_replace(content, "AAA", "B", replace_all=True)
+        assert err is None
+        assert count == content.count("AAA") == 1
+        assert new == content.replace("AAA", "B") == "xBAy"
+
+    def test_unique_overlap_capable_edit_not_rejected(self):
+        content = "xAAAAy"
+        new, count, _, err = fuzzy_find_and_replace(content, "AAA", "B", replace_all=False)
+        assert err is None
+        assert count == 1
+        assert new == "xBAy"
+
+    def test_divider_run_collapse(self):
+        content = "----- -----"
+        new, count, _, err = fuzzy_find_and_replace(content, "--", "=", replace_all=True)
+        assert err is None
+        assert count == content.count("--") == 4
+        assert new == content.replace("--", "=") == "==- ==-"
+
+
 class TestUnicodeNormalized:
     """Tests for the unicode_normalized strategy (Bug 5)."""
 
