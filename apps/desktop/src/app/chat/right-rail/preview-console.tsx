@@ -5,10 +5,11 @@ import { useEffect, useMemo, useRef } from 'react'
 import { requestComposerInsert } from '@/app/chat/composer/focus'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Tip } from '@/components/ui/tooltip'
-import { useI18n } from '@/i18n'
 import { PanelBottom, Send, Trash2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { t } from '@/store/i18n'
 import { notify } from '@/store/notifications'
+import { useLocaleSync } from '@/store/use-locale-sync'
 
 import type { ConsoleEntry, PreviewConsoleState } from './preview-console-state'
 
@@ -85,7 +86,7 @@ function ConsoleRow({ copyText, log, onSend, onToggleSelect, selected }: Console
         selected && 'border-border/60 bg-accent/40'
       )}
     >
-      <Tip label={selected ? copy.deselect : copy.select}>
+      <Tip label={selected ? 'Deselect entry' : 'Select entry'}>
         <button
           className={cn(
             'mt-0.5 text-left uppercase opacity-70 transition-colors hover:opacity-100',
@@ -118,7 +119,7 @@ function ConsoleRow({ copyText, log, onSend, onToggleSelect, selected }: Console
           showLabel={false}
           text={copyText}
         />
-        <Tip label={copy.sendEntry}>
+        <Tip label="Send this entry to chat">
           <button
             className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
             onClick={onSend}
@@ -157,8 +158,8 @@ export function PreviewConsolePanel({
   consoleState,
   startConsoleResize
 }: PreviewConsolePanelProps) {
-  const { t } = useI18n()
-  const copy = t.preview.console
+  useLocaleSync()
+
   const consoleHeight = useStore(consoleState.$height)
   const logs = useStore(consoleState.$logs)
   const selectedLogIds = useStore(consoleState.$selectedLogIds)
@@ -212,7 +213,7 @@ export function PreviewConsolePanel({
       style={{ '--preview-console-height': `${consoleHeight}px` } as CSSProperties}
     >
       <div
-        aria-label={copy.resize}
+        aria-label={t('previewConsole.resizeLabel')}
         className="group absolute inset-x-0 -top-1 z-1 h-2 cursor-row-resize"
         onDoubleClick={() => consoleState.setHeight(CONSOLE_HEADER_HEIGHT)}
         onPointerDown={startConsoleResize}
@@ -282,7 +283,7 @@ export function PreviewConsolePanel({
             )
           })
         ) : (
-          <div className="py-2 text-muted-foreground/70">{copy.empty}</div>
+          <div className="py-2 text-muted-foreground/70">{t('previewConsole.noMessages')}</div>
         )}
       </div>
     </div>

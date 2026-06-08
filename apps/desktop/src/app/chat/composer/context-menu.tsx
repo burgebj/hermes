@@ -1,5 +1,6 @@
 import { useState } from 'react'
 
+import { useTranslation } from '@/hooks/use-translation'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -14,6 +15,7 @@ import {
 import { useI18n } from '@/i18n'
 import { Clipboard, FileText, FolderOpen, type IconComponent, ImageIcon, Link, MessageSquareText } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { t } from '@/store/i18n'
 
 import { GHOST_ICON_BTN } from './controls'
 import type { ChatBarState } from './types'
@@ -29,8 +31,7 @@ export function ContextMenu({
   onPickFolders,
   onPickImages
 }: ContextMenuProps) {
-  const { t } = useI18n()
-  const c = t.composer
+  const { t } = useTranslation()
   // Prompt snippets used to be a Radix submenu. That submenu didn't open
   // reliably when the parent menu was positioned at the bottom of the
   // window (composer "+" anchor), so we promoted it to a real Dialog —
@@ -58,36 +59,34 @@ export function ContextMenu({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-60" side="top" sideOffset={10}>
           <DropdownMenuLabel className="text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground/85">
-            {c.attachLabel}
+            {t('composer.attach')}
           </DropdownMenuLabel>
           <ContextMenuItem disabled={!onPickFiles} icon={FileText} onSelect={onPickFiles}>
-            {c.files}
+            {t('composer.files')}
           </ContextMenuItem>
           <ContextMenuItem disabled={!onPickFolders} icon={FolderOpen} onSelect={onPickFolders}>
-            {c.folder}
+            {t('composer.folder')}
           </ContextMenuItem>
           <ContextMenuItem disabled={!onPickImages} icon={ImageIcon} onSelect={onPickImages}>
-            {c.images}
+            {t('composer.images')}
           </ContextMenuItem>
           <ContextMenuItem disabled={!onPasteClipboardImage} icon={Clipboard} onSelect={onPasteClipboardImage}>
-            {c.pasteImage}
+            {t('composer.pasteImage')}
           </ContextMenuItem>
           <ContextMenuItem icon={Link} onSelect={onOpenUrlDialog}>
-            {c.url}
+            {t('composer.url')}
           </ContextMenuItem>
 
           <DropdownMenuSeparator />
 
           <ContextMenuItem icon={MessageSquareText} onSelect={() => setSnippetsOpen(true)}>
-            {c.promptSnippets}
+            {t('composer.promptSnippets')}
           </ContextMenuItem>
 
           <DropdownMenuSeparator />
 
           <div className="px-2 py-1 text-[0.7rem] text-muted-foreground/80">
-            {c.tipPre}
-            <kbd className="rounded bg-muted/70 px-1 py-px font-mono text-[0.65rem]">@</kbd>
-            {c.tipPost}
+            {t('chat.composerTip')}
           </div>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -105,8 +104,8 @@ function PromptSnippetsDialog({ onInsertText, onOpenChange, open }: PromptSnippe
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className="max-w-md gap-3">
         <DialogHeader>
-          <DialogTitle>{c.snippetsTitle}</DialogTitle>
-          <DialogDescription>{c.snippetsDesc}</DialogDescription>
+          <DialogTitle>{t('composer.promptSnippets')}</DialogTitle>
+          <DialogDescription>{t('composer.promptSnippetsDesc')}</DialogDescription>
         </DialogHeader>
         <ul className="grid gap-1">
           {SNIPPET_KEYS.map(key => {

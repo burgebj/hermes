@@ -15,6 +15,8 @@ import { Checkbox } from './ui/checkbox'
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from './ui/command'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog'
 import { Skeleton } from './ui/skeleton'
+import { t } from '@/store/i18n'
+import { useTranslation } from '@/hooks/use-translation'
 
 interface ModelPickerDialogProps {
   open: boolean
@@ -52,6 +54,7 @@ export function ModelPickerDialog({
   // it and do a plain substring filter that preserves array order — matching
   // the `hermes model` CLI picker, which shows the curated list verbatim.
   const [search, setSearch] = useState('')
+  const { t: tt } = useTranslation()
 
   const modelOptions = useQuery({
     queryKey: ['model-options', sessionId || 'global'],
@@ -100,9 +103,9 @@ export function ModelPickerDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent className={cn('max-h-[85vh] max-w-2xl gap-0 overflow-hidden p-0', contentClassName)}>
         <DialogHeader className="border-b border-border px-4 py-3">
-          <DialogTitle>{copy.title}</DialogTitle>
+          <DialogTitle>{tt('model.switch')}</DialogTitle>
           <DialogDescription className="font-mono text-xs leading-relaxed">
-            {copy.current} {optionsModel || currentModel || copy.unknown}
+            {tt('model.currentLabel')} {optionsModel || currentModel || tt('model.unknown')}
             {optionsProvider || currentProvider ? ` · ${optionsProvider || currentProvider}` : ''}
           </DialogDescription>
         </DialogHeader>
@@ -111,11 +114,11 @@ export function ModelPickerDialog({
           <CommandInput
             autoFocus
             onValueChange={setSearch}
-            placeholder={copy.search}
+            placeholder={tt('model.filterPlaceholder')}
             value={search}
           />
           <CommandList className="max-h-96">
-            {!loading && !error && <CommandEmpty>{copy.noModels}</CommandEmpty>}
+            {!loading && !error && <CommandEmpty>{tt('model.noResults')}</CommandEmpty>}
             <ModelResults
               currentModel={optionsModel || currentModel}
               currentProvider={optionsProvider || currentProvider}
@@ -135,15 +138,15 @@ export function ModelPickerDialog({
               disabled={!sessionId}
               onCheckedChange={checked => setPersistGlobal(checked === true)}
             />
-            {sessionId ? copy.persistGlobalSession : copy.persistGlobal}
+            {sessionId ? tt('model.persistGlobalSession') : tt('model.persistGlobal')}
           </label>
 
           <div className="flex items-center gap-2">
             <Button onClick={addProvider} variant="ghost">
-              {copy.addProvider}
+              {tt('model.addProviderBtn')}
             </Button>
             <Button onClick={() => onOpenChange(false)} variant="outline">
-              {t.common.cancel}
+              {tt('common.cancel')}
             </Button>
           </div>
         </DialogFooter>
@@ -179,7 +182,7 @@ function ModelResults({
   if (error) {
     return (
       <div className="px-3 py-3">
-        <InlineNotice kind="error" title={copy.loadFailed}>
+        <InlineNotice kind="error" title={t('model.couldNotLoad')}>
           {error}
         </InlineNotice>
       </div>
@@ -187,7 +190,7 @@ function ModelResults({
   }
 
   if (providers.length === 0) {
-    return <div className="px-4 py-6 text-sm text-muted-foreground">{copy.noAuthenticatedProviders}</div>
+    return <div className="px-4 py-6 text-sm text-muted-foreground">{t('errors.noProviders')}</div>
   }
 
   const q = search.trim().toLowerCase()
@@ -247,14 +250,14 @@ function ModelResults({
                   value={`${provider.slug}:${model}`}
                 >
                   <span className="min-w-0 flex-1 truncate">{model}</span>
-                  {locked && <span className="shrink-0 text-[0.62rem] uppercase tracking-wide opacity-80">{copy.pro}</span>}
+                  {locked && <span className="shrink-0 text-[0.62rem] uppercase tracking-wide opacity-80">{t('onboarding.pro')}</span>}
                   <ModelPrice isCurrent={isCurrent} price={price} />
                 </CommandItem>
               )
             })}
             {unavailable.size > 0 && (
               <div className="px-6 pb-2 pt-1 text-[0.62rem] leading-relaxed text-muted-foreground">
-                {copy.proNeedsSubscription}
+                {t('model.proLockedDesc')}
               </div>
             )}
           </CommandGroup>
@@ -282,7 +285,7 @@ function ModelPrice({ price, isCurrent }: { price?: ModelPricing; isCurrent: boo
           isCurrent ? 'bg-primary-foreground/20' : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
         )}
       >
-        {copy.free}
+        {t('model.freePrice')}
       </span>
     )
   }
@@ -293,7 +296,7 @@ function ModelPrice({ price, isCurrent }: { price?: ModelPricing; isCurrent: boo
         'shrink-0 text-[0.66rem] tabular-nums',
         isCurrent ? 'text-primary-foreground/80' : 'text-muted-foreground'
       )}
-      title={copy.priceTitle}
+      title={t('model.priceTooltip')}
     >
       {price.input || '?'} / {price.output || '?'}
     </span>
@@ -320,11 +323,11 @@ function ProviderHeading({ provider }: { provider: ModelOptionProvider }) {
   const tierBadge =
     provider.free_tier === true ? (
       <span className="rounded-sm bg-emerald-500/15 px-1 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
-        {copy.freeTier}
+        {t('onboarding.freeTier')}
       </span>
     ) : provider.free_tier === false ? (
       <span className="rounded-sm bg-primary/15 px-1 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-primary">
-        {copy.pro}
+        {t('onboarding.pro')}
       </span>
     ) : null
 

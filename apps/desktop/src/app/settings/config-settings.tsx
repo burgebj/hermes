@@ -1,6 +1,5 @@
 import type { ChangeEvent, ReactNode } from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
 
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -13,16 +12,16 @@ import {
   getHermesConfigSchema,
   saveHermesConfig
 } from '@/hermes'
-import { useI18n } from '@/i18n'
+import { useTranslation } from '@/hooks/use-translation'
 import { cn } from '@/lib/utils'
 import { notify, notifyError } from '@/store/notifications'
 import type { ConfigFieldSchema, HermesConfigRecord } from '@/types/hermes'
 
 import { CONTROL_TEXT, EMPTY_SELECT_VALUE, FIELD_DESCRIPTIONS, FIELD_LABELS, SECTIONS } from './constants'
-import { fieldCopyForSchemaKey } from './field-copy'
-import { enumOptionsFor, getNested, prettyName, setNested } from './helpers'
+import { enumOptionsFor, getNested, includesQuery, prettyName, setNested } from './helpers'
 import { ModelSettings } from './model-settings'
 import { EmptyState, ListRow, LoadingState, SettingsContent } from './primitives'
+import type { SearchProps } from './types'
 
 function ConfigField({
   schemaKey,
@@ -39,23 +38,12 @@ function ConfigField({
   optionLabels?: Record<string, string>
   onChange: (value: unknown) => void
 }) {
-  const { t } = useI18n()
-  const c = t.settings.config
-
-  const label =
-    fieldCopyForSchemaKey(t.settings.fieldLabels, schemaKey) ??
-    fieldCopyForSchemaKey(FIELD_LABELS, schemaKey) ??
-    prettyName(schemaKey.split('.').pop() ?? schemaKey)
-
+  const { t } = useTranslation()
+  const labelKey = FIELD_LABELS[schemaKey]
+  const label = labelKey ? t(labelKey) : prettyName(schemaKey.split('.').pop() ?? schemaKey)
   const normalize = (v: string) => v.toLowerCase().replace(/[^a-z0-9]+/g, '')
-
-  const rawDescription = (
-    fieldCopyForSchemaKey(t.settings.fieldDescriptions, schemaKey) ??
-    fieldCopyForSchemaKey(FIELD_DESCRIPTIONS, schemaKey) ??
-    schema.description ??
-    ''
-  ).trim()
-
+  const descKey = FIELD_DESCRIPTIONS[schemaKey]
+  const rawDescription = (descKey ? t(descKey) : (schema.description ?? '')).trim()
   const normalizedDesc = normalize(rawDescription)
 
   const description =
@@ -69,7 +57,8 @@ function ConfigField({
 
   if (schema.type === 'boolean') {
     return row(
-      <div className="flex items-center justify-end">
+      <div className="flex items-center justify-end gap-3">
+        <span className="text-xs text-muted-foreground">{value ? t('config.on') : t('config.off')}</span>
         <Switch checked={Boolean(value)} onCheckedChange={onChange} />
       </div>
     )
@@ -92,8 +81,8 @@ function ConfigField({
               {option
                 ? (optionLabels?.[option] ?? prettyName(option))
                 : schemaKey === 'display.personality'
-                  ? c.none
-                  : c.noneParen}
+                  ? t('config.none')
+                  : t('config.emptyOption')}
             </SelectItem>
           ))}
         </SelectContent>
@@ -104,7 +93,7 @@ function ConfigField({
   if (schema.type === 'number') {
     return row(
       <Input
-        className={CONTROL_TEXT}
+        className={cn('h-8', CONTROL_TEXT)}
         onChange={e => {
           const raw = e.target.value
           const n = raw === '' ? 0 : Number(raw)
@@ -113,7 +102,7 @@ function ConfigField({
             onChange(n)
           }
         }}
-        placeholder={c.notSet}
+        placeholder={t('config.notSet')}
         type="number"
         value={value === undefined || value === null ? '' : String(value)}
       />
@@ -123,7 +112,7 @@ function ConfigField({
   if (schema.type === 'list') {
     return row(
       <Input
-        className={CONTROL_TEXT}
+        className={cn('h-8', CONTROL_TEXT)}
         onChange={e =>
           onChange(
             e.target.value
@@ -132,7 +121,7 @@ function ConfigField({
               .filter(Boolean)
           )
         }
-        placeholder={c.commaSeparated}
+        placeholder={t('config.commaSeparated')}
         value={Array.isArray(value) ? value.join(', ') : String(value ?? '')}
       />
     )
@@ -149,7 +138,7 @@ function ConfigField({
             /* keep last valid */
           }
         }}
-        placeholder={c.notSet}
+        placeholder={t('config.notSet')}
         spellCheck={false}
         value={JSON.stringify(value, null, 2)}
       />,
@@ -164,14 +153,14 @@ function ConfigField({
       <Textarea
         className={cn('min-h-24 resize-y bg-background', CONTROL_TEXT)}
         onChange={e => onChange(e.target.value)}
-        placeholder={c.notSet}
+        placeholder={t('config.notSet')}
         value={String(value ?? '')}
       />
     ) : (
       <Input
-        className={CONTROL_TEXT}
+        className={cn('h-8', CONTROL_TEXT)}
         onChange={e => onChange(e.target.value)}
-        placeholder={c.notSet}
+        placeholder={t('config.notSet')}
         value={String(value ?? '')}
       />
     ),
@@ -180,18 +169,18 @@ function ConfigField({
 }
 
 export function ConfigSettings({
+  query,
   activeSectionId,
   onConfigSaved,
   onMainModelChanged,
   importInputRef
-}: {
+}: SearchProps & {
   activeSectionId: string
   onConfigSaved?: () => void
   onMainModelChanged?: (provider: string, model: string) => void
   importInputRef: React.RefObject<HTMLInputElement | null>
 }) {
-  const { t } = useI18n()
-  const c = t.settings.config
+  const { t } = useTranslation()
   const [config, setConfig] = useState<HermesConfigRecord | null>(null)
   const [_defaults, setDefaults] = useState<HermesConfigRecord | null>(null)
   const [schema, setSchema] = useState<Record<string, ConfigFieldSchema> | null>(null)
@@ -281,41 +270,37 @@ export function ConfigSettings({
     )
   }, [schema])
 
-  const fields = sectionFields.get(activeSectionId) ?? []
+  const matched = useMemo(() => {
+    const q = query.trim().toLowerCase()
 
-  // Deep-link target from the command palette (?field=<key>): scroll the row
-  // into view and flash it, then drop the param so it doesn't re-fire.
-  const [searchParams, setSearchParams] = useSearchParams()
-  const targetField = searchParams.get('field')
-
-  useEffect(() => {
-    if (!targetField || !config || !schema) {
-      return
+    if (!schema || !q) {
+      return []
     }
 
-    const element = document.getElementById(`setting-field-${targetField}`)
+    const seen = new Set<string>()
 
-    if (!element) {
-      return
-    }
+    return SECTIONS.flatMap(s =>
+      s.keys.flatMap(k => {
+        if (seen.has(k) || !schema[k]) {
+          return []
+        }
 
-    element.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    element.classList.add('setting-field-highlight')
+        seen.add(k)
+        const label = prettyName(k.split('.').pop() ?? k)
+        const item = schema[k]
 
-    const timeout = window.setTimeout(() => element.classList.remove('setting-field-highlight'), 1600)
+        const hit =
+          k.toLowerCase().includes(q) ||
+          label.toLowerCase().includes(q) ||
+          includesQuery(item.category, q) ||
+          includesQuery(item.description, q)
 
-    setSearchParams(
-      previous => {
-        const next = new URLSearchParams(previous)
-        next.delete('field')
-
-        return next
-      },
-      { replace: true }
+        return hit ? [[k, item] as [string, ConfigFieldSchema]] : []
+      })
     )
+  }, [schema, query])
 
-    return () => window.clearTimeout(timeout)
-  }, [config, schema, setSearchParams, targetField])
+  const fields = query.trim() ? matched : (sectionFields.get(activeSectionId) ?? [])
 
   function handleImport(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -329,7 +314,7 @@ export function ConfigSettings({
     reader.onload = () => {
       try {
         updateConfig(JSON.parse(String(reader.result)))
-        notify({ kind: 'success', title: c.imported, message: t.common.saving })
+        notify({ kind: 'success', title: 'Config imported', message: t('config.saving') })
       } catch (err) {
         notifyError(err, c.invalidJson)
       }
@@ -340,35 +325,39 @@ export function ConfigSettings({
   }
 
   if (!config || !schema) {
-    return <LoadingState label={c.loading} />
+    return <LoadingState label={t('config.loading')} />
   }
 
   return (
     <SettingsContent>
-      {activeSectionId === 'model' && (
+      {activeSectionId === 'model' && !query.trim() && (
         <div className="mb-6">
           <ModelSettings onMainModelChanged={onMainModelChanged} />
         </div>
       )}
+      {query.trim() && (
+        <div className="mb-4 text-xs text-muted-foreground">
+          {t('config.results', { count: fields.length })}
+        </div>
+      )}
       {fields.length === 0 ? (
-        <EmptyState description={c.emptyDesc} title={c.emptyTitle} />
+        <EmptyState description={t('config.noMatchingDesc')} title={t('config.noMatching')} />
       ) : (
-        <div className="grid gap-1">
+        <div className="divide-y divide-border/40">
           {fields.map(([key, field]) => (
-            <div className="scroll-mt-6 rounded-lg" id={`setting-field-${key}`} key={key}>
-              <ConfigField
-                enumOptions={
-                  key === 'tts.elevenlabs.voice_id'
-                    ? enumOptionsFor(key, getNested(config, key), config, elevenLabsVoiceOptions ?? undefined)
-                    : enumOptionsFor(key, getNested(config, key), config)
-                }
-                onChange={value => updateConfig(setNested(config, key, value))}
-                optionLabels={key === 'tts.elevenlabs.voice_id' ? elevenLabsVoiceLabels : undefined}
-                schema={field}
-                schemaKey={key}
-                value={getNested(config, key)}
-              />
-            </div>
+            <ConfigField
+              enumOptions={
+                key === 'tts.elevenlabs.voice_id'
+                  ? enumOptionsFor(key, getNested(config, key), config, elevenLabsVoiceOptions ?? undefined)
+                  : enumOptionsFor(key, getNested(config, key), config)
+              }
+              key={key}
+              onChange={value => updateConfig(setNested(config, key, value))}
+              optionLabels={key === 'tts.elevenlabs.voice_id' ? elevenLabsVoiceLabels : undefined}
+              schema={field}
+              schemaKey={key}
+              value={getNested(config, key)}
+            />
           ))}
         </div>
       )}

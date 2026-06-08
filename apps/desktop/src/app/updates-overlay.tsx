@@ -5,13 +5,14 @@ import { BrandMark } from '@/components/brand-mark'
 import { Button } from '@/components/ui/button'
 import { writeClipboardText } from '@/components/ui/copy-button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
-import { ErrorIcon, ErrorState } from '@/components/ui/error-state'
-import { Loader } from '@/components/ui/loader'
+import { ErrorState } from '@/components/ui/error-state'
 import type { DesktopUpdateCommit, DesktopUpdateStage, DesktopUpdateStatus } from '@/global'
 import { useI18n } from '@/i18n'
 import { buildCommitChangelog, type CommitGroup } from '@/lib/commit-changelog'
 import { AlertCircle, Check, CheckCircle2, Copy, Terminal } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { t } from '@/store/i18n'
+import { useLocaleSync } from '@/store/use-locale-sync'
 import {
   $updateApply,
   $updateChecking,
@@ -29,6 +30,8 @@ function totalItems(groups: readonly CommitGroup[]) {
 }
 
 export function UpdatesOverlay() {
+  useLocaleSync()
+
   const open = useStore($updateOverlayOpen)
   const status = useStore($updateStatus)
   const checking = useStore($updateChecking)
@@ -142,7 +145,7 @@ function IdleView({
   if (!status.supported) {
     return (
       <CenteredStatus
-        body={status.message ?? u.unsupportedMessage}
+        body={status.message ?? 'This version of Hermes can’t update itself from inside the app.'}
         icon={<AlertCircle className="size-6 text-muted-foreground" />}
         title={u.notAvailableTitle}
       />
@@ -167,7 +170,7 @@ function IdleView({
   if (behind === 0) {
     return (
       <CenteredStatus
-        body={u.latestBody}
+        body="You’re running the latest version."
         icon={<CheckCircle2 className="size-7 text-emerald-600 dark:text-emerald-400" />}
         title={u.allSetTitle}
       />
@@ -183,7 +186,7 @@ function IdleView({
       <div className="flex flex-col items-center gap-3 text-center">
         <BrandMark className="size-16" />
 
-        <DialogTitle className="text-center text-xl">{u.availableTitle}</DialogTitle>
+        <DialogTitle className="text-center text-xl">{t('updates.newUpdateAvailable')}</DialogTitle>
         <DialogDescription className="text-center text-sm">
           {u.availableBody}
         </DialogDescription>
@@ -207,10 +210,7 @@ function IdleView({
 
       <div className="grid gap-2">
         <Button className="font-semibold" onClick={onInstall} size="lg">
-          {u.updateNow}
-        </Button>
-        <Button className="font-medium" onClick={onLater} type="button" variant="text">
-          {u.maybeLater}
+          Update now
         </Button>
       </div>
 
@@ -240,7 +240,7 @@ function ManualView({ command, onDone }: { command: string; onDone: () => void }
       <div className="flex flex-col items-center gap-3 text-center">
         <Terminal className="size-8 text-primary" />
 
-        <DialogTitle className="text-center text-xl">{u.manualTitle}</DialogTitle>
+        <DialogTitle className="text-center text-xl">{t('updates.updateFromTerminal')}</DialogTitle>
         <DialogDescription className="text-center text-sm">
           {u.manualBody}
         </DialogDescription>
@@ -274,8 +274,8 @@ function ManualView({ command, onDone }: { command: string; onDone: () => void }
         {u.manualPickedUp}
       </p>
 
-      <Button className="font-semibold" onClick={onDone} size="lg" variant="secondary">
-        {u.done}
+      <Button className="font-semibold" onClick={onDone} size="lg" variant="outline">
+        Done
       </Button>
     </div>
   )
@@ -312,7 +312,7 @@ function ApplyingView({ apply }: { apply: UpdateApplyState }) {
         />
       </div>
 
-      <p className="text-center text-xs text-muted-foreground">{u.applyingClose}</p>
+      <p className="text-center text-xs text-muted-foreground">{t('updates.closeToApply')}</p>
     </div>
   )
 }

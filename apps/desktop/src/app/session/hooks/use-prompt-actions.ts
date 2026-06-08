@@ -840,7 +840,7 @@ export function usePromptActions({
     } catch (err) {
       setMutableRef(busyRef, false)
       setBusy(false)
-      notifyError(err, copy.stopFailed)
+      notifyError(err, 'Stop failed')
     }
   }, [activeSessionId, activeSessionIdRef, busyRef, copy.stopFailed, requestGateway, updateSessionState])
 

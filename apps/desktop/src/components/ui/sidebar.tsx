@@ -14,6 +14,8 @@ import { useIsMobile } from '@/hooks/use-mobile'
 import { useI18n } from '@/i18n'
 import { PanelLeftIcon } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { t } from '@/store/i18n'
+import { useLocaleSync } from '@/store/use-locale-sync'
 
 const SIDEBAR_COOKIE_NAME = 'sidebar_state'
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
@@ -140,6 +142,8 @@ function Sidebar({
   variant?: 'sidebar' | 'floating' | 'inset'
   collapsible?: 'offcanvas' | 'icon' | 'none'
 }) {
+  useLocaleSync()
+
   const { isMobile, state, openMobile, setOpenMobile } = useSidebar()
   const { t } = useI18n()
 
@@ -171,8 +175,8 @@ function Sidebar({
           }
         >
           <SheetHeader className="sr-only">
-            <SheetTitle>{t.ui.sidebar.title}</SheetTitle>
-            <SheetDescription>{t.ui.sidebar.description}</SheetDescription>
+            <SheetTitle>{t('sidebar.sheetTitle')}</SheetTitle>
+            <SheetDescription>{t('sidebar.sheetDesc')}</SheetDescription>
           </SheetHeader>
           <div className="flex h-full w-full flex-col">{children}</div>
         </SheetContent>
@@ -229,6 +233,8 @@ function Sidebar({
 }
 
 function SidebarTrigger({ className, onClick, ...props }: React.ComponentProps<typeof Button>) {
+  useLocaleSync()
+
   const { toggleSidebar } = useSidebar()
   const { t } = useI18n()
 
@@ -246,18 +252,20 @@ function SidebarTrigger({ className, onClick, ...props }: React.ComponentProps<t
       {...props}
     >
       <PanelLeftIcon />
-      <span className="sr-only">{t.ui.sidebar.toggle}</span>
+      <span className="sr-only">{t('sidebar.toggle')}</span>
     </Button>
   )
 }
 
 function SidebarRail({ className, ...props }: React.ComponentProps<'button'>) {
+  useLocaleSync()
+
   const { toggleSidebar } = useSidebar()
   const { t } = useI18n()
 
   return (
     <button
-      aria-label={t.ui.sidebar.toggle}
+      aria-label={t('sidebar.toggle')}
       className={cn(
         'absolute inset-y-0 z-20 hidden w-4 -translate-x-1/2 transition-all ease-linear group-data-[side=left]:-right-4 group-data-[side=right]:left-0 after:absolute after:inset-y-0 after:left-1/2 after:w-[0.125rem] hover:after:bg-sidebar-border sm:flex',
         'in-data-[side=left]:cursor-w-resize in-data-[side=right]:cursor-e-resize',
@@ -271,7 +279,7 @@ function SidebarRail({ className, ...props }: React.ComponentProps<'button'>) {
       data-slot="sidebar-rail"
       onClick={toggleSidebar}
       tabIndex={-1}
-      title={t.ui.sidebar.toggle}
+      title={t('sidebar.toggle')}
       {...props}
     />
   )

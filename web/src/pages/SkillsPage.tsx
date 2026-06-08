@@ -36,7 +36,6 @@ import type {
   SkillHubPreview,
   SkillHubScan,
 } from "@/lib/api";
-import { ToolsetConfigDrawer } from "@/components/ToolsetConfigDrawer";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { Toast } from "@nous-research/ui/ui/components/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@nous-research/ui/ui/components/card";

@@ -1,6 +1,6 @@
 import { useStore } from '@nanostores/react'
 import type { ReactNode } from 'react'
-import { useCallback, useMemo } from 'react'
+import { useMemo } from 'react'
 
 import type { CommandCenterSection } from '@/app/command-center'
 import { GatewayMenuPanel } from '@/app/shell/gateway-menu-panel'
@@ -21,11 +21,9 @@ import { formatModelStatusLabel } from '@/lib/model-status-label'
 import type { RuntimeReadinessResult } from '@/lib/runtime-readiness'
 import { contextBarLabel, LiveDuration, usageContextLabel } from '@/lib/statusbar'
 import { cn } from '@/lib/utils'
-import { setGlobalYolo, setSessionYolo } from '@/lib/yolo-session'
 import { $desktopActionTasks } from '@/store/activity'
 import { $previewServerRestartStatus } from '@/store/preview'
 import {
-  $activeSessionId,
   $busy,
   $currentFastMode,
   $currentModel,
@@ -35,12 +33,12 @@ import {
   $sessionStartedAt,
   $turnStartedAt,
   $workingSessionIds,
-  $yoloActive,
-  setModelPickerOpen,
-  setYoloActive
+  setModelPickerOpen
 } from '@/store/session'
 import { $subagentsBySession, activeSubagentCount } from '@/store/subagents'
 import { $desktopVersion, $updateApply, $updateStatus, setUpdateOverlayOpen } from '@/store/updates'
+import { t } from '@/store/i18n'
+import { useLocaleSync } from '@/store/use-locale-sync'
 import type { StatusResponse } from '@/types/hermes'
 
 import { CRON_ROUTE } from '../../routes'
@@ -57,8 +55,6 @@ interface StatusbarItemsOptions {
   modelMenuContent?: ReactNode
   openAgents: () => void
   openCommandCenterSection: (section: CommandCenterSection) => void
-  freshDraftReady: boolean
-  requestGateway: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
   statusSnapshot: StatusResponse | null
   toggleCommandCenter: () => void
 }
@@ -74,15 +70,10 @@ export function useStatusbarItems({
   modelMenuContent,
   openAgents,
   openCommandCenterSection,
-  freshDraftReady,
-  requestGateway,
   statusSnapshot,
   toggleCommandCenter
 }: StatusbarItemsOptions) {
-  const { t } = useI18n()
-  const copy = t.shell.statusbar
-  const activeSessionId = useStore($activeSessionId)
-  const yoloActive = useStore($yoloActive)
+  const localeVersion = useLocaleSync()
   const busy = useStore($busy)
   const currentFastMode = useStore($currentFastMode)
   const currentModel = useStore($currentModel)
@@ -101,45 +92,6 @@ export function useStatusbarItems({
 
   const contextUsage = useMemo(() => usageContextLabel(currentUsage), [currentUsage])
   const contextBar = useMemo(() => contextBarLabel(currentUsage), [currentUsage])
-
-  // Per-session approval bypass (same scope as the TUI's Shift+Tab). On a
-  // new-chat draft (no runtime session yet) we arm locally; the session-create
-  // path applies it once the backend session exists.
-  //
-  // Shift+click flips the GLOBAL approvals.mode instead — a persistent,
-  // all-sessions/CLI/TUI/cron bypass that survives restarts.
-  const toggleYolo = useCallback(
-    async (modifiers?: StatusbarSelectModifiers) => {
-      const next = !$yoloActive.get()
-
-      setYoloActive(next)
-
-      if (modifiers?.shiftKey) {
-        try {
-          await setGlobalYolo(requestGateway, next)
-        } catch {
-          setYoloActive(!next)
-        }
-
-        return
-      }
-
-      const sid = $activeSessionId.get()
-
-      if (!sid) {
-        return
-      }
-
-      try {
-        await setSessionYolo(requestGateway, sid, next)
-      } catch {
-        setYoloActive(!next)
-      }
-    },
-    [requestGateway]
-  )
-
-  const showYoloToggle = gatewayState === 'open' && (!!activeSessionId || freshDraftReady)
 
   const gatewayMenuContent = useMemo(
     () => (
@@ -247,7 +199,7 @@ export function useStatusbarItems({
         icon: <Command className="size-3.5" />,
         id: 'command-center',
         onSelect: toggleCommandCenter,
-        title: commandCenterOpen ? copy.closeCommandCenter : copy.openCommandCenter,
+        title: commandCenterOpen ? t('commandCenter.close') : t('commandCenter.open'),
         variant: 'action'
       },
       {
@@ -255,10 +207,10 @@ export function useStatusbarItems({
         detail: gatewayDetail,
         icon: inferenceReady ? <Activity className="size-3" /> : <AlertCircle className="size-3" />,
         id: 'gateway-health',
-        label: copy.gateway,
+        label: t('gateway.label'),
         menuClassName: 'w-72',
         menuContent: gatewayMenuContent,
-        title: inferenceStatus?.reason || copy.gatewayTitle,
+        title: inferenceStatus?.reason || t('gateway.inferenceStatus'),
         variant: 'menu'
       },
       {
@@ -283,16 +235,16 @@ export function useStatusbarItems({
             <Sparkles className="size-3" />
           ),
         id: 'agents',
-        label: copy.agents,
+        label: t('agents.label'),
         onSelect: openAgents,
-        title: agentsOpen ? copy.closeAgents : copy.openAgents,
+        title: agentsOpen ? t('agents.close') : t('agents.open'),
         variant: 'action'
       },
       {
         icon: <Clock className="size-3" />,
         id: 'cron',
-        label: copy.cron,
-        title: copy.openCron,
+        label: t('cron.label'),
+        title: t('cron.open'),
         to: CRON_ROUTE,
         variant: 'action'
       }
@@ -311,7 +263,7 @@ export function useStatusbarItems({
       openAgents,
       subagentsRunning,
       toggleCommandCenter
-    ]
+    , localeVersion]
   )
 
   const coreRightStatusbarItems = useMemo<readonly StatusbarItem[]>(
@@ -342,19 +294,6 @@ export function useStatusbarItems({
         variant: 'text'
       },
       {
-        className: cn('px-1', yoloActive && 'bg-(--chrome-action-hover)'),
-        hidden: !showYoloToggle,
-        icon: yoloActive ? (
-          <ZapFilled className="size-3.5 shrink-0" />
-        ) : (
-          <Zap className="size-3.5 shrink-0 opacity-70" />
-        ),
-        id: 'yolo',
-        onSelect: modifiers => void toggleYolo(modifiers),
-        title: yoloActive ? copy.yoloOn : copy.yoloOff,
-        variant: 'action'
-      },
-      {
         id: 'model-summary',
         label: (
           <span className="inline-flex min-w-0 items-center gap-0.5">
@@ -373,15 +312,15 @@ export function useStatusbarItems({
               menuClassName: 'w-64',
               menuContent: modelMenuContent,
               title: currentProvider
-                ? copy.modelTitle(currentProvider, currentModel || copy.modelNone)
-                : copy.switchModel,
+                ? `Model · ${currentProvider}: ${currentModel || 'none'}`
+                : 'Switch model',
               variant: 'menu' as const
             }
           : {
               onSelect: () => setModelPickerOpen(true),
               title: currentProvider
-                ? copy.providerModelTitle(currentProvider, currentModel || copy.noModel)
-                : copy.openModelPicker,
+                ? `${currentProvider} · ${currentModel || 'no model'}`
+                : 'Open model picker',
               variant: 'action' as const
             })
       },
@@ -398,22 +337,19 @@ export function useStatusbarItems({
       currentReasoningEffort,
       modelMenuContent,
       sessionStartedAt,
-      showYoloToggle,
-      toggleYolo,
       turnStartedAt,
-      versionItem,
-      yoloActive
-    ]
+      versionItem
+    , localeVersion]
   )
 
   const leftStatusbarItems = useMemo(
     () => [...coreLeftStatusbarItems, ...extraLeftItems],
-    [coreLeftStatusbarItems, extraLeftItems]
+    [coreLeftStatusbarItems, extraLeftItems, localeVersion]
   )
 
   const statusbarItems = useMemo(
     () => [...extraRightItems, ...coreRightStatusbarItems],
-    [coreRightStatusbarItems, extraRightItems]
+    [coreRightStatusbarItems, extraRightItems, localeVersion]
   )
 
   return { leftStatusbarItems, statusbarItems }

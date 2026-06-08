@@ -12,9 +12,9 @@ import { useMediaQuery } from '@/hooks/use-media-query'
 import { useSkinCommand } from '@/themes/use-skin-command'
 
 import { formatRefValue } from '../components/assistant-ui/directive-text'
-import { getCronJobs, getSessionMessages, listAllProfileSessions, type SessionInfo, triggerCronJob } from '../hermes'
+import { getSessionMessages, listAllProfileSessions, type SessionInfo } from '../hermes'
 import { preserveLocalAssistantErrors, toChatMessages } from '../lib/chat-messages'
-import { setCronFocusJobId, setCronJobs } from '../store/cron'
+import { toggleCommandPalette } from '../store/command-palette'
 import {
   $panesFlipped,
   $pinnedSessionIds,
@@ -31,14 +31,7 @@ import {
   unpinSession
 } from '../store/layout'
 import { $filePreviewTarget, $previewTarget, closeActiveRightRailTab } from '../store/preview'
-import {
-  $activeGatewayProfile,
-  $freshSessionRequest,
-  $profileScope,
-  ALL_PROFILES,
-  normalizeProfileKey,
-  refreshActiveProfile
-} from '../store/profile'
+import { $activeGatewayProfile, $freshSessionRequest, normalizeProfileKey, refreshActiveProfile } from '../store/profile'
 import {
   $activeSessionId,
   $currentCwd,
@@ -47,7 +40,6 @@ import {
   $selectedStoredSessionId,
   $sessions,
   $workingSessionIds,
-  CRON_SECTION_LIMIT,
   mergeSessionPage,
   sessionPinId,
   setAwaitingResponse,
@@ -114,21 +106,6 @@ const ProfilesView = lazy(async () => ({ default: (await import('./profiles')).P
 const SettingsView = lazy(async () => ({ default: (await import('./settings')).SettingsView }))
 const SkillsView = lazy(async () => ({ default: (await import('./skills')).SkillsView }))
 
-// Latest cron-job sessions surfaced in the collapsed "Cron jobs" section. The
-// Cron sessions are written by a background scheduler tick (the desktop
-// backend), so no user action signals the UI. Poll the bounded cron list on
-// this cadence while the app is open + visible so new runs surface promptly
-// instead of waiting for the next user-triggered refreshSessions().
-const CRON_POLL_INTERVAL_MS = 30_000
-
-// Cheap signature compare so the poll only swaps the atom (and re-renders the
-// sidebar) when the visible cron rows actually changed.
-function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
-  if (a.length !== b.length) {return false}
-
-  return a.every((session, i) => session.id === b[i]?.id && session.title === b[i]?.title)
-}
-
 // Rows a session refresh must preserve even if the aggregator omits them:
 // in-flight first turns (message_count 0), pinned rows aged off the page, and
 // the actively-viewed chat (its "working" flag clears a beat before the
@@ -167,11 +144,6 @@ export function DesktopController() {
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
   const terminalTakeover = useStore($terminalTakeover)
   const panesFlipped = useStore($panesFlipped)
-  const profileScope = useStore($profileScope)
-  // Below SIDEBAR_COLLAPSE_BREAKPOINT_PX there's no room for a docked rail —
-  // collapse both sidebars (without touching their stored open state) so the
-  // hover-reveal overlay becomes the way in. Restores once it's wide again.
-  const narrowViewport = useMediaQuery(SIDEBAR_COLLAPSE_MEDIA_QUERY)
 
   const routedSessionId = routeSessionId(location.pathname)
   const routeToken = `${location.pathname}:${location.search}:${location.hash}`
@@ -257,15 +229,14 @@ export function DesktopController() {
     }
   }, [])
 
-  // Cron-job sessions as their own list (latest N). Independent of the recents
-  // page so the two never compete for slots. Cheap + bounded. Kept (even though
-  // the sidebar now lists cron *jobs*, not run sessions) so a pinned cron run
-  // still resolves into the Pinned section via sessionByAnyId.
-  const refreshCronSessions = useCallback(async () => {
-    try {
-      const { sessions } = await listAllProfileSessions(CRON_SECTION_LIMIT, 1, 'exclude', 'recent', 'all', {
-        source: 'cron'
-      })
+  // Global chrome shortcuts (plain Cmd/Ctrl, no alt/shift): Cmd+K / Cmd+P →
+  // command palette (the composer's "drain next queued" moved to Cmd+Shift+K),
+  // Cmd+. → command center (sessions / system / usage).
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) {
+        return
+      }
 
       setCronSessions(prev => (sameCronSignature(prev, sessions) ? prev : sessions))
     } catch {
@@ -519,6 +490,37 @@ export function DesktopController() {
     toggleCommandCenter,
     toggleSelectedPin
   })
+
+      const editing =
+        target?.isContentEditable ||
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement
+
+      if (event.defaultPrevented || event.repeat || event.altKey || event.code !== 'KeyN') {
+        return
+      }
+
+      // Two accelerators for "new session":
+      //   - Cmd/Ctrl+N (browser-like, works while typing in any input)
+      //   - Shift+N    (single-key, only when no input is focused)
+      const accelerator = event.metaKey || event.ctrlKey
+      const singleKey = !accelerator && !editing && event.shiftKey
+
+      if (!accelerator && !singleKey) {
+        return
+      }
+
+      event.preventDefault()
+      startFreshSessionDraft()
+      // Briefly light up the sidebar's ⌘N hint so the shortcut is discoverable.
+      window.dispatchEvent(new CustomEvent('hermes:new-session-shortcut'))
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [startFreshSessionDraft])
 
   // A profile switch/create drops to a fresh new-session draft so the previously
   // open session doesn't bleed across contexts. Skip the initial value.

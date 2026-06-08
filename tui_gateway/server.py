@@ -2580,13 +2580,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     return info
 
 
-def _make_agent(
-    sid: str,
-    key: str,
-    session_id: str | None = None,
-    session_db=None,
-    model_override: dict | None = None,
-):
+def _make_agent(sid: str, key: str, session_id: str | None = None, session_db=None):
     from run_agent import AIAgent
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
@@ -3282,19 +3276,7 @@ def _(rid, params: dict) -> dict:
         cols = int(params.get("cols", 80))
     except (TypeError, ValueError):
         cols = 80
-    # ``profile`` (app-global remote mode): resume a session that lives in another
-    # local profile's state.db. None/own profile → the launch profile (unchanged).
-    profile = (params.get("profile") or "").strip() or None
-    profile_home = _profile_home(profile)
-
-    # In a profile scope, the agent OWNS a long-lived db handle bound to that
-    # profile (do NOT auto-close it here). Otherwise reuse the shared launch db.
-    if profile_home is not None:
-        from hermes_state import SessionDB
-
-        db = SessionDB(db_path=profile_home / "state.db")
-    else:
-        db = _get_db()
+    db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5000)
 
@@ -3349,9 +3331,6 @@ def _(rid, params: dict) -> dict:
             _clear_session_context(tokens)
     except Exception as e:
         return _err(rid, 5000, f"resume failed: {e}")
-    finally:
-        if home_token is not None:
-            reset_hermes_home_override(home_token)
 
     # Double-checked locking: another concurrent resume may have created the
     # live session while we were building. Re-check under the lock; if it won,
@@ -3378,11 +3357,6 @@ def _(rid, params: dict) -> dict:
             _init_session(sid, target, agent, history, cols=cols)
             if sid in _sessions:
                 _sessions[sid]["display_history_prefix"] = display_history_prefix
-                # Remember the profile home so each turn re-binds HERMES_HOME (the
-                # agent persists to its own db, but mid-turn home reads — memory,
-                # skills — must resolve to the resumed profile too).
-                if profile_home is not None:
-                    _sessions[sid]["profile_home"] = str(profile_home)
         except Exception as e:
             return _err(rid, 5000, f"resume failed: {e}")
         session = _sessions.get(sid) or {}
@@ -3981,16 +3955,32 @@ def _(rid, params: dict) -> dict:
 @method("session.close")
 def _(rid, params: dict) -> dict:
     sid = params.get("session_id", "")
-    with _sessions_lock:
-        current = _sessions.get(sid)
+    current = _sessions.get(sid)
     if not current:
         return _ok(rid, {"closed": False})
     with _session_resume_lock:
-        with _sessions_lock:
-            session = _sessions.pop(sid, None)
+        session = _sessions.pop(sid, None)
         if not session:
             return _ok(rid, {"closed": False})
-        _teardown_session(session)
+        _finalize_session(session)
+        try:
+            from tools.approval import unregister_gateway_notify
+
+            unregister_gateway_notify(session["session_key"])
+        except Exception:
+            pass
+        try:
+            agent = session.get("agent")
+            if agent and hasattr(agent, "close"):
+                agent.close()
+        except Exception:
+            pass
+        try:
+            worker = session.get("slash_worker")
+            if worker:
+                worker.close()
+        except Exception:
+            pass
     return _ok(rid, {"closed": True})
 
 

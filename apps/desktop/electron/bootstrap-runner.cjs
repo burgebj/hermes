@@ -204,35 +204,9 @@ async function resolveInstallScript({ installStamp, sourceRepoRoot, hermesHome, 
     type: 'log',
     line: `[bootstrap] fetching ${installScriptName()} for ${installStamp.commit.slice(0, 12)} from GitHub`
   })
-  try {
-    await _download(installStamp.commit, cached)
-    emit({ type: 'log', line: `[bootstrap] saved to ${cached}` })
-    return { path: cached, source: 'download', commit: installStamp.commit, kind: installScriptKind() }
-  } catch (err) {
-    // The pinned commit may not be fetchable from GitHub -- most commonly a
-    // locally-built desktop app stamped to an unpushed HEAD (see
-    // write-build-stamp.cjs fromLocalGit). Fall back to the installer that
-    // ships inside the already-installed agent checkout so dev/self-builds can
-    // still bootstrap instead of dying with a fatal 404.
-    const installed = installedAgentInstallScript(hermesHome)
-    if (installed) {
-      emit({
-        type: 'log',
-        line:
-          `[bootstrap] GitHub fetch failed (${err.message}); ` +
-          `falling back to installed agent ${installScriptName()} at ${installed}`
-      })
-      try {
-        fs.mkdirSync(path.dirname(cached), { recursive: true })
-        fs.copyFileSync(installed, cached)
-        return { path: cached, source: 'installed-agent', commit: installStamp.commit, kind: installScriptKind() }
-      } catch {
-        // Cache copy failed (read-only FS, etc.) -- use the source path directly.
-        return { path: installed, source: 'installed-agent', commit: installStamp.commit, kind: installScriptKind() }
-      }
-    }
-    throw err
-  }
+  await downloadInstallScript(installStamp.commit, cached)
+  emit({ type: 'log', line: `[bootstrap] saved to ${cached}` })
+  return { path: cached, source: 'download', commit: installStamp.commit, kind: installScriptKind() }
 }
 
 // ---------------------------------------------------------------------------

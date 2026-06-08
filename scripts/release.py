@@ -45,19 +45,6 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 
 # Auto-extracted from noreply emails + manual overrides
 AUTHOR_MAP = {
-    "alberto.regalado@ymail.com": "ARegalado1",
-    "alchemistchaos@protonmail.com": "AlchemistChaos",  # co-author only
-    "gilad@smiti.ai": "giladbau",
-    "yusufalweshdemir@gmail.com": "Dusk1e",
-    "804436395@qq.com": "LaPhilosophie",
-    "maxmitcham@mac.home": "maxtrigify",
-    "ccook@nvms.com": "ccook1963",
-    "kristian@agrointel.no": "kristianvast",
-    "thomas.paquette@gmail.com": "RyTsYdUp",
-    "techxacm@gmail.com": "ProgramCaiCai",
-    "266365592+bmoore210@users.noreply.github.com": "bmoore210",
-    "manishbyatroy@gmail.com": "manishbyatroy",
-    "chilltulpa@gmail.com": "TheGardenGallery",
     "al@randomsnowflake.me": "randomsnowflake",
     "zakame@zakame.net": "zakame",
     "152110621+jiangkoumo@users.noreply.github.com": "jiangkoumo",
@@ -1487,7 +1474,6 @@ AUTHOR_MAP = {
     "wasdhkzk@gmail.com": "whyhkzk",  # PR #32407 (sandbox-mirror inner-container guard; commits authored as whyhkzk + zhukun)
     "leonard@sellem.me": "leonardsellem",  # PR #37405 (desktop WS origin guard on remote/Tailscale binds)
     "42903577+ohMyJason@users.noreply.github.com": "ohMyJason",  # PR #29810 (discover_models in custom_providers section 4)
-    "singhsanidhya741@gmail.com": "sanidhyasin",  # PR #40403 salvage (model.default_headers for custom OpenAI-compatible providers, #40033)
 }
 
 

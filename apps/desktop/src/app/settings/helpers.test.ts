@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { HermesConfigRecord } from '@/types/hermes'
 
-import { defineFieldCopy, fieldCopyForSchemaKey, schemaKeyToFieldCopyKey } from './field-copy'
-import { enumOptionsFor, getNested, providerGroup, setNested, stripToolsetLabel, toolsetDisplayLabel } from './helpers'
+import { getNested, providerGroup, setNested, stripToolsetLabel, toolsetDisplayLabel } from './helpers'
 
 describe('settings helpers', () => {
   describe('defineFieldCopy', () => {

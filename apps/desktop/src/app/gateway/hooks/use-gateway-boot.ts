@@ -33,6 +33,7 @@ import {
   setSessionsLoading
 } from '@/store/session'
 import type { RpcEvent } from '@/types/hermes'
+import { t } from '@/store/i18n'
 
 interface GatewayBootOptions {
   handleGatewayEvent: (event: RpcEvent) => void
@@ -77,7 +78,7 @@ export function useGatewayBoot({
     }
 
     if (!desktop) {
-      failDesktopBoot('Desktop IPC bridge is unavailable.')
+      failDesktopBoot(t('boot.ipcUnavailable'))
       setSessionsLoading(false)
 
       return () => void (cancelled = true)
@@ -206,7 +207,7 @@ export function useGatewayBoot({
 
     setDesktopBootStep({
       phase: 'renderer.boot',
-      message: translateNow('boot.steps.startingDesktopConnection'),
+      message: t('boot.startingConnection'),
       progress: 6
     })
 
@@ -296,13 +297,13 @@ export function useGatewayBoot({
 
     const offExit = desktop.onBackendExit(() => {
       if ($desktopBoot.get().running || $desktopBoot.get().visible) {
-        failDesktopBoot(translateNow('boot.errors.backgroundExitedDuringStartup'))
+        failDesktopBoot(t('boot.backendExited'))
       }
 
       notify({
         kind: 'error',
-        title: translateNow('boot.errors.backendStopped'),
-        message: translateNow('boot.errors.backgroundExited'),
+        title: t('boot.backendStoppedTitle'),
+        message: t('boot.backendStoppedMessage'),
         durationMs: 0
       })
     })
@@ -317,7 +318,7 @@ export function useGatewayBoot({
 
         setDesktopBootStep({
           phase: 'renderer.gateway.connect',
-          message: translateNow('boot.steps.connectingGateway'),
+          message: t('boot.connectingGateway'),
           progress: 95
         })
         publish(conn)
@@ -348,7 +349,7 @@ export function useGatewayBoot({
 
         setDesktopBootStep({
           phase: 'renderer.config',
-          message: translateNow('boot.steps.loadingSettings'),
+          message: t('boot.loadingConfig'),
           progress: 97
         })
         await callbacksRef.current.refreshHermesConfig()
@@ -359,7 +360,7 @@ export function useGatewayBoot({
 
         setDesktopBootStep({
           phase: 'renderer.sessions',
-          message: translateNow('boot.steps.loadingSessions'),
+          message: t('boot.loadingSessions'),
           progress: 99
         })
         await callbacksRef.current.refreshSessions()
@@ -369,7 +370,7 @@ export function useGatewayBoot({
         if (!cancelled) {
           const message = err instanceof Error ? err.message : String(err)
           failDesktopBoot(message)
-          notifyError(err, translateNow('boot.errors.desktopBootFailed'))
+          notifyError(err, t('boot.desktopBootFailed'))
           setSessionsLoading(false)
         }
       }

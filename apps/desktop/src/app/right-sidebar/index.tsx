@@ -34,8 +34,8 @@ interface RightSidebarTab {
 }
 
 const RIGHT_SIDEBAR_TABS: readonly RightSidebarTab[] = [
-  { id: 'files', labelKey: 'files', icon: 'list-tree' },
-  { id: 'terminal', labelKey: 'terminal', icon: 'terminal' }
+  { id: 'files', label: 'File system', icon: 'list-tree' },
+  { id: 'terminal', label: 'Terminal', icon: 'terminal' }
 ]
 
 export function RightSidebarPane({ onActivateFile, onActivateFolder, onChangeCwd }: RightSidebarPaneProps) {
@@ -101,7 +101,7 @@ export function RightSidebarPane({ onActivateFile, onActivateFolder, onChangeCwd
 
   return (
     <aside
-      aria-label={r.aria}
+      aria-label="Right sidebar"
       className={cn(
         'before:pointer-events-none relative flex h-full w-full min-w-0 flex-col overflow-hidden border-(--ui-stroke-secondary) bg-(--ui-sidebar-surface-background) pt-(--titlebar-height) text-(--ui-text-tertiary)',
         panesFlipped
@@ -230,7 +230,7 @@ function FilesystemTab({
   return (
     <div className="group/project-header flex min-h-0 flex-1 flex-col">
       <RightSidebarSectionHeader>
-        <Tip label={hasCwd ? r.folderTip(cwd) : r.openFolder}>
+        <Tip label={hasCwd ? `${cwd} — click to change folder` : 'Open a folder'}>
           <button
             className="flex min-w-0 flex-1 items-center rounded-md text-left hover:text-(--ui-text-secondary)"
             onClick={() => void onChangeFolder()}
