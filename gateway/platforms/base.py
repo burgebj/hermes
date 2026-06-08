@@ -3702,9 +3702,21 @@ class BasePlatformAdapter(ABC):
             except asyncio.TimeoutError:
                 logger.warning(
                     "[%s] Cancelled task for %s did not exit within 5s; "
-                    "unblocking dispatch and letting the task unwind in the background",
+                    "forcing session release and respawning pending messages",
                     self.name, session_key,
                 )
+                # #34253: When the cancelled task doesn't exit within 5s, we
+                # previously left _expected_cancelled_tasks and _active_sessions
+                # pointing at the orphan. When the task eventually unwound, its
+                # ``finally`` block checked
+                # ``self._session_tasks.get(session_key) is current_task`` —
+                # False, because the task had already been popped — so the
+                # guard was never released and all subsequent messages for
+                # this session_key piled up in _pending_messages with nobody
+                # to dispatch them. Force the cleanup here so the next
+                # message in this session can start a fresh task.
+                self._expected_cancelled_tasks.discard(task)
+                self._active_sessions.pop(session_key, None)
             except Exception:
                 logger.debug(
                     "[%s] Session cancellation raised while unwinding %s",
@@ -3716,7 +3728,26 @@ class BasePlatformAdapter(ABC):
             self._pending_messages.pop(session_key, None)
             self._discard_text_debounce(session_key)
         if release_guard:
+            # #34253: After releasing the guard, check whether a pending
+            # message landed while we were waiting for the orphan to unwind.
+            # If so, respawn its processing now — otherwise the platform
+            # would silently swallow it (the inbound handler already enqueued
+            # it under the assumption a runner would pick it up). Respawn
+            # happens BEFORE the release so the new task can install its own
+            # guard cleanly.
+            pending_event = (
+                self._pending_messages.pop(session_key, None)
+                if session_key not in self._active_sessions
+                else None
+            )
             self._release_session_guard(session_key)
+            if pending_event is not None:
+                logger.info(
+                    "[%s] Respawning pending message for orphaned session %s "
+                    "after timeout cancellation",
+                    self.name, session_key,
+                )
+                self._start_session_processing(pending_event, session_key)
 
     async def _drain_pending_after_session_command(
         self,
