@@ -123,6 +123,192 @@ def _redirect_cache(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# TestMarkdownTableBlocks
+# ---------------------------------------------------------------------------
+
+class TestMarkdownTableBlocks:
+    def test_builds_block_kit_table_for_single_markdown_table(self, adapter):
+        content = """Intro **bold** text.
+
+| Tool | Best for | Runs in |
+|---|---|---|
+| Vitest | Unit tests | Node/jsdom |
+| Playwright | E2E tests | Browsers |
+
+Done."""
+
+        formatted, blocks = adapter._format_message_with_blocks(content)
+
+        assert "| Tool | Best for | Runs in |" in formatted
+        assert blocks is not None
+        assert [block["type"] for block in blocks] == ["section", "table", "section"]
+        assert blocks[0]["text"]["text"] == "Intro *bold* text."
+        table = blocks[1]
+        assert table["rows"] == [
+            [
+                {"type": "raw_text", "text": "Tool"},
+                {"type": "raw_text", "text": "Best for"},
+                {"type": "raw_text", "text": "Runs in"},
+            ],
+            [
+                {"type": "raw_text", "text": "Vitest"},
+                {"type": "raw_text", "text": "Unit tests"},
+                {"type": "raw_text", "text": "Node/jsdom"},
+            ],
+            [
+                {"type": "raw_text", "text": "Playwright"},
+                {"type": "raw_text", "text": "E2E tests"},
+                {"type": "raw_text", "text": "Browsers"},
+            ],
+        ]
+        assert table["column_settings"] == [
+            {"is_wrapped": True},
+            {"is_wrapped": True},
+            {"is_wrapped": True},
+        ]
+        assert blocks[2]["text"]["text"] == "Done."
+
+    def test_preserves_literal_backslashes_and_escaped_pipes(self, adapter):
+        content = r"""| Path | Text | Escaped slash |
+|---|---|---|
+| C:\Windows | Use \| inside | one\\two |"""
+
+        _, blocks = adapter._format_message_with_blocks(content)
+
+        assert blocks is not None
+        table = blocks[0]
+        assert table["rows"][1] == [
+            {"type": "raw_text", "text": r"C:\Windows"},
+            {"type": "raw_text", "text": "Use | inside"},
+            {"type": "raw_text", "text": r"one\two"},
+        ]
+
+    def test_does_not_convert_tables_inside_code_fences(self, adapter):
+        content = """```md
+| A | B |
+|---|---|
+| 1 | 2 |
+```"""
+
+        _, blocks = adapter._format_message_with_blocks(content)
+
+        assert blocks is None
+
+    def test_long_table_prefix_code_fence_sections_are_balanced(self, adapter):
+        code = "\n".join(f"print({i})" for i in range(500))
+        content = f"""Before table.
+```python
+{code}
+```
+
+| A | B |
+|---|---|
+| 1 | 2 |"""
+
+        _, blocks = adapter._format_message_with_blocks(content)
+
+        assert blocks is not None
+        table_index = next(
+            index for index, block in enumerate(blocks) if block["type"] == "table"
+        )
+        prefix_sections = blocks[:table_index]
+        assert len(prefix_sections) > 1
+        for block in prefix_sections:
+            section_text = block["text"]["text"]
+            assert len(section_text) <= adapter._SECTION_TEXT_LIMIT
+            assert section_text.count("```") % 2 == 0
+
+    def test_long_table_suffix_code_fence_sections_are_balanced(self, adapter):
+        code = "\n".join(f"print({i})" for i in range(500))
+        content = f"""| A | B |
+|---|---|
+| 1 | 2 |
+
+After table.
+```python
+{code}
+```"""
+
+        _, blocks = adapter._format_message_with_blocks(content)
+
+        assert blocks is not None
+        table_index = next(
+            index for index, block in enumerate(blocks) if block["type"] == "table"
+        )
+        suffix_sections = blocks[table_index + 1:]
+        assert len(suffix_sections) > 1
+        for block in suffix_sections:
+            section_text = block["text"]["text"]
+            assert len(section_text) <= adapter._SECTION_TEXT_LIMIT
+            assert section_text.count("```") % 2 == 0
+
+    @pytest.mark.asyncio
+    async def test_send_posts_blocks_with_text_fallback(self, adapter):
+        adapter._app.client.chat_postMessage = AsyncMock(return_value={"ts": "123.456"})
+        content = """| Tool | Best for |
+|---|---|
+| Vitest | Unit tests |"""
+
+        result = await adapter.send("C123", content)
+
+        assert result.success is True
+        adapter._app.client.chat_postMessage.assert_awaited_once()
+        kwargs = adapter._app.client.chat_postMessage.await_args.kwargs
+        assert kwargs["channel"] == "C123"
+        assert kwargs["mrkdwn"] is True
+        assert "| Tool | Best for |" in kwargs["text"]
+        assert kwargs["blocks"][0]["type"] == "table"
+
+    @pytest.mark.asyncio
+    async def test_private_notice_posts_blocks(self, adapter):
+        adapter._app.client.chat_postEphemeral = AsyncMock(return_value={"message_ts": "123.456"})
+        content = """| Tool | Best for |
+|---|---|
+| Vitest | Unit tests |"""
+
+        result = await adapter.send_private_notice("C123", "U123", content)
+
+        assert result.success is True
+        adapter._app.client.chat_postEphemeral.assert_awaited_once()
+        kwargs = adapter._app.client.chat_postEphemeral.await_args.kwargs
+        assert kwargs["channel"] == "C123"
+        assert kwargs["user"] == "U123"
+        assert kwargs["blocks"][0]["type"] == "table"
+
+    @pytest.mark.asyncio
+    async def test_slash_ephemeral_response_url_posts_blocks(self, adapter):
+        import time
+
+        adapter._slash_command_contexts[("C_SLASH", "U_SLASH")] = {
+            "response_url": "https://hooks.slack.com/commands/T123/456/abc",
+            "ts": time.monotonic(),
+        }
+        content = """| Tool | Best for |
+|---|---|
+| Vitest | Unit tests |"""
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.post = MagicMock(return_value=mock_resp)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("gateway.platforms.slack.aiohttp.ClientSession", return_value=mock_session):
+            result = await adapter.send("C_SLASH", content)
+
+        assert result.success is True
+        payload = mock_session.post.call_args.kwargs["json"]
+        assert payload["response_type"] == "ephemeral"
+        assert payload["replace_original"] is True
+        assert "| Tool | Best for |" in payload["text"]
+        assert payload["blocks"][0]["type"] == "table"
+
+
+# ---------------------------------------------------------------------------
 # TestSlashCommandSessionIsolation
 # ---------------------------------------------------------------------------
 

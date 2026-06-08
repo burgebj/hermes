@@ -691,7 +691,7 @@ class SlackAdapter(BasePlatformAdapter):
         the user already saw the initial ack, so a delivery failure here
         is non-critical.
         """
-        formatted = self.format_message(content)
+        formatted, blocks = self._format_message_with_blocks(content)
         # Slack's response_url has the same ~40k char limit as chat_postMessage.
         # Truncate to MAX_MESSAGE_LENGTH and use only the first chunk — the
         # response_url replaces a single ephemeral ack, so multi-chunk isn't
@@ -703,6 +703,8 @@ class SlackAdapter(BasePlatformAdapter):
             "replace_original": True,
             "text": text,
         }
+        if blocks and len(chunks) == 1:
+            payload["blocks"] = blocks
         try:
             async with aiohttp.ClientSession(trust_env=True) as session:
                 async with session.post(
@@ -1079,8 +1081,9 @@ class SlackAdapter(BasePlatformAdapter):
                     content,
                 )
 
-            # Convert standard markdown → Slack mrkdwn
-            formatted = self.format_message(content)
+            # Convert standard markdown → Slack mrkdwn, and use Block Kit for
+            # eligible GitHub-Flavored Markdown pipe tables.
+            formatted, blocks = self._format_message_with_blocks(content)
 
             # Split long messages, preserving code block boundaries
             chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
@@ -1103,6 +1106,9 @@ class SlackAdapter(BasePlatformAdapter):
                     # Only broadcast the first chunk of the first reply
                     if broadcast and i == 0:
                         kwargs["reply_broadcast"] = True
+
+                if i == 0 and blocks and len(chunks) == 1:
+                    kwargs["blocks"] = blocks
 
                 last_result = await self._get_client(chat_id).chat_postMessage(**kwargs)
 
@@ -1148,7 +1154,7 @@ class SlackAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="chat_id and user_id are required")
 
         try:
-            formatted = self.format_message(content)
+            formatted, blocks = self._format_message_with_blocks(content)
             thread_ts = self._resolve_thread_ts(reply_to, metadata)
             kwargs = {
                 "channel": chat_id,
@@ -1158,6 +1164,8 @@ class SlackAdapter(BasePlatformAdapter):
             }
             if thread_ts:
                 kwargs["thread_ts"] = thread_ts
+            if blocks:
+                kwargs["blocks"] = blocks
 
             result = await self._get_client(chat_id).chat_postEphemeral(**kwargs)
             return SendResult(
@@ -1499,6 +1507,236 @@ class SlackAdapter(BasePlatformAdapter):
         ):
             return True
         return self._is_retryable_error(body)
+
+    # ----- Markdown tables → Slack Block Kit tables -----
+
+    _TABLE_CELL_LIMIT = 20
+    _TABLE_ROW_LIMIT = 100
+    _SECTION_TEXT_LIMIT = 3000
+    _TABLE_CELL_TEXT_LIMIT = 3000
+    _BLOCK_LIMIT = 50
+
+    @staticmethod
+    def _split_table_row(line: str) -> List[str]:
+        """Split a GitHub-Flavored Markdown pipe-table row into cells."""
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            stripped = stripped[1:]
+        if stripped.endswith("|"):
+            stripped = stripped[:-1]
+
+        cells: List[str] = []
+        current: List[str] = []
+        index = 0
+        while index < len(stripped):
+            char = stripped[index]
+            next_char = stripped[index + 1] if index + 1 < len(stripped) else ""
+
+            if char == "\\" and next_char in {"|", "\\"}:
+                current.append(next_char)
+                index += 2
+                continue
+            if char == "|":
+                cells.append("".join(current).strip())
+                current = []
+                index += 1
+                continue
+            current.append(char)
+            index += 1
+
+        cells.append("".join(current).strip())
+        return cells
+
+    @classmethod
+    def _is_table_delimiter(cls, line: str) -> bool:
+        cells = cls._split_table_row(line)
+        if len(cells) < 2:
+            return False
+        return all(re.fullmatch(r":?-{3,}:?", cell.strip() or "") for cell in cells)
+
+    @classmethod
+    def _is_table_candidate_row(cls, line: str) -> bool:
+        stripped = line.strip()
+        return "|" in stripped and not stripped.startswith(">")
+
+    @classmethod
+    def _split_section_text(cls, text: str) -> List[str]:
+        """Split Slack mrkdwn section text without breaking code fences."""
+        if len(text) <= cls._SECTION_TEXT_LIMIT:
+            return [text]
+
+        chunks: List[str] = []
+        remaining = text
+        carry_lang: Optional[str] = None
+        fence_close = "\n```"
+
+        while remaining:
+            prefix = f"```{carry_lang}\n" if carry_lang is not None else ""
+            headroom = cls._SECTION_TEXT_LIMIT - len(prefix) - len(fence_close)
+            if headroom < 1:
+                headroom = max(1, cls._SECTION_TEXT_LIMIT - len(prefix))
+
+            if len(prefix) + len(remaining) <= cls._SECTION_TEXT_LIMIT:
+                chunks.append(prefix + remaining)
+                break
+
+            region = remaining[:headroom]
+            split_at = max(region.rfind("\n\n"), region.rfind("\n"))
+            if split_at < headroom // 2:
+                split_at = region.rfind(" ")
+            if split_at < 1:
+                split_at = headroom
+
+            chunk_body = remaining[:split_at]
+            remaining = remaining[split_at:].lstrip("\n")
+            full_chunk = prefix + chunk_body
+
+            in_code = carry_lang is not None
+            lang = carry_lang or ""
+            for line in chunk_body.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("```"):
+                    if in_code:
+                        in_code = False
+                        lang = ""
+                    else:
+                        in_code = True
+                        tag = stripped[3:].strip()
+                        lang = tag.split()[0] if tag else ""
+
+            if in_code and len(full_chunk) + len(fence_close) <= cls._SECTION_TEXT_LIMIT:
+                full_chunk += fence_close
+                carry_lang = lang
+            else:
+                carry_lang = lang if in_code else None
+
+            chunks.append(full_chunk)
+
+        return chunks
+
+    @classmethod
+    def _find_markdown_table(
+        cls,
+        content: str,
+    ) -> Optional[Tuple[str, List[List[str]], str]]:
+        """Return prefix/table rows/suffix for one eligible GFM pipe table.
+
+        Slack allows one table block per message, so callers intentionally only
+        convert a message when exactly one eligible table is present. Tables in
+        fenced code blocks are ignored.
+        """
+        lines = content.splitlines(keepends=True)
+        in_fence = False
+        matches: List[Tuple[int, int, List[List[str]]]] = []
+
+        i = 0
+        while i < len(lines):
+            stripped = lines[i].strip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = not in_fence
+                i += 1
+                continue
+            if in_fence or i + 1 >= len(lines):
+                i += 1
+                continue
+
+            header_line = lines[i].rstrip("\r\n")
+            delimiter_line = lines[i + 1].rstrip("\r\n")
+            if not cls._is_table_candidate_row(header_line) or not cls._is_table_delimiter(delimiter_line):
+                i += 1
+                continue
+
+            header = cls._split_table_row(header_line)
+            delimiter = cls._split_table_row(delimiter_line)
+            column_count = len(header)
+            if not (2 <= column_count <= cls._TABLE_CELL_LIMIT) or len(delimiter) != column_count:
+                i += 1
+                continue
+
+            rows = [header]
+            j = i + 2
+            oversized = False
+            while j < len(lines):
+                row_line = lines[j].rstrip("\r\n")
+                if not cls._is_table_candidate_row(row_line):
+                    break
+                row = cls._split_table_row(row_line)
+                if len(row) != column_count:
+                    break
+                if len(rows) >= cls._TABLE_ROW_LIMIT:
+                    oversized = True
+                    break
+                rows.append(row)
+                j += 1
+
+            if oversized:
+                i = j
+                continue
+
+            # Need at least one data row, not just header+delimiter.
+            if len(rows) >= 2:
+                matches.append((i, j, rows))
+                i = j
+                continue
+            i += 1
+
+        if len(matches) != 1:
+            return None
+
+        start, end, rows = matches[0]
+        prefix = "".join(lines[:start]).strip()
+        suffix = "".join(lines[end:]).strip()
+        return prefix, rows, suffix
+
+    def _markdown_table_to_slack_blocks(
+        self,
+        content: str,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Build Block Kit blocks for a message containing one Markdown table."""
+        table = self._find_markdown_table(content)
+        if not table:
+            return None
+        prefix, rows, suffix = table
+
+        def section_blocks(markdown: str) -> List[Dict[str, Any]]:
+            formatted = self.format_message(markdown).strip()
+            if not formatted:
+                return []
+            return [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": chunk},
+                }
+                for chunk in self._split_section_text(formatted)
+            ]
+
+        # Slack table cells use raw_text for plain cells or rich_text for
+        # formatted cells; they do not use standard plain_text/mrkdwn objects.
+        table_block: Dict[str, Any] = {
+            "type": "table",
+            "column_settings": [{"is_wrapped": True} for _ in rows[0]],
+            "rows": [
+                [
+                    {"type": "raw_text", "text": cell[:self._TABLE_CELL_TEXT_LIMIT]}
+                    for cell in row
+                ]
+                for row in rows
+            ],
+        }
+
+        blocks = section_blocks(prefix) + [table_block] + section_blocks(suffix)
+        if len(blocks) > self._BLOCK_LIMIT:
+            return None
+        return blocks
+
+    def _format_message_with_blocks(
+        self,
+        content: str,
+    ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
+        """Return Slack mrkdwn fallback text and optional Block Kit blocks."""
+        formatted = self.format_message(content)
+        blocks = self._markdown_table_to_slack_blocks(content)
+        return formatted, blocks
 
     # ----- Markdown → mrkdwn conversion -----
 
