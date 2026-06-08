@@ -363,6 +363,43 @@ class TestSkillsHubSearchEndpoint:
         assert body["installed"] == {}
 
 
+class TestSkillsHubInstallEndpoint:
+    @pytest.fixture(autouse=True)
+    def _setup(self, _isolate_hermes_home):
+        self.client, _ = _client()
+
+    def test_install_spawns_noninteractive_confirmed_command(self, monkeypatch):
+        import hermes_cli.web_server as ws
+
+        spawned = {}
+
+        class _FakeProc:
+            pid = 1234
+
+        def _fake_spawn(subcommand, name):
+            spawned["subcommand"] = subcommand
+            spawned["name"] = name
+            return _FakeProc()
+
+        monkeypatch.setattr(ws, "_spawn_hermes_action", _fake_spawn)
+
+        r = self.client.post(
+            "/api/skills/hub/install",
+            json={"identifier": "official/creative/pixel-art"},
+        )
+
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "skills-install"
+        assert r.json()["pid"] == 1234
+        assert spawned["name"] == "skills-install"
+        assert spawned["subcommand"] == [
+            "skills",
+            "install",
+            "official/creative/pixel-art",
+            "--yes",
+        ]
+
+
 class _FakeMeta:
     """Minimal SkillMeta stand-in for monkeypatched source search."""
 
