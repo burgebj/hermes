@@ -51,7 +51,7 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
         thread.start()
 
 
-def wait_for_mcp_discovery(timeout: float = 0.75) -> None:
+def wait_for_mcp_discovery(timeout: float = 3.0) -> None:
     """Briefly wait for background MCP discovery before the first tool snapshot."""
     thread = _mcp_discovery_thread
     if thread is None or not thread.is_alive():

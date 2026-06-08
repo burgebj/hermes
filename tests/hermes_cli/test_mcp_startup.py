@@ -154,7 +154,7 @@ def test_init_agent_waits_for_mcp_discovery_before_agent_build(monkeypatch):
     monkeypatch.setattr(
         mcp_startup,
         "wait_for_mcp_discovery",
-        lambda timeout=0.75: waited.__setitem__("done", True),
+        lambda timeout=3.0: waited.__setitem__("done", True),
     )
 
     def _fake_agent(*_a, **_k):

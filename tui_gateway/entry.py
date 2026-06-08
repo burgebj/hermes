@@ -192,7 +192,7 @@ def _log_exit(reason: str) -> None:
     print(f"[gateway-exit] {reason}", file=sys.stderr, flush=True)
 
 
-def wait_for_mcp_discovery(timeout: float = 0.75) -> None:
+def wait_for_mcp_discovery(timeout: float = 3.0) -> None:
     """Briefly block until background MCP discovery finishes, up to ``timeout``.
 
     MCP discovery runs in a daemon thread spawned at startup (see main()) so a
