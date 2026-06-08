@@ -287,7 +287,21 @@ export const zh: Translations = {
       technical: '技术',
       technicalDesc: '包含原始工具参数/结果及底层细节。',
       themeTitle: '主题',
-      themeDesc: '仅桌面端调色板。所选模式叠加其上。'
+      themeDesc: '仅桌面端调色板。所选模式叠加其上。',
+      typographyTitle: '字体排版',
+      typographyDesc: '调整聊天界面和 UI 元素的字体大小。',
+      baseFontSize: '基础字体大小',
+      baseFontSizeDesc: '控制 UI 元素（侧边栏、菜单、按钮）的基础字体大小。',
+      messageFontSize: '消息文本大小',
+      messageFontSizeDesc: '聊天消息和代码块的字体大小。',
+      densityTitle: '界面密度',
+      densityDesc: '调整整个界面的间距和内边距。',
+      compact: '紧凑',
+      compactDesc: '更紧凑的间距，显示更多内容。',
+      defaultDensity: '默认',
+      defaultDesc: '平衡的间距。',
+      comfortable: '舒适',
+      comfortableDesc: '宽松的间距，更护眼。'
     },
     fieldLabels: defineFieldCopy({
       model: '默认模型',

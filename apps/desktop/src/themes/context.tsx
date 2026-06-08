@@ -12,6 +12,7 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 
 import { matchesQuery, useMediaQuery } from '@/hooks/use-media-query'
+import { $baseFontSize, $densityMode, $messageFontSize, getDensityScale } from '@/store/typography'
 
 import { BUILTIN_THEME_LIST, BUILTIN_THEMES, DEFAULT_SKIN_NAME, DEFAULT_TYPOGRAPHY, nousTheme } from './presets'
 import type { DesktopTheme, DesktopThemeColors } from './types'
@@ -212,7 +213,20 @@ function applyTheme(theme: DesktopTheme, mode: 'light' | 'dark') {
     '--noise-opacity-mul': isDark ? 'calc(0.04 / 0.21)' : 'calc(0.34 / 0.21)'
   }
 
-  for (const [k, v] of Object.entries({ ...seeds, ...mixesFor(isDark), ...palette })) {
+  // Typography overrides from user preferences.
+  const baseFontSize = $baseFontSize.get()
+  const messageFontSize = $messageFontSize.get()
+  const densityScale = getDensityScale($densityMode.get())
+
+  const typography: Record<string, string> = {
+    '--dt-base-size': `${baseFontSize}px`,
+    '--conversation-text-font-size': `${messageFontSize}px`,
+    '--conversation-caption-font-size': `${Math.round(messageFontSize * 0.92)}px`,
+    '--conversation-tool-font-size': `${Math.round(messageFontSize * 0.85)}px`,
+    '--dt-spacing-mul': String(densityScale)
+  }
+
+  for (const [k, v] of Object.entries({ ...seeds, ...mixesFor(isDark), ...palette, ...typography })) {
     root.style.setProperty(k, v)
   }
 
@@ -272,11 +286,24 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     typeof window === 'undefined' ? 'light' : ((window.localStorage.getItem(MODE_KEY) as ThemeMode) ?? 'light')
   )
 
+  const [typographyTick, setTypographyTick] = useState(0)
+
   const systemDark = useMediaQuery('(prefers-color-scheme: dark)')
   const resolvedMode = resolveMode(mode, systemDark)
   const activeTheme = useMemo(() => deriveTheme(themeName, resolvedMode), [themeName, resolvedMode])
 
-  useEffect(() => applyTheme(activeTheme, resolvedMode), [activeTheme, resolvedMode])
+  // Re-apply theme when typography preferences change.
+  useEffect(() => {
+    const unsubs = [
+      $baseFontSize.subscribe(() => setTypographyTick(t => t + 1)),
+      $messageFontSize.subscribe(() => setTypographyTick(t => t + 1)),
+      $densityMode.subscribe(() => setTypographyTick(t => t + 1))
+    ]
+
+    return () => unsubs.forEach(u => u())
+  }, [])
+
+  useEffect(() => applyTheme(activeTheme, resolvedMode), [activeTheme, resolvedMode, typographyTick])
 
   const setTheme = useCallback((name: string) => {
     const next = normalizeSkin(name)

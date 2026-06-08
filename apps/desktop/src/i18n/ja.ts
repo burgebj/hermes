@@ -215,7 +215,21 @@ export const ja = defineLocale({
       technical: 'テクニカル',
       technicalDesc: '生のツール引数、結果、低レベルの詳細を含めます。',
       themeTitle: 'テーマ',
-      themeDesc: 'デスクトップ専用のパレットです。選択したモードの上に適用されます。'
+      themeDesc: 'デスクトップ専用のパレットです。選択したモードの上に適用されます。',
+      typographyTitle: 'フォント設定',
+      typographyDesc: 'チャットインターフェースとUI要素のフォントサイズを調整します。',
+      baseFontSize: '基本フォントサイズ',
+      baseFontSizeDesc: 'UI要素（サイドバー、メニュー、ボタン）の基本フォントサイズを制御します。',
+      messageFontSize: 'メッセージテキストサイズ',
+      messageFontSizeDesc: 'チャットメッセージとコードブロックのフォントサイズ。',
+      densityTitle: 'UI密度',
+      densityDesc: 'インターフェース全体のスペーシングとパディングを調整します。',
+      compact: 'コンパクト',
+      compactDesc: 'より紧密なスペーシング、より多くのコンテンツを表示。',
+      defaultDensity: 'デフォルト',
+      defaultDesc: 'バランスの取れたスペーシング。',
+      comfortable: 'コンフォタブル',
+      comfortableDesc: 'ゆとりのあるスペーシング、目に優しい。'
     },
     fieldLabels: defineFieldCopy({
       model: 'デフォルトモデル',

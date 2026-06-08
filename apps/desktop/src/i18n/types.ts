@@ -219,6 +219,20 @@ export interface Translations {
       technicalDesc: string
       themeTitle: string
       themeDesc: string
+      typographyTitle: string
+      typographyDesc: string
+      baseFontSize: string
+      baseFontSizeDesc: string
+      messageFontSize: string
+      messageFontSizeDesc: string
+      densityTitle: string
+      densityDesc: string
+      compact: string
+      compactDesc: string
+      defaultDensity: string
+      defaultDesc: string
+      comfortable: string
+      comfortableDesc: string
     }
     fieldLabels: Record<string, string>
     fieldDescriptions: Record<string, string>

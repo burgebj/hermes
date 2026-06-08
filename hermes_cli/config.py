@@ -13,6 +13,7 @@ This module provides:
 """
 
 import copy
+import json
 import logging
 import os
 import platform
@@ -6027,6 +6028,14 @@ def set_config_value(key: str, value: str):
         value = int(value)
     elif value.replace('.', '', 1).isdigit():
         value = float(value)
+    elif value and value[0] in ('{', '['):
+        # Persist JSON objects/arrays as structured data instead of quoted strings.
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, (dict, list)):
+                value = parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
 
     _set_nested(user_config, key, value)
     

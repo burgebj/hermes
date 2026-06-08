@@ -4,8 +4,9 @@ import { LanguageSwitcher } from '@/components/language-switcher'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
-import { Check, Palette } from '@/lib/icons'
+import { Check, Palette, SlidersHorizontal } from '@/lib/icons'
 import { cn } from '@/lib/utils'
+import { $densityMode, $baseFontSize, $messageFontSize, setBaseFontSize, setMessageFontSize, setDensityMode, type DensityMode } from '@/store/typography'
 import { $toolViewMode, setToolViewMode } from '@/store/tool-view'
 import { useTheme } from '@/themes/context'
 import { BUILTIN_THEMES } from '@/themes/presets'
@@ -53,10 +54,50 @@ function ThemePreview({ name }: { name: string }) {
   )
 }
 
+function FontSizeSlider({
+  value,
+  min,
+  max,
+  onChange,
+  label
+}: {
+  value: number
+  min: number
+  max: number
+  onChange: (val: number) => void
+  label: string
+}) {
+  return (
+    <div className="flex items-center gap-3">
+      <span className="w-8 text-right text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+        {min}px
+      </span>
+      <input
+        aria-label={label}
+        className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-(--ui-stroke-tertiary) accent-primary"
+        max={max}
+        min={min}
+        onChange={e => onChange(Number(e.target.value))}
+        type="range"
+        value={value}
+      />
+      <span className="w-8 text-right text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+        {max}px
+      </span>
+      <span className="w-10 text-right font-mono text-[length:var(--conversation-caption-font-size)] text-foreground">
+        {value}px
+      </span>
+    </div>
+  )
+}
+
 export function AppearanceSettings() {
   const { t, isSavingLocale } = useI18n()
   const { themeName, mode, availableThemes, setTheme, setMode } = useTheme()
   const toolViewMode = useStore($toolViewMode)
+  const baseFontSize = useStore($baseFontSize)
+  const messageFontSize = useStore($messageFontSize)
+  const densityMode = useStore($densityMode)
   const a = t.settings.appearance
 
   const modeOptions = MODE_OPTIONS.map(({ id, icon }) => ({ icon, id, label: t.settings.modeOptions[id].label }))
@@ -64,6 +105,12 @@ export function AppearanceSettings() {
   const toolOptions = [
     { id: 'product', label: a.product },
     { id: 'technical', label: a.technical }
+  ] as const
+
+  const densityOptions = [
+    { id: 'compact', label: a.compact },
+    { id: 'default', label: a.defaultDensity },
+    { id: 'comfortable', label: a.comfortable }
   ] as const
 
   return (
@@ -154,6 +201,64 @@ export function AppearanceSettings() {
             }
             description={a.toolViewDesc}
             title={a.toolViewTitle}
+          />
+        </div>
+      </div>
+
+      <div className="mt-8">
+        <SectionHeading icon={SlidersHorizontal} title={a.typographyTitle} />
+        <p className="max-w-2xl text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
+          {a.typographyDesc}
+        </p>
+
+        <div className="mt-2 divide-y divide-(--ui-stroke-tertiary)">
+          <ListRow
+            action={
+              <FontSizeSlider
+                label={a.baseFontSize}
+                max={18}
+                min={12}
+                onChange={val => {
+                  triggerHaptic('selection')
+                  setBaseFontSize(val)
+                }}
+                value={baseFontSize}
+              />
+            }
+            description={a.baseFontSizeDesc}
+            title={a.baseFontSize}
+          />
+
+          <ListRow
+            action={
+              <FontSizeSlider
+                label={a.messageFontSize}
+                max={18}
+                min={12}
+                onChange={val => {
+                  triggerHaptic('selection')
+                  setMessageFontSize(val)
+                }}
+                value={messageFontSize}
+              />
+            }
+            description={a.messageFontSizeDesc}
+            title={a.messageFontSize}
+          />
+
+          <ListRow
+            action={
+              <SegmentedControl
+                onChange={id => {
+                  triggerHaptic('crisp')
+                  setDensityMode(id as DensityMode)
+                }}
+                options={densityOptions}
+                value={densityMode}
+              />
+            }
+            description={a.densityDesc}
+            title={a.densityTitle}
           />
         </div>
       </div>

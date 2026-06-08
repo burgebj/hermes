@@ -209,7 +209,21 @@ export const zhHant = defineLocale({
       technical: '技術',
       technicalDesc: '包含原始工具參數、結果與底層細節。',
       themeTitle: '主題',
-      themeDesc: '僅限桌面端的調色盤。所選模式會套用在其上。'
+      themeDesc: '僅限桌面端的調色盤。所選模式會套用在其上。',
+      typographyTitle: '字體排版',
+      typographyDesc: '調整聊天介面和 UI 元素的字體大小。',
+      baseFontSize: '基礎字體大小',
+      baseFontSizeDesc: '控制 UI 元素（側邊欄、選單、按鈕）的基礎字體大小。',
+      messageFontSize: '訊息文字大小',
+      messageFontSizeDesc: '聊天訊息和程式碼區塊的字體大小。',
+      densityTitle: '介面密度',
+      densityDesc: '調整整個介面的間距和內邊距。',
+      compact: '緊湊',
+      compactDesc: '更緊湊的間距，顯示更多內容。',
+      defaultDensity: '預設',
+      defaultDesc: '平衡的間距。',
+      comfortable: '舒適',
+      comfortableDesc: '寬鬆的間距，更護眼。'
     },
     fieldLabels: defineFieldCopy({
       model: '預設模型',
