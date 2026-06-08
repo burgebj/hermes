@@ -135,6 +135,28 @@ def check_discord_requirements() -> bool:
     return True
 
 
+def _mention_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"true", "1", "yes", "on"}
+
+
+def _build_allowed_mentions_payload() -> dict:
+    """Build REST ``allowed_mentions`` payload matching live bot defaults."""
+    parse = []
+    if _mention_bool("DISCORD_ALLOW_MENTION_EVERYONE", False):
+        parse.append("everyone")
+    if _mention_bool("DISCORD_ALLOW_MENTION_ROLES", False):
+        parse.append("roles")
+    if _mention_bool("DISCORD_ALLOW_MENTION_USERS", True):
+        parse.append("users")
+    return {
+        "parse": parse,
+        "replied_user": _mention_bool("DISCORD_ALLOW_MENTION_REPLIED_USER", True),
+    }
+
+
 def _build_allowed_mentions():
     """Build Discord ``AllowedMentions`` with safe defaults, overridable via env.
 
@@ -156,17 +178,11 @@ def _build_allowed_mentions():
     if not DISCORD_AVAILABLE:
         return None
 
-    def _b(name: str, default: bool) -> bool:
-        raw = os.getenv(name, "").strip().lower()
-        if not raw:
-            return default
-        return raw in {"true", "1", "yes", "on"}
-
     return discord.AllowedMentions(
-        everyone=_b("DISCORD_ALLOW_MENTION_EVERYONE", False),
-        roles=_b("DISCORD_ALLOW_MENTION_ROLES", False),
-        users=_b("DISCORD_ALLOW_MENTION_USERS", True),
-        replied_user=_b("DISCORD_ALLOW_MENTION_REPLIED_USER", True),
+        everyone=_mention_bool("DISCORD_ALLOW_MENTION_EVERYONE", False),
+        roles=_mention_bool("DISCORD_ALLOW_MENTION_ROLES", False),
+        users=_mention_bool("DISCORD_ALLOW_MENTION_USERS", True),
+        replied_user=_mention_bool("DISCORD_ALLOW_MENTION_REPLIED_USER", True),
     )
 
 
@@ -6173,7 +6189,11 @@ async def _standalone_send(
                             {"id": str(idx), "filename": os.path.basename(path)}
                             for idx, path in enumerate(valid_media)
                         ]
-                        starter_message = {"content": message, "attachments": attachments_meta}
+                        starter_message = {
+                            "content": message,
+                            "attachments": attachments_meta,
+                            "allowed_mentions": _build_allowed_mentions_payload(),
+                        }
                         payload_json = json.dumps({"name": thread_name, "message": starter_message})
 
                         form = aiohttp.FormData()
@@ -6202,7 +6222,10 @@ async def _standalone_send(
                             headers=json_headers,
                             json={
                                 "name": thread_name,
-                                "message": {"content": message},
+                                "message": {
+                                    "content": message,
+                                    "allowed_mentions": _build_allowed_mentions_payload(),
+                                },
                             },
                             **_req_kw,
                         ) as resp:
@@ -6229,7 +6252,12 @@ async def _standalone_send(
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), **_sess_kw) as session:
             # Send text message (skip if empty and media is present)
             if message.strip() or not media_files:
-                async with session.post(url, headers=json_headers, json={"content": message}, **_req_kw) as resp:
+                async with session.post(
+                    url,
+                    headers=json_headers,
+                    json={"content": message, "allowed_mentions": _build_allowed_mentions_payload()},
+                    **_req_kw,
+                ) as resp:
                     if resp.status not in {200, 201}:
                         body = await resp.text()
                         return {"error": f"Discord API error ({resp.status}): {body}"}
