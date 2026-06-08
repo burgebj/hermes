@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import unicodeSpinners from 'unicode-animations'
 
 import { artWidth, caduceus, CADUCEUS_WIDTH, logo, LOGO_WIDTH } from '../banner.js'
-import { flat } from '../lib/text.js'
+import { cappedSystemPromptText, flat, fmtK } from '../lib/text.js'
 import type { Theme } from '../theme.js'
 import type { PanelSection, SessionInfo } from '../types.js'
 
@@ -270,10 +270,18 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
       return <Text color={t.color.muted}>No system prompt loaded.</Text>
     }
 
+    const capped = cappedSystemPromptText(info.system_prompt ?? '')
+
     return (
-      <Text color={t.color.muted}>
-        {info.system_prompt}
-      </Text>
+      <>
+        <Text color={t.color.muted}>{capped.text}</Text>
+        {capped.truncated && (
+          <Text color={t.color.muted} dimColor>
+            … {fmtK(capped.omittedChars)} more chars
+            {capped.omittedLines > 0 ? ` / ${fmtK(capped.omittedLines)} lines` : ''} hidden
+          </Text>
+        )}
+      </>
     )
   }
 
