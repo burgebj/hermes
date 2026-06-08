@@ -477,6 +477,18 @@ class TestListProfiles:
         assert profiles[0].name == "default"
         assert profiles[0].is_default is True
 
+    def test_ignores_stray_named_default_directory(self, profile_env):
+        tmp_path = profile_env
+        stray_default = tmp_path / ".hermes" / "profiles" / "default"
+        stray_default.mkdir(parents=True)
+        (stray_default / "config.yaml").write_text("model: stray\n")
+
+        profiles = list_profiles()
+
+        defaults = [p for p in profiles if p.name == "default"]
+        assert len(defaults) == 1
+        assert defaults[0].path == tmp_path / ".hermes"
+
 
 # ===================================================================
 # TestActiveProfile
