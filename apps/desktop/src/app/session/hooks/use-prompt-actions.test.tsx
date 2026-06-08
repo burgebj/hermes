@@ -3,7 +3,8 @@ import type { MutableRefObject } from 'react'
 import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { $sessions, setSessions } from '@/store/session'
+import { type ComposerAttachment } from '@/store/composer'
+import { $sessions, setConnection, setSessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
 import { usePromptActions } from './use-prompt-actions'
@@ -42,7 +43,7 @@ function sessionInfo(overrides: Partial<SessionInfo> = {}): SessionInfo {
 
 interface HarnessHandle {
   steerPrompt: (text: string) => Promise<boolean>
-  submitText: (text: string, options?: { attachments?: never[]; fromQueue?: boolean }) => Promise<boolean>
+  submitText: (text: string, options?: { attachments?: ComposerAttachment[]; fromQueue?: boolean }) => Promise<boolean>
 }
 
 function Harness({
@@ -107,8 +108,8 @@ describe('usePromptActions /title', () => {
 
   it('renames via the session.title RPC (with the runtime id), updates the sidebar store, and refreshes', async () => {
     const refreshSessions = vi.fn(async () => undefined)
-    const requestGateway = vi.fn(async (method: string) =>
-      (method === 'session.title' ? { pending: false, title: 'New title' } : {}) as never
+    const requestGateway = vi.fn(
+      async (method: string) => (method === 'session.title' ? { pending: false, title: 'New title' } : {}) as never
     )
 
     let handle: HarnessHandle | null = null
@@ -130,8 +131,8 @@ describe('usePromptActions /title', () => {
 
   it('reports the queued state when the session row is not persisted yet', async () => {
     const refreshSessions = vi.fn(async () => undefined)
-    const requestGateway = vi.fn(async (method: string) =>
-      (method === 'session.title' ? { pending: true, title: 'Fresh chat' } : {}) as never
+    const requestGateway = vi.fn(
+      async (method: string) => (method === 'session.title' ? { pending: true, title: 'Fresh chat' } : {}) as never
     )
 
     let handle: HarnessHandle | null = null
@@ -176,7 +177,10 @@ describe('usePromptActions /title', () => {
 
     await handle!.submitText('/title way too long title')
 
-    expect(requestGateway).toHaveBeenCalledWith('session.title', expect.objectContaining({ title: 'way too long title' }))
+    expect(requestGateway).toHaveBeenCalledWith(
+      'session.title',
+      expect.objectContaining({ title: 'way too long title' })
+    )
     expect(refreshSessions).not.toHaveBeenCalled()
     expect($sessions.get()[0]?.title).toBe('Old title')
   })
@@ -186,6 +190,65 @@ describe('usePromptActions submit / queue drain semantics', () => {
   afterEach(() => {
     cleanup()
     vi.restoreAllMocks()
+    setConnection(null)
+  })
+
+  it('falls back to byte upload when a localhost tunnel cannot resolve a local screenshot path', async () => {
+    const desktopWindow = window as unknown as { hermesDesktop?: Partial<Window['hermesDesktop']> }
+    const originalBridge = desktopWindow.hermesDesktop
+    const readFileDataUrl = vi.fn(async () => 'data:image/png;base64,UE5H')
+    const screenshotPath = '/Users/name/Library/Application Support/Hermes/screenshots/shot.png'
+    const attachment: ComposerAttachment = {
+      id: 'img-1',
+      kind: 'image',
+      label: 'shot.png',
+      path: screenshotPath
+    }
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'image.attach') {
+        throw new Error(`image not found: ${screenshotPath}`)
+      }
+
+      if (method === 'image.attach_bytes') {
+        return { attached: true, path: '/home/coder/.hermes/images/upload_1.png' } as never
+      }
+
+      return {} as never
+    })
+
+    setConnection({ mode: 'local' } as never)
+    desktopWindow.hermesDesktop = { readFileDataUrl }
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+
+    try {
+      const accepted = await handle!.submitText('please inspect this', { attachments: [attachment] })
+
+      expect(accepted).toBe(true)
+      expect(requestGateway).toHaveBeenCalledWith('image.attach', {
+        session_id: RUNTIME_SESSION_ID,
+        path: screenshotPath
+      })
+      expect(readFileDataUrl).toHaveBeenCalledWith(screenshotPath)
+      expect(requestGateway).toHaveBeenCalledWith('image.attach_bytes', {
+        session_id: RUNTIME_SESSION_ID,
+        content_base64: 'UE5H',
+        filename: 'shot.png'
+      })
+      expect(requestGateway).toHaveBeenCalledWith('prompt.submit', {
+        session_id: RUNTIME_SESSION_ID,
+        text: 'please inspect this'
+      })
+    } finally {
+      if (originalBridge) {
+        desktopWindow.hermesDesktop = originalBridge
+      } else {
+        delete desktopWindow.hermesDesktop
+      }
+    }
   })
 
   it('clears a leftover interrupted flag on a fresh submit (so the new turn streams)', async () => {
@@ -271,7 +334,9 @@ describe('usePromptActions steerPrompt', () => {
     const requestGateway = vi.fn(async () => ({ status: 'queued' }) as never)
 
     let handle: HarnessHandle | null = null
-    render(<Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+    render(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
 
     const accepted = await handle!.steerPrompt('  nudge the run  ')
 
@@ -288,7 +353,9 @@ describe('usePromptActions steerPrompt', () => {
     const requestGateway = vi.fn(async () => ({ status: 'rejected' }) as never)
 
     let handle: HarnessHandle | null = null
-    render(<Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+    render(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
 
     expect(await handle!.steerPrompt('too late')).toBe(false)
   })
@@ -299,7 +366,9 @@ describe('usePromptActions steerPrompt', () => {
     })
 
     let handle: HarnessHandle | null = null
-    render(<Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+    render(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
 
     expect(await handle!.steerPrompt('boom')).toBe(false)
   })
@@ -308,7 +377,9 @@ describe('usePromptActions steerPrompt', () => {
     const requestGateway = vi.fn(async () => ({ status: 'queued' }) as never)
 
     let handle: HarnessHandle | null = null
-    render(<Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+    render(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
 
     expect(await handle!.steerPrompt('   ')).toBe(false)
     expect(requestGateway).not.toHaveBeenCalled()

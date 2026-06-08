@@ -23,6 +23,7 @@ import pytest
 from hermes_cli.main import (
     _find_stale_dashboard_pids,
     _kill_stale_dashboard_processes,
+    _looks_like_dashboard_command,
     _warn_stale_dashboard_processes,  # back-compat alias
 )
 
@@ -47,6 +48,7 @@ def _refresh_bindings_against_live_module():
     """
     global _find_stale_dashboard_pids
     global _kill_stale_dashboard_processes
+    global _looks_like_dashboard_command
     global _warn_stale_dashboard_processes
 
     live = sys.modules.get("hermes_cli.main")
@@ -55,6 +57,7 @@ def _refresh_bindings_against_live_module():
 
     _find_stale_dashboard_pids = live._find_stale_dashboard_pids
     _kill_stale_dashboard_processes = live._kill_stale_dashboard_processes
+    _looks_like_dashboard_command = live._looks_like_dashboard_command
     _warn_stale_dashboard_processes = live._warn_stale_dashboard_processes
     yield
 
@@ -112,10 +115,31 @@ class TestFindStaleDashboardPids:
                     _ps_line(12345, "python3 -m hermes_cli.main dashboard --port 9119"),
                     _ps_line(12346, "hermes dashboard --port 9120 --no-open"),
                     _ps_line(12347, "python /home/x/hermes_cli/main.py dashboard"),
+                    _ps_line(12348, "/home/coder/.local/bin/hermes -p vvb-agent dashboard --port 9120 --no-open"),
                 ]) + "\n",
                 stderr="",
             )
-            assert sorted(_find_stale_dashboard_pids()) == [12345, 12346, 12347]
+            assert sorted(_find_stale_dashboard_pids()) == [12345, 12346, 12347, 12348]
+
+    def test_matches_dashboard_after_global_profile_flag(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=_ps_line(
+                    12345,
+                    "/home/coder/.local/bin/hermes -p vvb-agent dashboard --port 9119",
+                ) + "\n",
+                stderr="",
+            )
+            assert _find_stale_dashboard_pids() == [12345]
+
+    def test_command_matcher_skips_chat_prompt_mentioning_dashboard(self):
+        assert _looks_like_dashboard_command(
+            "python3 -m hermes_cli.main chat -q 'rewrite my dashboard'"
+        ) is False
+        assert _looks_like_dashboard_command(
+            "/home/coder/.local/bin/hermes -p vvb-agent dashboard --port 9119"
+        ) is True
 
     def test_self_pid_excluded(self):
         with patch("subprocess.run") as mock_run:

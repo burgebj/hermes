@@ -102,6 +102,43 @@ This is especially useful when:
 - Trying different approaches to the same task.
 - Pairing CLI + gateway sessions against the same upstream repo.
 
+## Agentic Development Workflow
+
+For autonomous coding, treat worktrees as the **default safety boundary**, not
+an optional optimization. A production-quality Hermes workflow is:
+
+1. Start from a clean parent checkout and fetch the target base branch.
+2. Create one worktree and one branch per agent task.
+3. Run the agent from that worktree only.
+4. Keep commits small and use Conventional Commit subjects.
+5. Push the branch and open a **draft pull request** for human/CI review.
+6. Merge only through the PR path after checks and review pass.
+7. Remove the worktree only after the PR is merged or the branch is explicitly abandoned.
+
+Example:
+
+```bash
+cd /path/to/repo
+
+git fetch origin main
+git worktree add ../repo-hermes-fix-readiness -b fix/readiness origin/main
+cd ../repo-hermes-fix-readiness
+
+hermes
+
+# After changes are verified:
+git status --short
+git add <changed-files>
+git commit -m "fix: harden dashboard readiness checks"
+git push -u origin HEAD
+gh pr create --draft --base main --fill
+```
+
+Kanban-routed coding tasks should use `workspace_kind=worktree` with a stable
+`workspace_path` under the team's worktree root. Avoid assigning two active
+coding tasks to the same worktree; split the work or create dependent cards
+instead.
+
 ## Cleaning Up Worktrees Safely
 
 When you are done with an experiment:

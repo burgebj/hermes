@@ -37,6 +37,9 @@ PUBLIC_API_PATHS: frozenset[str] = frozenset({
     # liveness probe in
     # ``docs/agent-dashboard-public-url-contract.md`` (NAS side).
     "/api/status",
+    # Import-graph readiness probe for watchdogs. Read-only; returns only
+    # redacted module/symbol error metadata when the turn path is broken.
+    "/api/readiness",
     # Read-only config-defaults / schema feeds for the SPA's Config page.
     "/api/config/defaults",
     "/api/config/schema",

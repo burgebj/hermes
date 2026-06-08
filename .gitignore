@@ -41,6 +41,9 @@ source-data/*
 run_datagen_megascience_glm4-6.sh
 data/*
 node_modules/
+# Node/TUI crash artifacts are local diagnostics; preserve them outside the repo
+# when needed, but never commit multi-hundred-MB core dumps.
+ui-tui/core.*
 browser-use/
 agent-browser/
 # Private keys

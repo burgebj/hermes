@@ -242,6 +242,100 @@ class TestWebServerEndpoints:
         assert "version" in data
         assert "hermes_home" in data
         assert "active_sessions" in data
+        assert "runtime_ready" in data
+        assert "runtime_error_code" in data
+
+    def test_get_status_surfaces_runtime_readiness_failure(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(
+            web_server,
+            "_check_runtime_readiness",
+            lambda: (False, "runtime_import_error", "cannot import test_symbol"),
+        )
+
+        resp = self.client.get("/api/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["runtime_ready"] is False
+        assert data["runtime_error_code"] == "runtime_import_error"
+        assert data["runtime_error_message"] == "cannot import test_symbol"
+
+    def test_readiness_endpoint_returns_200_when_runtime_ready(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server, "_check_runtime_readiness", lambda: (True, None, None))
+
+        resp = self.client.get("/api/readiness")
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "ok": True,
+            "runtime_ready": True,
+            "runtime_error_code": None,
+            "runtime_error_message": None,
+        }
+
+    def test_readiness_endpoint_returns_503_when_runtime_broken(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(
+            web_server,
+            "_check_runtime_readiness",
+            lambda: (False, "missing_runtime_symbol", "agent.prompt_builder.STEER_CHANNEL_NOTE"),
+        )
+
+        resp = self.client.get("/api/readiness")
+        assert resp.status_code == 503
+        assert resp.json() == {
+            "ok": False,
+            "runtime_ready": False,
+            "runtime_error_code": "missing_runtime_symbol",
+            "runtime_error_message": "agent.prompt_builder.STEER_CHANNEL_NOTE",
+        }
+
+    def test_runtime_readiness_redacts_import_exception_details(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        def fail_import(_module_name):
+            exc = ImportError("cannot import token from /secret/path/module.py")
+            exc.name = "broken_module"
+            raise exc
+
+        monkeypatch.setattr(web_server.importlib, "import_module", fail_import)
+
+        assert web_server._check_runtime_readiness() == (
+            False,
+            "runtime_import_error",
+            "broken_module",
+        )
+
+    def test_readiness_endpoint_works_under_coder_base_path(self, monkeypatch):
+        """Coder path-app prefixes are stripped before FastAPI route matching."""
+        import hermes_cli.web_server as web_server
+
+        prefix = "/@owner/workspace.agent/apps/hermes"
+        monkeypatch.setenv("HERMES_DASHBOARD_BASE_PATH", prefix)
+        monkeypatch.setattr(web_server, "_check_runtime_readiness", lambda: (True, None, None))
+
+        resp = self.client.get(f"{prefix}/api/readiness")
+
+        assert resp.status_code == 200
+        assert resp.json()["runtime_ready"] is True
+
+    def test_protected_api_under_coder_base_path_still_requires_token(self, monkeypatch):
+        """Prefix stripping must happen before the legacy /api token gate."""
+        import hermes_cli.web_server as web_server
+
+        prefix = "/@owner/workspace.agent/apps/hermes"
+        monkeypatch.setenv("HERMES_DASHBOARD_BASE_PATH", prefix)
+        monkeypatch.setattr(web_server.app.state, "auth_required", False, raising=False)
+
+        resp = self.client.get(
+            f"{prefix}/api/system/stats",
+            headers={web_server._SESSION_HEADER_NAME: "wrong-token"},
+        )
+
+        assert resp.status_code == 401
 
     # ── GET /api/media (remote image display) ───────────────────────────
 
@@ -827,6 +921,56 @@ class TestWebServerEndpoints:
         assert status_data["exit_code"] == 1
         assert status_data["pid"] is None
         assert any("docker pull nousresearch/hermes-agent:latest" in line for line in status_data["lines"])
+
+    def test_coder_managed_update_returns_template_guidance_without_spawning(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        spawned = False
+
+        def fail_spawn(*_args, **_kwargs):
+            nonlocal spawned
+            spawned = True
+            raise AssertionError("Coder-managed dashboard update should not spawn hermes update")
+
+        monkeypatch.setenv("HERMES_CODER_MANAGED_UPDATE", "1")
+        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
+        monkeypatch.setattr(web_server, "_spawn_hermes_action", fail_spawn)
+        web_server._ACTION_PROCS.pop("hermes-update", None)
+        web_server._ACTION_RESULTS.pop("hermes-update", None)
+
+        resp = self.client.post("/api/hermes/update")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["pid"] is None
+        assert data["error"] == "coder_managed_update"
+        assert "managed by the dedicated Coder template" in data["message"]
+        assert "hermes-coder-refresh-template" in data["update_command"]
+        assert spawned is False
+
+        status = self.client.get("/api/actions/hermes-update/status")
+        assert status.status_code == 200
+        status_data = status.json()
+        assert status_data["running"] is False
+        assert status_data["exit_code"] == 0
+        assert any("managed by the dedicated Coder template" in line for line in status_data["lines"])
+
+    def test_coder_managed_update_check_reports_non_applyable(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setenv("HERMES_CODER_MANAGED_UPDATE", "1")
+        monkeypatch.setattr(web_server, "detect_install_method", lambda _root: "git")
+
+        resp = self.client.get("/api/hermes/update/check")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["install_method"] == "docker"
+        assert data["update_available"] is False
+        assert data["can_apply"] is False
+        assert "managed by the dedicated Coder template" in data["message"]
+        assert "hermes-coder-refresh-template" in data["update_command"]
 
     def test_update_hermes_spawns_on_non_docker_install(self, monkeypatch):
         import hermes_cli.web_server as web_server
@@ -4209,6 +4353,36 @@ class TestPtyWebSocket:
                     break
             assert b"hermes-ws-ok" in buf
 
+    def test_pty_websocket_works_under_coder_base_path(self, monkeypatch):
+        """The Coder base-path middleware also strips prefixes for WebSockets."""
+        prefix = "/@owner/workspace.agent/apps/hermes"
+        monkeypatch.setenv("HERMES_DASHBOARD_BASE_PATH", prefix)
+        monkeypatch.setattr(
+            self.ws_module,
+            "_resolve_chat_argv",
+            lambda resume=None, sidecar_url=None: (
+                ["/bin/sh", "-c", "printf prefixed-ws-ok"],
+                None,
+                None,
+            ),
+        )
+
+        with self.client.websocket_connect(f"{prefix}{self._url()}") as conn:
+            buf = b""
+            import time
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                try:
+                    frame = conn.receive_bytes()
+                except Exception:
+                    break
+                if frame:
+                    buf += frame
+                if b"prefixed-ws-ok" in buf:
+                    break
+            assert b"prefixed-ws-ok" in buf
+
     def test_client_input_reaches_child_stdin(self, monkeypatch):
         # ``cat`` echoes stdin back, so a write → read round-trip proves
         # the full duplex path.
@@ -4413,7 +4587,7 @@ class TestPtyWebSocket:
         assert exc.value.code == 4400
 
 
-def test_resolve_chat_argv_injects_gateway_ws_url(monkeypatch):
+def test_resolve_chat_argv_uses_child_gateway_by_default(monkeypatch):
     import hermes_cli.main as cli_main
     import hermes_cli.web_server as ws
 
@@ -4424,12 +4598,32 @@ def test_resolve_chat_argv_injects_gateway_ws_url(monkeypatch):
     )
     monkeypatch.setattr(ws.app.state, "bound_host", "127.0.0.1", raising=False)
     monkeypatch.setattr(ws.app.state, "bound_port", 9119, raising=False)
+    monkeypatch.delenv("HERMES_DASHBOARD_ATTACH_GATEWAY", raising=False)
+
+    _argv, _cwd, env = ws._resolve_chat_argv()
+
+    assert env is not None
+    assert "HERMES_TUI_GATEWAY_URL" not in env
+
+
+def test_resolve_chat_argv_can_attach_dashboard_gateway_when_enabled(monkeypatch):
+    import hermes_cli.main as cli_main
+    import hermes_cli.web_server as ws
+
+    monkeypatch.setattr(
+        cli_main,
+        "_make_tui_argv",
+        lambda *_args, **_kwargs: (["node", "fake-tui.js"], Path("/tmp")),
+    )
+    monkeypatch.setattr(ws.app.state, "bound_host", "::", raising=False)
+    monkeypatch.setattr(ws.app.state, "bound_port", 9119, raising=False)
+    monkeypatch.setenv("HERMES_DASHBOARD_ATTACH_GATEWAY", "1")
 
     _argv, _cwd, env = ws._resolve_chat_argv()
 
     assert env is not None
     gateway_url = env.get("HERMES_TUI_GATEWAY_URL", "")
-    assert gateway_url.startswith("ws://127.0.0.1:9119/api/ws?")
+    assert gateway_url.startswith("ws://[::1]:9119/api/ws?")
     assert "token=" in gateway_url
 
 

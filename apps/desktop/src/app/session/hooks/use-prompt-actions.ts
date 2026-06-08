@@ -91,12 +91,16 @@ function imageFilenameFromPath(filePath: string): string {
   return filePath.split(/[\\/]/).filter(Boolean).pop() || 'image.png'
 }
 
+function isImageNotFoundError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+
+  return /\bimage not found:/i.test(message)
+}
+
 // Remote gateway: the local composer-image file lives on THIS machine's disk,
 // not the gateway's, so read the bytes here and upload them via
 // image.attach_bytes. Returns null when the file can't be read.
-async function readImageForRemoteAttach(
-  filePath: string
-): Promise<{ contentBase64: string; filename: string } | null> {
+async function readImageForRemoteAttach(filePath: string): Promise<{ contentBase64: string; filename: string } | null> {
   const dataUrl = await window.hermesDesktop?.readFileDataUrl(filePath)
   const contentBase64 = dataUrl ? base64FromDataUrl(dataUrl) : ''
 
@@ -229,9 +233,10 @@ export function usePromptActions({
 
         let result: ImageAttachResponse
 
-        if (remote) {
-          // The gateway is on another machine — it can't read attachment.path
-          // (a path on THIS disk). Upload the bytes via image.attach_bytes.
+        const attachBytes = async () => {
+          // The gateway may be on another filesystem even when it is reached
+          // through localhost (SSH tunnel / Tailscale serve). Upload bytes when
+          // a path attach cannot be resolved by the backend.
           const payload = attachment.path ? await readImageForRemoteAttach(attachment.path) : null
 
           if (!payload) {
@@ -239,16 +244,28 @@ export function usePromptActions({
             throw new Error(`Could not read ${label}`)
           }
 
-          result = await requestGateway<ImageAttachResponse>('image.attach_bytes', {
+          return requestGateway<ImageAttachResponse>('image.attach_bytes', {
             session_id: sessionId,
             content_base64: payload.contentBase64,
             filename: payload.filename
           })
+        }
+
+        if (remote) {
+          result = await attachBytes()
         } else {
-          result = await requestGateway<ImageAttachResponse>('image.attach', {
-            session_id: sessionId,
-            path: attachment.path
-          })
+          try {
+            result = await requestGateway<ImageAttachResponse>('image.attach', {
+              session_id: sessionId,
+              path: attachment.path
+            })
+          } catch (error) {
+            if (!isImageNotFoundError(error)) {
+              throw error
+            }
+
+            result = await attachBytes()
+          }
         }
 
         if (!result.attached) {
@@ -527,17 +544,9 @@ export function usePromptActions({
             })
 
             const body = result?.output || `/${name}: model switched`
-            appendSessionTextMessage(
-              sid,
-              'system',
-              recordInput ? slashStatusText(command, body) : body
-            )
+            appendSessionTextMessage(sid, 'system', recordInput ? slashStatusText(command, body) : body)
           } catch (err) {
-            appendSessionTextMessage(
-              sid,
-              'system',
-              `error: ${err instanceof Error ? err.message : String(err)}`
-            )
+            appendSessionTextMessage(sid, 'system', `error: ${err instanceof Error ? err.message : String(err)}`)
           }
 
           return
@@ -803,13 +812,8 @@ export function usePromptActions({
     // body text is dropped entirely so we never leave an empty bubble behind.
     const finalizeMessages = (messages: ChatMessage[], streamId?: string | null) =>
       messages
-        .filter(
-          message =>
-            !((message.pending || message.id === streamId) && !chatMessageText(message).trim())
-        )
-        .map(message =>
-          message.pending || message.id === streamId ? { ...message, pending: false } : message
-        )
+        .filter(message => !((message.pending || message.id === streamId) && !chatMessageText(message).trim()))
+        .map(message => (message.pending || message.id === streamId ? { ...message, pending: false } : message))
 
     if (!sessionId) {
       setMutableRef(busyRef, false)

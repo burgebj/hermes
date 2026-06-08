@@ -279,6 +279,16 @@ class TestPreApiCallSteerDrain:
 
 
 class TestSteerMarkerContract:
+    def test_system_prompt_import_graph_exposes_steer_note(self):
+        """Regression: turn construction imports system_prompt, which imports
+        the steer note from prompt_builder. Both imports must stay compatible.
+        """
+        import agent.system_prompt as system_prompt
+        from agent.prompt_builder import STEER_CHANNEL_NOTE
+
+        assert system_prompt.STEER_CHANNEL_NOTE is STEER_CHANNEL_NOTE
+        assert STEER_CHANNEL_NOTE
+
     def test_system_prompt_note_describes_the_real_marker(self):
         """The system-prompt note tells the model which marker to trust; it
         must reference the exact open/close the injector emits, or the model

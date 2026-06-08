@@ -17,6 +17,7 @@ import binascii
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hmac
+import importlib
 import importlib.util
 import json
 import logging
@@ -207,6 +208,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+class _HermesDashboardBasePathMiddleware:
+    """Strip Coder path-app prefixes before FastAPI route matching.
+
+    Coder path apps are served at /@<owner>/<workspace>.<agent>/apps/<slug>/.
+    Hermes can generate prefixed assets via X-Forwarded-Prefix, but Coder may
+    not forward that header. HERMES_DASHBOARD_BASE_PATH supplies the same
+    prefix explicitly, and this middleware maps prefixed HTTP/WebSocket paths
+    back to Hermes' native /assets, /api, and SPA routes.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") in {"http", "websocket"}:
+            prefix = os.environ.get("HERMES_DASHBOARD_BASE_PATH", "").rstrip("/")
+            path_value = scope.get("path", "")
+            if prefix and (path_value == prefix or path_value.startswith(prefix + "/")):
+                scope = dict(scope)
+                stripped = path_value[len(prefix):] or "/"
+                scope["path"] = stripped
+                raw_path = scope.get("raw_path")
+                if raw_path:
+                    prefix_bytes = prefix.encode()
+                    if raw_path == prefix_bytes or raw_path.startswith(prefix_bytes + b"/"):
+                        scope["raw_path"] = raw_path[len(prefix_bytes):] or b"/"
+        await self.app(scope, receive, send)
+
+
+# Registered after the auth middlewares below so it is the outermost ASGI
+# middleware. Auth checks must see the stripped path; otherwise a prefixed
+# protected API route could bypass legacy /api token auth before route matching.
+
 # ---------------------------------------------------------------------------
 # Endpoints that do NOT require the session token.  Everything else under
 # /api/ is gated by the auth middleware below.
@@ -383,6 +418,11 @@ async def auth_middleware(request: Request, call_next):
                 content={"detail": "Unauthorized"},
             )
     return await call_next(request)
+
+
+# Must be added after the auth middlewares so it wraps them and strips Coder
+# path-app prefixes before auth checks and FastAPI route matching.
+app.add_middleware(_HermesDashboardBasePathMiddleware)
 
 
 # ---------------------------------------------------------------------------
@@ -867,6 +907,7 @@ async def get_media(path: str):
 @app.get("/api/status")
 async def get_status():
     current_ver, latest_ver = check_config_version()
+    runtime_ready, runtime_error_code, runtime_error_message = _check_runtime_readiness()
 
     # --- Gateway liveness detection ---
     # Try local PID check first (same-host).  If that fails and a remote
@@ -980,9 +1021,52 @@ async def get_status():
         "gateway_exit_reason": gateway_exit_reason,
         "gateway_updated_at": gateway_updated_at,
         "active_sessions": active_sessions,
+        "runtime_ready": runtime_ready,
+        "runtime_error_code": runtime_error_code,
+        "runtime_error_message": runtime_error_message,
         "auth_required": auth_required,
         "auth_providers": auth_providers,
     }
+
+
+def _check_runtime_readiness() -> tuple[bool, str | None, str | None]:
+    """Verify the import graph needed before an agent turn can start.
+
+    ``/api/status`` proves the web shell is reachable; it does not prove the
+    gateway can build a turn. Keep this probe intentionally lightweight so
+    supervisors and watchdogs can call it often.
+    """
+    checks = [
+        ("agent.prompt_builder", "STEER_CHANNEL_NOTE"),
+        ("agent.system_prompt", None),
+        ("run_agent", None),
+        ("tui_gateway.server", None),
+    ]
+    try:
+        for module_name, attr_name in checks:
+            module = importlib.import_module(module_name)
+            if attr_name and not hasattr(module, attr_name):
+                return False, "missing_runtime_symbol", f"{module_name}.{attr_name}"
+    except ImportError as exc:
+        module = getattr(exc, "name", None) or "unknown"
+        return False, "runtime_import_error", module
+    except Exception as exc:
+        return False, "runtime_readiness_error", type(exc).__name__
+    return True, None, None
+
+
+@app.get("/api/readiness")
+async def get_readiness():
+    runtime_ready, runtime_error_code, runtime_error_message = _check_runtime_readiness()
+    payload = {
+        "ok": runtime_ready,
+        "runtime_ready": runtime_ready,
+        "runtime_error_code": runtime_error_code,
+        "runtime_error_message": runtime_error_message,
+    }
+    if not runtime_ready:
+        return JSONResponse(payload, status_code=503)
+    return payload
 
 
 @app.get("/api/system/stats")
@@ -1291,6 +1375,33 @@ _ACTION_PROCS: Dict[str, subprocess.Popen] = {}
 _ACTION_RESULTS: Dict[str, Dict[str, Any]] = {}
 
 
+def _coder_managed_update_payload(*, record_action: bool) -> Dict[str, Any]:
+    message = (
+        "Hermes updates are managed by the dedicated Coder template for this workspace. "
+        "Refresh the hermes-agent-dev template with the pinned HERMES_GIT_TAG, then update/recreate hermes-dev-01."
+    )
+    update_command = "CONFIRM_SERVER_DEV=dev-agent-01 CONFIRM_HERMES_CODER=dev-agent-01 make hermes-coder-refresh-template"
+    if record_action:
+        _record_completed_action("hermes-update", message, exit_code=0)
+        return {
+            "ok": False,
+            "pid": None,
+            "name": "hermes-update",
+            "error": "coder_managed_update",
+            "message": message,
+            "update_command": update_command,
+        }
+    return {
+        "install_method": "docker",
+        "current_version": __version__,
+        "behind": None,
+        "update_available": False,
+        "can_apply": False,
+        "update_command": update_command,
+        "message": message,
+    }
+
+
 def _record_completed_action(name: str, message: str, exit_code: int = 1) -> None:
     """Record a non-spawned action result and write it to the action log."""
     log_file_name = _ACTION_LOG_FILES[name]
@@ -1381,6 +1492,8 @@ async def restart_gateway():
 async def update_hermes():
     """Kick off ``hermes update`` in the background."""
     install_method = detect_install_method(PROJECT_ROOT)
+    if os.environ.get("HERMES_CODER_MANAGED_UPDATE", "0").lower() in {"1", "true", "yes"}:
+        return _coder_managed_update_payload(record_action=True)
     if install_method == "docker":
         message = format_docker_update_message()
         _record_completed_action("hermes-update", message, exit_code=1)
@@ -1427,6 +1540,9 @@ async def check_hermes_update(force: bool = False):
         message: human-readable guidance for non-applyable methods
     """
     install_method = detect_install_method(PROJECT_ROOT)
+    if os.environ.get("HERMES_CODER_MANAGED_UPDATE", "0").lower() in {"1", "true", "yes"}:
+        return _coder_managed_update_payload(record_action=False)
+
     update_command = recommended_update_command_for_method(install_method)
 
     payload: Dict[str, Any] = {
@@ -8522,10 +8638,26 @@ def _resolve_chat_argv(
     if sidecar_url:
         env["HERMES_TUI_SIDECAR_URL"] = sidecar_url
 
-    if gateway_ws_url := _build_gateway_ws_url():
-        env["HERMES_TUI_GATEWAY_URL"] = gateway_ws_url
+    # In Coder, Hermes' attached in-process dashboard gateway currently
+    # trips a React render loop in the embedded chat TUI. Let the TUI use its
+    # normal child gateway by default; operators can opt back in for upstream
+    # debugging with HERMES_DASHBOARD_ATTACH_GATEWAY=1.
+    if os.environ.get("HERMES_DASHBOARD_ATTACH_GATEWAY", "0").lower() in {"1", "true", "yes"}:
+        if gateway_ws_url := _build_gateway_ws_url():
+            env["HERMES_TUI_GATEWAY_URL"] = gateway_ws_url
 
     return list(argv), str(cwd) if cwd else None, env
+
+
+def _hermes_coder_connect_host(host: str) -> str:
+    """Return a concrete loopback host for server-spawned child clients.
+
+    Uvicorn can bind to wildcard hosts such as 0.0.0.0 or ::, but the
+    dashboard-spawned TUI child must connect to a concrete address. Coder app
+    proxying reaches the dashboard over IPv6, so :: binds are paired with ::1.
+    """
+
+    return "::1" if host == "::" else "127.0.0.1" if host == "0.0.0.0" else host
 
 
 def _build_gateway_ws_url() -> Optional[str]:
@@ -8545,10 +8677,11 @@ def _build_gateway_ws_url() -> Optional[str]:
     if not host or not port:
         return None
 
+    connect_host = _hermes_coder_connect_host(host)
     netloc = (
-        f"[{host}]:{port}"
-        if ":" in host and not host.startswith("[")
-        else f"{host}:{port}"
+        f"[{connect_host}]:{port}"
+        if ":" in connect_host and not connect_host.startswith("[")
+        else f"{connect_host}:{port}"
     )
 
     if getattr(app.state, "auth_required", False):
@@ -8581,7 +8714,8 @@ def _build_sidecar_url(channel: str) -> Optional[str]:
     if not host or not port:
         return None
 
-    netloc = f"[{host}]:{port}" if ":" in host and not host.startswith("[") else f"{host}:{port}"
+    connect_host = _hermes_coder_connect_host(host)
+    netloc = f"[{connect_host}]:{port}" if ":" in connect_host and not connect_host.startswith("[") else f"{connect_host}:{port}"
 
     if getattr(app.state, "auth_required", False):
         # Gated mode — use the internal credential so the WS upgrade survives
@@ -8975,7 +9109,7 @@ def mount_spa(application: FastAPI):
             WEB_DIST.resolve()
         ):
             return JSONResponse({"error": "not found"}, status_code=404)
-        prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
+        prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix") or os.environ.get("HERMES_DASHBOARD_BASE_PATH"))
         css = css_path.read_text()
         if prefix:
             for asset_dir in ("/fonts/", "/fonts-terminal/", "/ds-assets/", "/assets/"):
@@ -8988,7 +9122,7 @@ def mount_spa(application: FastAPI):
 
     @application.get("/{full_path:path}")
     async def serve_spa(full_path: str, request: Request):
-        prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix"))
+        prefix = _normalise_prefix(request.headers.get("x-forwarded-prefix") or os.environ.get("HERMES_DASHBOARD_BASE_PATH"))
         # An unmatched /api/* path is a missing/renamed endpoint, NOT a
         # client-side route. Falling through to index.html here returns
         # `<!doctype html>` with status 200, which makes JSON clients (the

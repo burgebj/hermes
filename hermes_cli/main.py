@@ -258,6 +258,7 @@ import json
 import shutil
 import stat
 import subprocess
+import shlex
 from pathlib import Path
 from typing import Optional
 
@@ -7759,6 +7760,59 @@ def cmd_gui(args: argparse.Namespace):
     sys.exit(launch_result.returncode)
 
 
+def _looks_like_dashboard_command(command: str) -> bool:
+    """Return True for Hermes dashboard launch commands, including global flags.
+
+    The CLI allows global options before the subcommand, e.g.
+    ``hermes -p vvb-agent dashboard``. A raw substring search for
+    ``"hermes dashboard"`` misses that shape and leaves stale post-update
+    dashboards alive.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    if not tokens:
+        return False
+
+    start_indexes: list[int] = []
+    for index, token in enumerate(tokens):
+        base = os.path.basename(token).lower()
+        normalized = token.replace("\\", "/")
+        if base in {"hermes", "hermes.exe"}:
+            start_indexes.append(index + 1)
+        elif token == "-m" and index + 1 < len(tokens) and tokens[index + 1] == "hermes_cli.main":
+            start_indexes.append(index + 2)
+        elif normalized.endswith("hermes_cli/main.py"):
+            start_indexes.append(index + 1)
+
+    global_options_with_values = {
+        "-p",
+        "--profile",
+        "--config",
+        "--hermes-home",
+        "--home",
+        "--model",
+        "--provider",
+        "--base-url",
+    }
+    for start in start_indexes:
+        index = start
+        while index < len(tokens):
+            token = tokens[index]
+            if token in global_options_with_values:
+                index += 2
+                continue
+            if any(token.startswith(option + "=") for option in global_options_with_values):
+                index += 1
+                continue
+            if token.startswith("-"):
+                index += 1
+                continue
+            return token == "dashboard"
+    return False
+
+
 def _find_stale_dashboard_pids(
     *,
     exclude_pids: set[int] | None = None,
@@ -7788,11 +7842,6 @@ def _find_stale_dashboard_pids(
 
     Returns an empty list on any scan error (missing ps/wmic, timeout, etc.).
     """
-    patterns = [
-        "hermes dashboard",
-        "hermes_cli.main dashboard",
-        "hermes_cli/main.py dashboard",
-    ]
     self_pid = os.getpid()
     dashboard_pids: list[int] = []
 
@@ -7822,10 +7871,7 @@ def _find_stale_dashboard_pids(
                     current_cmd = line[len("CommandLine=") :]
                 elif line.startswith("ProcessId="):
                     pid_str = line[len("ProcessId=") :]
-                    if (
-                        any(p in current_cmd for p in patterns)
-                        and int(pid_str) != self_pid
-                    ):
+                    if _looks_like_dashboard_command(current_cmd) and int(pid_str) != self_pid:
                         try:
                             dashboard_pids.append(int(pid_str))
                         except ValueError:
@@ -7856,7 +7902,7 @@ def _find_stale_dashboard_pids(
                     except ValueError:
                         continue
                     command = parts[1]
-                    if any(p in command for p in patterns) and pid != self_pid:
+                    if _looks_like_dashboard_command(command) and pid != self_pid:
                         dashboard_pids.append(pid)
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return []

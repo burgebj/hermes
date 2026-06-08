@@ -206,6 +206,31 @@ class TestGetCategoryFromPath:
 
 
 class TestFindAllSkills:
+    def test_finds_skills_from_context_local_hermes_home(self, tmp_path, monkeypatch):
+        """Long-lived gateways can switch profile homes after importing this module.
+
+        Regression for profile-scoped sessions where the prompt advertised a
+        skill from the active profile, but the tool still searched the
+        module-import-time SKILLS_DIR snapshot.
+        """
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        import_home = tmp_path / "import-home"
+        active_home = tmp_path / "active-profile"
+        _make_skill(import_home / "skills", "stale-skill")
+        _make_skill(active_home / "skills", "active-skill")
+
+        monkeypatch.setattr(skills_tool_module, "SKILLS_DIR", skills_tool_module._IMPORT_SKILLS_DIR)
+        token = set_hermes_home_override(active_home)
+        try:
+            skills = _find_all_skills()
+        finally:
+            reset_hermes_home_override(token)
+
+        names = {skill["name"] for skill in skills}
+        assert "active-skill" in names
+        assert "stale-skill" not in names
+
     def test_finds_skills(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             _make_skill(tmp_path, "skill-a")
@@ -364,6 +389,27 @@ class TestSkillsList:
 
 
 class TestSkillView:
+    def test_view_skill_from_context_local_hermes_home(self, tmp_path, monkeypatch):
+        """skill_view must use the active profile home, not import-time globals."""
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+        stale_home = tmp_path / "stale-profile"
+        active_home = tmp_path / "active-profile"
+        _make_skill(stale_home / "skills", "stale-skill")
+        _make_skill(active_home / "skills", "active-skill")
+
+        monkeypatch.setattr(skills_tool_module, "SKILLS_DIR", skills_tool_module._IMPORT_SKILLS_DIR)
+        token = set_hermes_home_override(active_home)
+        try:
+            raw = skill_view("active-skill")
+        finally:
+            reset_hermes_home_override(token)
+
+        result = json.loads(raw)
+        assert result["success"] is True
+        assert result["name"] == "active-skill"
+        assert str(active_home / "skills" / "active-skill") in result["skill_dir"]
+
     def test_view_existing_skill(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             _make_skill(tmp_path, "my-skill")
