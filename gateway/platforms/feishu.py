@@ -1798,16 +1798,28 @@ class FeishuAdapter(BasePlatformAdapter):
                         metadata=metadata,
                     )
                 except Exception as exc:
-                    if msg_type != "post" or not _POST_CONTENT_INVALID_RE.search(str(exc)):
+                    if msg_type == "interactive":
+                        # A rejected card must not drop the message; fall back to
+                        # plain text so the content still reaches the chat.
+                        logger.warning("[Feishu] Interactive card rejected (%s); falling back to plain text", exc)
+                        response = await self._feishu_send_with_retry(
+                            chat_id=chat_id,
+                            msg_type="text",
+                            payload=json.dumps({"text": chunk}, ensure_ascii=False),
+                            reply_to=reply_to,
+                            metadata=metadata,
+                        )
+                    elif msg_type != "post" or not _POST_CONTENT_INVALID_RE.search(str(exc)):
                         raise
-                    logger.warning("[Feishu] Invalid post payload rejected by API; falling back to plain text")
-                    response = await self._feishu_send_with_retry(
-                        chat_id=chat_id,
-                        msg_type="text",
-                        payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
-                        reply_to=reply_to,
-                        metadata=metadata,
-                    )
+                    else:
+                        logger.warning("[Feishu] Invalid post payload rejected by API; falling back to plain text")
+                        response = await self._feishu_send_with_retry(
+                            chat_id=chat_id,
+                            msg_type="text",
+                            payload=json.dumps({"text": _strip_markdown_to_plain_text(chunk)}, ensure_ascii=False),
+                            reply_to=reply_to,
+                            metadata=metadata,
+                        )
                 if (
                     msg_type == "post"
                     and not self._response_succeeded(response)
@@ -4378,8 +4390,17 @@ class FeishuAdapter(BasePlatformAdapter):
         # table content as post causes the message to appear blank on the client.
         # Force plain text for anything that looks like a markdown table.
         if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
+            # Feishu 'post' / 'lark_md' elements cannot render markdown tables —
+            # such messages arrive blank on the client, so this path used to
+            # downgrade them to plain text. The interactive-card 'markdown'
+            # component (card schema 2.0) DOES render GFM tables, so send the
+            # content as a card instead of losing the table formatting.
+            card = {
+                "schema": "2.0",
+                "config": {"width_mode": "fill"},
+                "body": {"elements": [{"tag": "markdown", "content": content}]},
+            }
+            return "interactive", json.dumps(card, ensure_ascii=False)
         if _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
