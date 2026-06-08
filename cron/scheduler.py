@@ -2063,6 +2063,28 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         for job in due_jobs:
             advance_next_run(job["id"])
 
+    finally:
+        # Release the file lock BEFORE running jobs.  The critical section
+        # (get_due_jobs + advance_next_run) is complete — next_run_at has
+        # been advanced so at-most-once semantics are preserved.  Holding
+        # the lock during job execution starved the scheduler: a 2-4 min
+        # Opus delegation would block every subsequent 60s tick, causing
+        # missed runs and silent schedule drift (#27485).
+        if fcntl:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except (OSError, IOError):
+                pass
+        elif msvcrt:
+            try:
+                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
+            except (OSError, IOError):
+                pass
+        lock_fd.close()
+
+    # --- Lock released; job execution proceeds without holding the tick lock ---
+
+    try:
         # Resolve max parallel workers: env var > config.yaml > unbounded.
         # Set HERMES_CRON_MAX_PARALLEL=1 to restore old serial behaviour.
         _max_workers: Optional[int] = None
@@ -2251,17 +2273,8 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
 
         return sum(_results)
     finally:
-        if fcntl:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except (OSError, IOError):
-                pass
-        elif msvcrt:
-            try:
-                msvcrt.locking(lock_fd.fileno(), msvcrt.LK_UNLCK, 1)
-            except (OSError, IOError):
-                pass
-        lock_fd.close()
+        # Lock was already released after advance_next_run; nothing to do here.
+        pass
 
 
 if __name__ == "__main__":
