@@ -4320,6 +4320,34 @@ def run_conversation(
                         })
                         continue
 
+                    # ── Opus / Anthropic thinking-only terminal response ──
+                    # When the Anthropic Messages API returns finish_reason
+                    # "stop" ("end_turn") with ONLY thinking blocks and no
+                    # text content, the model has genuinely completed its
+                    # turn — the thinking IS the response.  Treat the
+                    # reasoning text as the final answer rather than
+                    # attempting prefill retries that would loop forever.
+                    # This fixes issue #39234: Opus models returning
+                    # "no final response" when they produce reasoning-only
+                    # turns at end_turn.
+                    _reasoning_for_response = (
+                        getattr(assistant_message, "reasoning", None)
+                        or getattr(assistant_message, "reasoning_content", None)
+                    )
+                    if (
+                        finish_reason == "stop"
+                        and _reasoning_for_response
+                        and agent.api_mode == "anthropic_messages"
+                    ):
+                        _turn_exit_reason = "opus_thinking_only_terminal"
+                        logger.info(
+                            "Opus reasoning-only end_turn response — "
+                            "using thinking content as final response (%d chars)",
+                            len(_reasoning_for_response),
+                        )
+                        final_response = _reasoning_for_response.strip()
+                        break
+
                     # ── Thinking-only prefill continuation ──────────
                     # The model produced structured reasoning (via API
                     # fields) but no visible text content.  Rather than
