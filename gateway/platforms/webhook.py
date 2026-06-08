@@ -157,6 +157,21 @@ class WebhookAdapter(BasePlatformAdapter):
                     f"Set 'secret' on the route or globally. "
                     f"For testing without auth, set secret to '{_INSECURE_NO_AUTH}'."
                 )
+            if secret == _INSECURE_NO_AUTH:
+                import os as _os
+                if not _os.getenv("HERMES_ALLOW_INSECURE_WEBHOOKS"):
+                    raise ValueError(
+                        f"[webhook] Route '{name}' uses {_INSECURE_NO_AUTH} which disables "
+                        "all authentication and enables unauthenticated RCE. "
+                        "Set HERMES_ALLOW_INSECURE_WEBHOOKS=1 to allow this in testing only. "
+                        "NEVER use this in production."
+                    )
+                logger.warning(
+                    "[webhook] SECURITY WARNING: Route '%s' has %s — "
+                    "ALL requests accepted without HMAC verification! "
+                    "This is for local testing only.",
+                    name, _INSECURE_NO_AUTH,
+                )
 
             # Safety rail: refuse to start if INSECURE_NO_AUTH is combined with a
             # non-loopback bind. The escape hatch is for local testing only;
