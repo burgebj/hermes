@@ -911,7 +911,18 @@ def build_environment_hints() -> str:
     return "\n\n".join(hints)
 
 
-CONTEXT_FILE_MAX_CHARS = 20_000
+def _context_file_max_chars() -> int:
+    raw = os.getenv("HERMES_CONTEXT_FILE_MAX_CHARS")
+    if raw is None:
+        return 20_000
+    try:
+        val = int(raw)
+    except ValueError:
+        return 20_000
+    return max(val, 1_000)
+
+
+CONTEXT_FILE_MAX_CHARS = _context_file_max_chars()
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
 

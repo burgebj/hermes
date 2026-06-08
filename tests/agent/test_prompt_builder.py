@@ -10,6 +10,7 @@ import pytest
 from agent.prompt_builder import (
     _scan_context_content,
     _truncate_content,
+    _context_file_max_chars,
     _parse_skill_file,
     _skill_should_show,
     _find_hermes_md,
@@ -137,6 +138,33 @@ class TestTruncateContent:
         content = "x" * CONTEXT_FILE_MAX_CHARS
         result = _truncate_content(content, "exact.md")
         assert result == content
+
+
+# =========================================================================
+# _context_file_max_chars — env-var override with validation
+# =========================================================================
+
+
+class TestContextFileMaxChars:
+    def test_default_without_env(self, monkeypatch):
+        monkeypatch.delenv("HERMES_CONTEXT_FILE_MAX_CHARS", raising=False)
+        assert _context_file_max_chars() == 20_000
+
+    def test_custom_value(self, monkeypatch):
+        monkeypatch.setenv("HERMES_CONTEXT_FILE_MAX_CHARS", "60000")
+        assert _context_file_max_chars() == 60_000
+
+    def test_invalid_value_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("HERMES_CONTEXT_FILE_MAX_CHARS", "oops")
+        assert _context_file_max_chars() == 20_000
+
+    def test_floor_clamp(self, monkeypatch):
+        monkeypatch.setenv("HERMES_CONTEXT_FILE_MAX_CHARS", "500")
+        assert _context_file_max_chars() == 1_000
+
+    def test_negative_clamped_to_floor(self, monkeypatch):
+        monkeypatch.setenv("HERMES_CONTEXT_FILE_MAX_CHARS", "-1")
+        assert _context_file_max_chars() == 1_000
 
 
 # =========================================================================
