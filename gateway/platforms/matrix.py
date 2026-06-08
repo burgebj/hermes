@@ -28,6 +28,7 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import mimetypes
 import os
@@ -978,7 +979,8 @@ class MatrixAdapter(BasePlatformAdapter):
         client.add_event_handler(EventType.REACTION, self._on_reaction)
         client.add_event_handler(IntEvt.INVITE, self._on_invite)
 
-        # Initial sync to catch up, then start background sync.
+        # Initial sync to catch up before the mautrix syncer starts dispatching
+        # live events.
         self._startup_ts = time.time()
         # Reset clock-skew detector for each connect cycle so a reconnect
         # after the user fixes NTP doesn't inherit stale counters.
@@ -1029,10 +1031,42 @@ class MatrixAdapter(BasePlatformAdapter):
             except Exception as exc:
                 logger.warning("Matrix: initial key share failed: %s", exc)
 
+        if not await self._start_client_syncer(client):
+            await api.session.close()
+            return False
+
         # Start the sync loop.
         self._sync_task = asyncio.create_task(self._sync_loop())
         self._mark_connected()
         return True
+
+    async def _start_client_syncer(self, client: Any) -> bool:
+        """Start mautrix's internal syncer so registered handlers fire."""
+        start = getattr(client, "start", None)
+        if start is None:
+            logger.error("Matrix: mautrix client has no start() method")
+            return False
+        try:
+            result = start(None)
+            if inspect.isawaitable(result):
+                await result
+            logger.info("Matrix: client syncer started")
+            return True
+        except Exception as exc:
+            logger.error("Matrix: failed to start client syncer: %s", exc, exc_info=True)
+            return False
+
+    async def _stop_client_syncer(self, client: Any) -> None:
+        """Stop mautrix's internal syncer before closing the HTTP session."""
+        stop = getattr(client, "stop", None)
+        if stop is None:
+            return
+        try:
+            result = stop()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            logger.debug("Matrix: could not stop client syncer: %s", exc)
 
     async def disconnect(self) -> None:
         """Disconnect from Matrix."""
@@ -1061,6 +1095,7 @@ class MatrixAdapter(BasePlatformAdapter):
                 logger.debug("Matrix: could not close crypto DB on disconnect: %s", exc)
 
         if self._client:
+            await self._stop_client_syncer(self._client)
             try:
                 await self._client.api.session.close()
             except Exception:

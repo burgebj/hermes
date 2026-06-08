@@ -109,6 +109,12 @@ def _make_fake_mautrix():
         def add_dispatcher(self, dispatcher_type):
             pass
 
+        def start(self, filter_id=None):
+            self.started_filter_id = filter_id
+
+        def stop(self):
+            self.stopped = True
+
     class InternalEventType:
         INVITE = "internal.invite"
 
@@ -1132,6 +1138,7 @@ class TestMatrixAccessTokenAuth:
                         assert await adapter.connect() is True
 
         mock_client.whoami.assert_awaited_once()
+        mock_client.start.assert_called_once_with(None)
         assert adapter._user_id == "@bot:example.org"
 
         await adapter.disconnect()
@@ -1358,6 +1365,7 @@ class TestMatrixDeviceId:
         # The configured device_id should override the whoami device_id.
         # In mautrix, the adapter sets client.device_id directly.
         assert adapter._device_id == "MY_STABLE_DEVICE"
+        mock_client.start.assert_called_once_with(None)
 
         await adapter.disconnect()
 
@@ -1404,6 +1412,7 @@ class TestMatrixPasswordLoginDeviceId:
                     assert await adapter.connect() is True
 
         mock_client.login.assert_awaited_once()
+        mock_client.start.assert_called_once_with(None)
         assert adapter._device_id == "STABLE_PW_DEVICE"
 
         await adapter.disconnect()
@@ -1754,10 +1763,12 @@ class TestMatrixDisconnect:
 
         fake_client = MagicMock()
         fake_client.api = mock_api
+        fake_client.stop = MagicMock()
         adapter._client = fake_client
 
         await adapter.disconnect()
 
+        fake_client.stop.assert_called_once_with()
         mock_session.close.assert_awaited_once()
         assert adapter._client is None
 
