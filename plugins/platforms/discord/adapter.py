@@ -627,6 +627,17 @@ class DiscordAdapter(BasePlatformAdapter):
         # history backfill to skip the full scan on hot paths.  Falls back to
         # scanning channel.history() on cache miss (cold start / restart).
         self._last_self_message_id: Dict[str, str] = {}
+        # Anti-loop circuit breaker (#32791): per-channel tracking of
+        # consecutive bot→bot replies.  When a channel exceeds the threshold
+        # within the cooldown window, auto-reply is suspended for that
+        # channel until the breaker expires.
+        self._bot_reply_timestamps: Dict[str, list] = {}  # channel_id → [timestamps]
+        # channel_id → monotonic time when suspension expires, or None
+        self._circuit_breaker_until: Dict[str, Optional[float]] = {}
+        # Global operator HALT (#32791 L3): when a known operator posts a
+        # HALT/STOP/KILL/FREEZE command, auto-reply is suspended across ALL
+        # channels until this timestamp.
+        self._global_halt_until: Optional[float] = None
 
     async def connect(self) -> bool:
         """Connect to Discord and start receiving events."""
@@ -4792,9 +4803,125 @@ class DiscordAdapter(BasePlatformAdapter):
                 and not self._discord_thread_require_mention()
             )
 
+            # Determine whether the free_response_channels bypass should be
+            # gated by DISCORD_ALLOW_BOTS.  When the message author is a bot
+            # and DISCORD_ALLOW_BOTS is "mentions", the free_response bypass
+            # must not apply — the bot still needs to @mention us.  This
+            # prevents multi-bot death-loops where two Hermes profiles in a
+            # free-response channel reply to each other indefinitely (#32791).
+            _author_is_bot = getattr(message.author, "bot", False)
+            _allow_bots = os.getenv("DISCORD_ALLOW_BOTS", "none").lower().strip()
+            _free_response_gated_by_bot_policy = (
+                is_free_channel
+                and _author_is_bot
+                and _allow_bots == "mentions"
+                and not mention_prefix
+                and self._client.user not in message.mentions
+            )
+
             if require_mention and not is_free_channel and not in_bot_thread:
                 if self._client.user not in message.mentions and not mention_prefix:
                     return
+            elif _free_response_gated_by_bot_policy:
+                # Bot message in a free-response channel without @mention —
+                # block it to prevent ack-loops between Hermes profiles.
+                return
+
+            # ── Layer 2: Anti-loop circuit breaker (#32791) ──────────
+            # Track consecutive bot→bot replies per channel.  When N
+            # consecutive bot replies arrive within the cooldown window,
+            # suspend auto-reply for that channel for M minutes.
+            if _author_is_bot:
+                _channel_key = str(message.channel.id)
+                _now = time.monotonic()
+                _breaker_until = self._circuit_breaker_until.get(_channel_key)
+                if _breaker_until is not None and _now < _breaker_until:
+                    logger.info(
+                        "[%s] Circuit breaker active for channel %s "
+                        "(bot replied %d times). Skipping message.",
+                        self.name, _channel_key,
+                        len(self._bot_reply_timestamps.get(_channel_key, [])),
+                    )
+                    return
+
+                # Rotate old timestamps and append current.
+                _timestamps = self._bot_reply_timestamps.setdefault(
+                    _channel_key, []
+                )
+                _window = float(
+                    os.getenv("DISCORD_CIRCUIT_BREAKER_WINDOW_S", "60")
+                )
+                _threshold = int(
+                    os.getenv("DISCORD_CIRCUIT_BREAKER_THRESHOLD", "3")
+                )
+                _cooldown = float(
+                    os.getenv("DISCORD_CIRCUIT_BREAKER_COOLDOWN_S", "600")
+                )
+                _timestamps[:] = [
+                    ts for ts in _timestamps if _now - ts < _window
+                ]
+                _timestamps.append(_now)
+
+                if len(_timestamps) >= _threshold:
+                    self._circuit_breaker_until[_channel_key] = (
+                        _now + _cooldown
+                    )
+                    logger.warning(
+                        "[%s] CIRCUIT BREAKER TRIPPED for channel %s: "
+                        "%d bot replies in %.0fs → suspended for %.0fs. "
+                        "Operator HALT/STOP/KILL/FREEZE bypasses this.",
+                        self.name, _channel_key,
+                        len(_timestamps), _window, _cooldown,
+                    )
+                    return
+
+            # ── Layer 3: In-band operator HALT signal (#32791) ───────
+            # When a known operator posts STOP/HALT/KILL/FREEZE, suspend
+            # auto-reply across ALL channels for M minutes.  This gives
+            # operators an emergency escape hatch without host access.
+            _operator_ids_raw = os.getenv(
+                "DISCORD_OPERATOR_IDS", ""
+            ).strip()
+            if _operator_ids_raw:
+                _operator_ids = set(
+                    _operator_ids_raw.split(",")
+                )
+                _author_id = str(message.author.id)
+                if _author_id in _operator_ids:
+                    import re
+                    _halt_pattern = os.getenv(
+                        "DISCORD_HALT_PATTERN",
+                        r"^(STOP|HALT|KILL|FREEZE|CEASE)\b",
+                    )
+                    _content = getattr(message, "content", "") or ""
+                    if re.search(_halt_pattern, _content, re.IGNORECASE):
+                        _halt_cooldown = float(
+                            os.getenv(
+                                "DISCORD_HALT_COOLDOWN_S", "600"
+                            )
+                        )
+                        self._global_halt_until = (
+                            time.monotonic() + _halt_cooldown
+                        )
+                        logger.warning(
+                            "[%s] OPERATOR HALT received from %s "
+                            "(%s). Auto-reply suspended across ALL "
+                            "channels for %.0fs.",
+                            self.name, message.author.display_name,
+                            _author_id, _halt_cooldown,
+                        )
+                        return
+
+            # Check global HALT: when active, all auto-reply is suspended.
+            if (
+                self._global_halt_until is not None
+                and time.monotonic() < self._global_halt_until
+            ):
+                logger.info(
+                    "[%s] Global HALT active — skipping message.",
+                    self.name,
+                )
+                return
         # Auto-thread: when enabled, automatically create a thread for every
         # @mention in a text channel so each conversation is isolated (like Slack).
         # Messages already inside threads or DMs are unaffected.
