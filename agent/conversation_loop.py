@@ -4282,10 +4282,25 @@ def run_conversation(
                             re.IGNORECASE,
                         )
                     )
+                    # Detect structured reasoning emitted via API fields
+                    # (OpenRouter `reasoning` / `reasoning_details`, or the
+                    # streaming-accumulated `reasoning_content`).  Thinking
+                    # models like qwen3-vl-8b-thinking return reasoning here
+                    # with empty content after tool calls — that's the model
+                    # still working, not a genuine empty response.  Compute
+                    # this BEFORE the nudge guard so those turns route to the
+                    # prefill branch below instead of wasting an LLM round-trip
+                    # on a nudge.
+                    _has_structured = bool(
+                        getattr(assistant_message, "reasoning", None)
+                        or getattr(assistant_message, "reasoning_content", None)
+                        or getattr(assistant_message, "reasoning_details", None)
+                        or _has_inline_thinking
+                    )
                     if (
                         _prior_was_tool
                         and not getattr(agent, "_post_tool_empty_retried", False)
-                        and not _has_inline_thinking  # thinking model still working — let prefill handle
+                        and not _has_structured  # thinking model still working — let prefill handle
                     ):
                         agent._post_tool_empty_retried = True
                         # Clear stale narration so it doesn't resurface
@@ -4329,12 +4344,8 @@ def run_conversation(
                     # Inspired by clawdbot's "incomplete-text" recovery.
                     # Also covers Qwen3/Ollama in-content <think> blocks
                     # (detected above as _has_inline_thinking).
-                    _has_structured = bool(
-                        getattr(assistant_message, "reasoning", None)
-                        or getattr(assistant_message, "reasoning_content", None)
-                        or getattr(assistant_message, "reasoning_details", None)
-                        or _has_inline_thinking
-                    )
+                    # _has_structured was computed above the nudge guard so
+                    # both branches share the same definition.
                     if _has_structured and agent._thinking_prefill_retries < 2:
                         agent._thinking_prefill_retries += 1
                         logger.info(
