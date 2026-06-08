@@ -605,6 +605,49 @@ class TestThreadContext(unittest.TestCase):
             self.assertEqual(send_call["Subject"], "Re: Hermes Agent")
             self.assertIn("Date", send_call)
 
+    def test_display_name_sets_from_header(self):
+        """EMAIL_DISPLAY_NAME should set a friendly From header."""
+        adapter = self._make_adapter()
+
+        with patch.dict(os.environ, {"EMAIL_DISPLAY_NAME": "Hermes Bot"}), \
+             patch("smtplib.SMTP") as mock_smtp:
+            mock_server = MagicMock()
+            mock_smtp.return_value = mock_server
+
+            adapter._send_email("user@test.com", "Hello!", None)
+
+            send_call = mock_server.send_message.call_args[0][0]
+            self.assertEqual(send_call["From"], "Hermes Bot <hermes@test.com>")
+
+    def test_draft_mode_appends_draft_without_smtp(self):
+        """EMAIL_DRAFT_MODE saves replies to Drafts instead of SMTP send."""
+        adapter = self._make_adapter()
+
+        with patch.dict(os.environ, {"EMAIL_DRAFT_MODE": "1"}), \
+             patch.object(adapter, "_append_to_drafts") as mock_draft, \
+             patch("smtplib.SMTP") as mock_smtp:
+            adapter._send_email("user@test.com", "Draft body", None)
+
+        mock_draft.assert_called_once()
+        mock_smtp.assert_not_called()
+
+
+class TestEmailRateLimit(unittest.TestCase):
+    """Test inbound email sender rate limiting."""
+
+    def test_rate_limit_disabled_by_default(self):
+        from gateway.platforms.email import _email_rate_limited
+
+        assert not _email_rate_limited("user@test.com")
+
+    def test_rate_limit_drops_after_limit(self):
+        from gateway.platforms import email as email_mod
+
+        email_mod._RATE_LIMIT_BUCKETS.clear()
+        with patch.dict(os.environ, {"EMAIL_RATE_LIMIT_PER_HOUR": "1"}):
+            assert not email_mod._email_rate_limited("user@test.com")
+            assert email_mod._email_rate_limited("user@test.com")
+
 
 class TestSendMethods(unittest.TestCase):
     """Test email send methods."""

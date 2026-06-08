@@ -23,12 +23,14 @@ import os
 import re
 import smtplib
 import ssl
+import time
 import uuid
+from collections import defaultdict, deque
 from email.header import decode_header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
-from email.utils import formatdate
+from email.utils import formataddr, formatdate
 from email import encoders
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -65,6 +67,8 @@ MAX_MESSAGE_LENGTH = 50_000
 # Supported image extensions for inline detection
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
+_RATE_LIMIT_BUCKETS: Dict[str, deque[float]] = defaultdict(deque)
+
 def _send_imap_id(imap: "imaplib.IMAP4") -> None:
     """Send RFC 2971 IMAP ID command identifying this client.
 
@@ -97,6 +101,29 @@ def _is_automated_sender(address: str, headers: dict) -> bool:
         value = headers.get(header, "")
         if value and check(value):
             return True
+    return False
+
+
+def _email_rate_limited(sender_addr: str) -> bool:
+    """Return True when a sender exceeds EMAIL_RATE_LIMIT_PER_HOUR.
+
+    The default ``0`` disables rate limiting. Operators who expose email
+    gateway access can opt in without adding another dependency or service.
+    """
+    try:
+        limit = int(os.getenv("EMAIL_RATE_LIMIT_PER_HOUR", "0"))
+    except ValueError:
+        limit = 0
+    if limit <= 0:
+        return False
+    now = time.time()
+    bucket = _RATE_LIMIT_BUCKETS[sender_addr]
+    cutoff = now - 3600
+    while bucket and bucket[0] < cutoff:
+        bucket.popleft()
+    if len(bucket) >= limit:
+        return True
+    bucket.append(now)
     return False
     
 def check_email_requirements() -> bool:
@@ -441,6 +468,10 @@ class EmailAdapter(BasePlatformAdapter):
             logger.debug("[Email] Dropping automated sender at dispatch: %s", sender_addr)
             return
 
+        if _email_rate_limited(sender_addr):
+            logger.warning("[Email] Dropping rate-limited sender at dispatch: %s", sender_addr)
+            return
+
         # Skip senders not in EMAIL_ALLOWED_USERS — prevents the adapter
         # from creating a MessageEvent (and thus thread context) for senders
         # that the gateway will never authorize.  Without this early guard,
@@ -518,6 +549,19 @@ class EmailAdapter(BasePlatformAdapter):
             logger.error("[Email] Send failed to %s: %s", chat_id, e)
             return SendResult(success=False, error=str(e))
 
+    def _append_to_drafts(self, msg: MIMEMultipart) -> None:
+        """Append a generated reply to IMAP Drafts instead of sending it."""
+        imap = imaplib.IMAP4_SSL(self._imap_host, self._imap_port, timeout=30)
+        try:
+            imap.login(self._address, self._password)
+            _send_imap_id(imap)
+            imap.append("Drafts", "\\Draft", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
+        finally:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
     def _send_email(
         self,
         to_addr: str,
@@ -526,7 +570,8 @@ class EmailAdapter(BasePlatformAdapter):
     ) -> str:
         """Send an email via SMTP. Runs in executor thread."""
         msg = MIMEMultipart()
-        msg["From"] = self._address
+        display_name = os.getenv("EMAIL_DISPLAY_NAME", "").strip()
+        msg["From"] = formataddr((display_name, self._address)) if display_name else self._address
         msg["To"] = to_addr
 
         # Thread context for reply
@@ -547,6 +592,11 @@ class EmailAdapter(BasePlatformAdapter):
         msg["Message-ID"] = msg_id
 
         msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        if os.getenv("EMAIL_DRAFT_MODE", "0").lower() in {"1", "true", "yes", "on"}:
+            self._append_to_drafts(msg)
+            logger.info("[Email] Saved draft reply to %s (subject: %s)", to_addr, subject)
+            return msg_id
 
         smtp = smtplib.SMTP(self._smtp_host, self._smtp_port, timeout=30)
         try:
@@ -637,7 +687,8 @@ class EmailAdapter(BasePlatformAdapter):
     ) -> str:
         """Send an email with multiple file attachments via SMTP."""
         msg = MIMEMultipart()
-        msg["From"] = self._address
+        display_name = os.getenv("EMAIL_DISPLAY_NAME", "").strip()
+        msg["From"] = formataddr((display_name, self._address)) if display_name else self._address
         msg["To"] = to_addr
 
         ctx = self._thread_context.get(to_addr, {})
@@ -718,7 +769,8 @@ class EmailAdapter(BasePlatformAdapter):
     ) -> str:
         """Send an email with a file attachment via SMTP."""
         msg = MIMEMultipart()
-        msg["From"] = self._address
+        display_name = os.getenv("EMAIL_DISPLAY_NAME", "").strip()
+        msg["From"] = formataddr((display_name, self._address)) if display_name else self._address
         msg["To"] = to_addr
 
         ctx = self._thread_context.get(to_addr, {})
