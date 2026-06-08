@@ -36,7 +36,12 @@ from gateway.platforms.base import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_event(text="hello", chat_id="123", platform_val="telegram"):
+def _make_event(
+    text="hello",
+    chat_id="123",
+    platform_val="telegram",
+    message_type=MessageType.TEXT,
+):
     """Build a minimal MessageEvent."""
     source = SessionSource(
         platform=MagicMock(value=platform_val),
@@ -46,7 +51,7 @@ def _make_event(text="hello", chat_id="123", platform_val="telegram"):
     )
     evt = MessageEvent(
         text=text,
-        message_type=MessageType.TEXT,
+        message_type=message_type,
         source=source,
         message_id="msg1",
     )
@@ -211,6 +216,36 @@ class TestBusySessionAck:
         assert result2 is False
         assert sk not in adapter._pending_messages
         agent.interrupt.assert_not_called()
+        adapter._send_with_retry.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pending_clarify_reply_resolves_without_interrupt_or_ack(self):
+        """Pending clarify replies are tool responses, not busy follow-ups."""
+        from tools import clarify_gateway as cm
+
+        runner, _sentinel = _make_runner()
+        runner._busy_input_mode = "interrupt"
+        runner._busy_text_mode = "interrupt"
+        adapter = _make_adapter()
+
+        event = _make_event(
+            text="Use the blue option",
+            message_type=MessageType.VOICE,
+        )
+        sk = build_session_key(event.source)
+        runner.adapters[event.source.platform] = adapter
+
+        agent = MagicMock()
+        runner._running_agents[sk] = agent
+        cm.register("clarify-busy-1", sk, "Which option?", choices=None)
+
+        with patch("gateway.run.merge_pending_message_event") as mock_merge:
+            result = await runner._handle_active_session_busy_message(event, sk)
+
+        assert result is True
+        assert cm.wait_for_response("clarify-busy-1", timeout=0) == "Use the blue option"
+        agent.interrupt.assert_not_called()
+        mock_merge.assert_not_called()
         adapter._send_with_retry.assert_not_called()
 
     @pytest.mark.asyncio

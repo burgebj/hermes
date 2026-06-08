@@ -3485,6 +3485,29 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
 
         running_agent = self._running_agents.get(session_key)
 
+        # Clarify text-capture has priority over busy input handling.  When
+        # an agent is blocked inside clarify_tool, this message is the tool
+        # response, not a follow-up turn to queue/steer/interrupt.
+        try:
+            from tools import clarify_gateway as _clarify_mod
+            _pending_clarify = _clarify_mod.get_pending_for_session(session_key)
+        except Exception:
+            _pending_clarify = None
+        if _pending_clarify is not None:
+            _raw_clarify_reply = (event.text or "").strip()
+            if _raw_clarify_reply and not _raw_clarify_reply.startswith("/"):
+                _resolved = _clarify_mod.resolve_gateway_clarify(
+                    _pending_clarify.clarify_id, _raw_clarify_reply,
+                )
+                if _resolved:
+                    logger.info(
+                        "Clarify text response intercepted in busy handler "
+                        "(session=%s, id=%s)",
+                        session_key,
+                        _pending_clarify.clarify_id,
+                    )
+                    return True
+
         effective_mode = self._busy_input_mode
         busy_text_mode = getattr(self, "_busy_text_mode", "interrupt")
         if (
