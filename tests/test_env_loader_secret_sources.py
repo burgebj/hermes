@@ -7,6 +7,7 @@ don't see an unexplained "credentials ✓" line when their .env is empty.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -57,10 +58,7 @@ def test_format_secret_source_suffix_generic_label_for_future_sources():
     # Future-proofing: a new secret source (e.g. "vault") should still
     # produce a sensible label without needing to edit every call site.
     env_loader._SECRET_SOURCES["OPENAI_API_KEY"] = "vault"
-    assert (
-        env_loader.format_secret_source_suffix("OPENAI_API_KEY")
-        == " (from vault)"
-    )
+    assert env_loader.format_secret_source_suffix("OPENAI_API_KEY") == " (from vault)"
 
 
 def test_apply_external_secret_sources_records_bitwarden_origin(tmp_path, monkeypatch):
@@ -110,15 +108,107 @@ def test_apply_external_secret_sources_noop_when_disabled(tmp_path, monkeypatch)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "secrets:\n"
-        "  bitwarden:\n"
-        "    enabled: false\n",
+        "secrets:\n  bitwarden:\n    enabled: false\n",
         encoding="utf-8",
     )
 
     env_loader._apply_external_secret_sources(tmp_path)
 
     assert env_loader.get_secret_source("ANTHROPIC_API_KEY") is None
+
+
+def test_apply_external_secret_sources_dedupes_across_subprocesses(
+    tmp_path, monkeypatch, capsys
+):
+    """``hermes`` startup spawns child Python processes (gateway, TUI, ACP
+    adapter) that each call ``load_hermes_dotenv()`` at import time.  The
+    in-process ``_APPLIED_HOMES`` guard doesn't survive a subprocess
+    boundary, so without the cross-process marker users saw the
+    "BWS_ACCESS_TOKEN is not set" warning 2-3x per startup (#32715).
+    A pre-set marker in ``os.environ`` (as a child would inherit from its
+    parent) must suppress the status line entirely.
+    """
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "secrets:\n"
+        "  bitwarden:\n"
+        "    enabled: true\n"
+        "    project_id: test-project\n"
+        "    access_token_env: BWS_ACCESS_TOKEN\n",
+        encoding="utf-8",
+    )
+
+    from agent.secret_sources.bitwarden import FetchResult
+
+    def _fake_apply(**_kwargs):
+        # Mirror the real "BWS_ACCESS_TOKEN unset" failure mode the issue
+        # reports — that's the noise we're deduping.
+        return FetchResult(
+            error=(
+                "secrets.bitwarden.enabled is true but BWS_ACCESS_TOKEN is "
+                "not set.  Run `hermes secrets bitwarden setup`."
+            )
+        )
+
+    import agent.secret_sources.bitwarden as bw_module
+
+    monkeypatch.setattr(bw_module, "apply_bitwarden_secrets", _fake_apply)
+
+    # Simulate a child process: parent already printed the warning and set
+    # the marker; the inherited environ carries it across the fork/spawn.
+    monkeypatch.setenv(env_loader._BWS_STATUS_PRINTED_ENV, "1")
+
+    env_loader._apply_external_secret_sources(tmp_path)
+
+    captured = capsys.readouterr()
+    assert "Bitwarden Secrets Manager" not in captured.err, (
+        "Cross-process dedup is broken: the status line printed even "
+        "though the parent process had already set "
+        f"{env_loader._BWS_STATUS_PRINTED_ENV}=1.  Stderr was: {captured.err!r}"
+    )
+
+
+def test_apply_external_secret_sources_prints_warning_once_then_sets_marker(
+    tmp_path, monkeypatch, capsys
+):
+    """First subprocess to hit the BWS_ACCESS_TOKEN-unset path must print
+    the warning *and* set the marker so its siblings stay quiet.
+    """
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "secrets:\n"
+        "  bitwarden:\n"
+        "    enabled: true\n"
+        "    project_id: test-project\n"
+        "    access_token_env: BWS_ACCESS_TOKEN\n",
+        encoding="utf-8",
+    )
+
+    from agent.secret_sources.bitwarden import FetchResult
+
+    err_text = (
+        "secrets.bitwarden.enabled is true but BWS_ACCESS_TOKEN is "
+        "not set.  Run `hermes secrets bitwarden setup`."
+    )
+
+    def _fake_apply(**_kwargs):
+        return FetchResult(error=err_text)
+
+    import agent.secret_sources.bitwarden as bw_module
+
+    monkeypatch.setattr(bw_module, "apply_bitwarden_secrets", _fake_apply)
+
+    monkeypatch.delenv(env_loader._BWS_STATUS_PRINTED_ENV, raising=False)
+
+    env_loader._apply_external_secret_sources(tmp_path)
+
+    captured = capsys.readouterr()
+    assert err_text in captured.err
+    assert os.environ.get(env_loader._BWS_STATUS_PRINTED_ENV) == "1"
 
 
 def test_apply_external_secret_sources_dedupes_within_process(tmp_path, monkeypatch):
@@ -153,6 +243,7 @@ def test_apply_external_secret_sources_dedupes_within_process(tmp_path, monkeypa
         )
 
     import agent.secret_sources.bitwarden as bw_module
+
     monkeypatch.setattr(bw_module, "apply_bitwarden_secrets", _fake_apply)
 
     # Five calls in a row, simulating module-import-time invocations from

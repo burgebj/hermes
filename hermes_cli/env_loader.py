@@ -38,6 +38,17 @@ _SECRET_SOURCES: dict[str, str] = {}
 # config re-parse, and the ASCII sanitization sweep still ran every time.
 _APPLIED_HOMES: set[str] = set()
 
+# Cross-process dedup for the BSM status line.  ``hermes`` startup spawns
+# child Python processes (gateway, TUI server, ACP adapter, ...) that each
+# call ``load_hermes_dotenv()`` at import time — _APPLIED_HOMES above is
+# module-level state and does not survive a subprocess boundary, so without
+# this marker users see the same "BWS_ACCESS_TOKEN is not set" warning 2-3x
+# per startup (#32715).  We set this env var when we first print the line;
+# subprocesses inherit os.environ and skip the print.  The work (config
+# read, fetch attempt, env injection) still runs in each subprocess — only
+# the duplicated stderr noise is suppressed.
+_BWS_STATUS_PRINTED_ENV = "_HERMES_BWS_STATUS_PRINTED"
+
 
 def get_secret_source(env_var: str) -> str | None:
     """Return the label of the secret source that supplied ``env_var``, if any.
@@ -63,6 +74,10 @@ def reset_secret_source_cache() -> None:
     that want to refresh after a config change.
     """
     _APPLIED_HOMES.clear()
+    # Also drop the cross-process print marker so the next call can emit the
+    # status line again (tests rely on this, and a long-running process that
+    # explicitly resets state probably wants the next attempt to be visible).
+    os.environ.pop(_BWS_STATUS_PRINTED_ENV, None)
 
 
 def format_secret_source_suffix(env_var: str) -> str:
@@ -136,7 +151,7 @@ def _sanitize_loaded_credentials() -> None:
             "  This usually means the key was copy-pasted from a PDF, "
             "rich-text editor, or web page that substituted lookalike\n"
             "  Unicode glyphs for ASCII letters. If authentication fails "
-            "(e.g. \"API key not valid\"), re-copy the key from the\n"
+            '(e.g. "API key not valid"), re-copy the key from the\n'
             "  provider's dashboard and run `hermes setup` (or edit the "
             ".env file in a plain-text editor).",
             file=sys.stderr,
@@ -190,6 +205,7 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
         sanitized = _sanitize_env_lines(stripped)
         if sanitized != original:
             import tempfile
+
             fd, tmp = tempfile.mkstemp(
                 dir=str(path.parent), suffix=".tmp", prefix=".env_"
             )
@@ -305,6 +321,16 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         # came from BSM rather than .env.
         for name in result.applied:
             _SECRET_SOURCES[name] = "bitwarden"
+
+    # Cross-process print dedup: subprocesses inherit os.environ and skip
+    # re-emitting the same status line.  Mark *before* printing so that even
+    # if multiple sibling subprocesses race past the check, only the first
+    # one wins — and tests can pre-set the marker to assert the suppression.
+    if os.environ.get(_BWS_STATUS_PRINTED_ENV):
+        return
+    os.environ[_BWS_STATUS_PRINTED_ENV] = "1"
+
+    if result.applied:
         print(
             f"  Bitwarden Secrets Manager: applied {len(result.applied)} "
             f"secret{'s' if len(result.applied) != 1 else ''} "
