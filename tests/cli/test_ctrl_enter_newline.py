@@ -74,6 +74,22 @@ def test_pure_local_linux_does_not_preserve():
                 assert cli_mod._preserve_ctrl_enter_newline() is False
 
 
+def test_local_macos_uses_lf_for_newline_by_default():
+    import cli as cli_mod
+    with patch.object(sys, "platform", "darwin"):
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("builtins.open", side_effect=OSError("no /proc")):
+                assert cli_mod._c_j_inserts_newline() is True
+
+
+def test_local_macos_can_opt_into_lf_submit():
+    import cli as cli_mod
+    with patch.object(sys, "platform", "darwin"):
+        with patch.dict(os.environ, {"HERMES_CLI_SUBMIT_ON_LF": "1"}, clear=True):
+            with patch("builtins.open", side_effect=OSError("no /proc")):
+                assert cli_mod._c_j_inserts_newline() is False
+
+
 def test_proc_version_microsoft_marker_preserves_newline():
     """WSL detection via /proc when env vars are scrubbed (sudo etc.)."""
     import cli as cli_mod

@@ -237,6 +237,27 @@ class TestPromptToolkitTerminalCompatibility:
             assert bindings[("c-m",)] is submit_handler
             assert ("c-j",) not in bindings
 
+        # Local macOS: keep c-j free so Shift+Enter paths that collapse to LF
+        # still insert a newline instead of submitting.
+        with _patch.object(_sys, "platform", "darwin"), \
+             _patch.dict(_os.environ, {}, clear=True), \
+             _patch("builtins.open", side_effect=OSError("no /proc")):
+            kb = KeyBindings()
+            _bind_prompt_submit_keys(kb, submit_handler)
+            bindings = {tuple(key.value for key in binding.keys): binding.handler for binding in kb.bindings}
+            assert bindings[("c-m",)] is submit_handler
+            assert ("c-j",) not in bindings
+
+        # Thin PTY opt-in: users who truly need Enter=LF can force c-j back to submit.
+        with _patch.object(_sys, "platform", "darwin"), \
+             _patch.dict(_os.environ, {"HERMES_CLI_SUBMIT_ON_LF": "1"}, clear=True), \
+             _patch("builtins.open", side_effect=OSError("no /proc")):
+            kb = KeyBindings()
+            _bind_prompt_submit_keys(kb, submit_handler)
+            bindings = {tuple(key.value for key in binding.keys): binding.handler for binding in kb.bindings}
+            assert bindings[("c-m",)] is submit_handler
+            assert bindings[("c-j",)] is submit_handler
+
     def test_cpr_warning_callback_is_disabled(self):
         from cli import _disable_prompt_toolkit_cpr_warning
 

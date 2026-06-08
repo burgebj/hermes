@@ -2693,6 +2693,29 @@ def _preserve_ctrl_enter_newline() -> bool:
     return False
 
 
+def _submit_on_lf_opt_in() -> bool:
+    """Return whether bare LF should force submit in the classic CLI."""
+    raw = os.environ.get("HERMES_CLI_SUBMIT_ON_LF", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _c_j_inserts_newline() -> bool:
+    """Return whether bare LF/c-j should stay available for multiline input.
+
+    Windows/WSL/SSH/WT already need bare LF reserved for Ctrl+Enter newline.
+    Local macOS terminals can also collapse Shift+Enter into LF, so default to
+    newline there as well. Users on thin PTYs that genuinely deliver plain
+    Enter as LF can opt back into LF-submit with HERMES_CLI_SUBMIT_ON_LF=1.
+    """
+    if sys.platform == "win32":
+        return True
+    if _preserve_ctrl_enter_newline():
+        return True
+    if sys.platform == "darwin" and not _submit_on_lf_opt_in():
+        return True
+    return False
+
+
 def _bind_prompt_submit_keys(kb, handler) -> None:
     """Bind terminal Enter forms to the submit handler.
 
@@ -2702,13 +2725,13 @@ def _bind_prompt_submit_keys(kb, handler) -> None:
 
     Exception: on Windows, WSL, SSH sessions, Windows Terminal, and Ghostty,
     c-j is the wire encoding of Ctrl+Enter (a distinct keystroke from
-    plain Enter / c-m). We leave c-j unbound there so the c-j newline
-    handler registered separately can fire — giving the user an
-    Enter-involving newline keystroke without terminal settings changes.
-    See _preserve_ctrl_enter_newline() and issue #22379.
+    plain Enter / c-m). Local macOS terminals can also collapse Shift+Enter
+    to bare LF. We leave c-j unbound in those cases so the newline handler
+    registered separately can fire, while thin-PTY LF-submit remains
+    available via HERMES_CLI_SUBMIT_ON_LF=1. See issue #22379 and #22908.
     """
     kb.add("enter")(handler)
-    if sys.platform != "win32" and not _preserve_ctrl_enter_newline():
+    if not _c_j_inserts_newline():
         kb.add("c-j")(handler)
 
 
@@ -13589,19 +13612,19 @@ class HermesCLI:
             """
             event.current_buffer.insert_text('\n')
 
-        if _preserve_ctrl_enter_newline():
+        if _c_j_inserts_newline():
             @kb.add('c-j')
             def handle_ctrl_enter_newline(event):
-                """Ctrl+Enter inserts a newline on Windows, WSL, SSH, and WT.
+                """LF-backed Enter variants insert a newline when reserved.
 
                 Windows Terminal (incl. WSL/SSH sessions through it) delivers
                 Ctrl+Enter as LF (c-j), distinct from plain Enter (c-m). This
                 binding makes Ctrl+Enter the equivalent of Alt+Enter on those
-                terminals, giving an Enter-involving newline keystroke
-                without requiring terminal settings changes. Ctrl+J (the raw
-                LF keystroke) also triggers this by virtue of being the same
-                key code — a harmless side effect since Ctrl+J has no
-                conflicting Hermes binding. See issue #22379.
+                terminals, and local macOS terminals can collapse Shift+Enter
+                to the same LF path. Ctrl+J (the raw LF keystroke) also
+                triggers this by virtue of being the same key code — a
+                harmless side effect since Ctrl+J has no conflicting Hermes
+                binding. See issue #22379 and #22908.
                 """
                 event.current_buffer.insert_text('\n')
 
