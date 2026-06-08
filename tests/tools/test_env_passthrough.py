@@ -1,6 +1,7 @@
 """Tests for tools.env_passthrough — skill and config env var passthrough."""
 
 import os
+import builtins
 import pytest
 import yaml
 
@@ -228,3 +229,50 @@ class TestTerminalIntegration:
         # Arbitrary skill-specific var
         register_env_passthrough(["MY_SKILL_CUSTOM_CONFIG"])
         assert is_env_passthrough("MY_SKILL_CUSTOM_CONFIG")
+
+    def test_provider_blocklist_import_failure_fails_closed(self, monkeypatch):
+        """Provider credentials stay blocked if the dynamic blocklist import fails."""
+        from tools.code_execution_tool import _scrub_child_env
+
+        real_import = builtins.__import__
+
+        def fail_local_environment_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "tools.environments.local":
+                raise ImportError("synthetic blocklist import failure")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", fail_local_environment_import)
+
+        blocked_provider_vars = [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "TOGETHER_API_KEY",
+            "FIREWORKS_API_KEY",
+            "BROWSERBASE_API_KEY",
+            "GH_TOKEN",
+        ]
+
+        for name in blocked_provider_vars:
+            assert _ep_mod._is_hermes_provider_credential(name)
+
+        register_env_passthrough([*blocked_provider_vars, "TENOR_API_KEY"])
+        for name in blocked_provider_vars:
+            assert not is_env_passthrough(name)
+        assert not is_env_passthrough("TENOR_API_KEY")
+
+        child_env = _scrub_child_env(
+            {
+                **{
+                    name: f"synthetic-provider-secret-{index}"
+                    for index, name in enumerate(blocked_provider_vars)
+                },
+                "TENOR_API_KEY": "synthetic-skill-secret",
+                "PATH": "/usr/bin",
+            },
+            is_passthrough=is_env_passthrough,
+            is_windows=False,
+        )
+        for name in blocked_provider_vars:
+            assert name not in child_env
+        assert "TENOR_API_KEY" not in child_env
+        assert child_env["PATH"] == "/usr/bin"

@@ -45,6 +45,72 @@ def _get_allowed() -> set[str]:
 _config_passthrough: frozenset[str] | None = None
 
 
+_MINIMUM_HERMES_PROVIDER_ENV_BLOCKLIST = frozenset({
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_TOKEN",
+    "BROWSERBASE_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "COHERE_API_KEY",
+    "DAYTONA_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "DISCORD_AUTO_THREAD",
+    "DISCORD_FREE_RESPONSE_CHANNELS",
+    "DISCORD_HOME_CHANNEL",
+    "DISCORD_HOME_CHANNEL_NAME",
+    "DISCORD_REQUIRE_MENTION",
+    "EMAIL_ADDRESS",
+    "EMAIL_HOME_ADDRESS",
+    "EMAIL_HOME_ADDRESS_NAME",
+    "EMAIL_IMAP_HOST",
+    "EMAIL_PASSWORD",
+    "EMAIL_SMTP_HOST",
+    "FIRECRAWL_API_KEY",
+    "FIRECRAWL_API_URL",
+    "FIREWORKS_API_KEY",
+    "GATEWAY_ALLOWED_USERS",
+    "GH_TOKEN",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_INSTALLATION_ID",
+    "GITHUB_APP_PRIVATE_KEY_PATH",
+    "GOOGLE_API_KEY",
+    "GROQ_API_KEY",
+    "HASS_TOKEN",
+    "HASS_URL",
+    "HELICONE_API_KEY",
+    "LLM_MODEL",
+    "MISTRAL_API_KEY",
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+    "OPENAI_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_API_BASE",
+    "OPENAI_ORG_ID",
+    "OPENAI_ORGANIZATION",
+    "OPENROUTER_API_KEY",
+    "PARALLEL_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "SIGNAL_ACCOUNT",
+    "SIGNAL_ALLOWED_USERS",
+    "SIGNAL_GROUP_ALLOWED_USERS",
+    "SIGNAL_HOME_CHANNEL",
+    "SIGNAL_HOME_CHANNEL_NAME",
+    "SIGNAL_HTTP_URL",
+    "SIGNAL_IGNORE_STORIES",
+    "SLACK_ALLOWED_USERS",
+    "SLACK_HOME_CHANNEL",
+    "SLACK_HOME_CHANNEL_NAME",
+    "TELEGRAM_HOME_CHANNEL",
+    "TELEGRAM_HOME_CHANNEL_NAME",
+    "TOGETHER_API_KEY",
+    "WHATSAPP_ALLOWED_USERS",
+    "WHATSAPP_ENABLED",
+    "WHATSAPP_MODE",
+    "XAI_API_KEY",
+})
+
+
 def _is_hermes_provider_credential(name: str) -> bool:
     """True if ``name`` is a Hermes-managed provider credential (API key,
     token, or similar) per ``_HERMES_PROVIDER_ENV_BLOCKLIST``.
@@ -58,13 +124,20 @@ def _is_hermes_provider_credential(name: str) -> bool:
 
     Non-Hermes API keys (TENOR_API_KEY, NOTION_TOKEN, etc.) are NOT
     in the blocklist and remain legitimately registerable — skills that
-    wrap third-party APIs still work.
+    wrap third-party APIs still work. If the dynamic blocklist cannot be
+    imported, fail closed by treating the requested name as protected.
     """
     try:
         from tools.environments.local import _HERMES_PROVIDER_ENV_BLOCKLIST
-    except Exception:
-        return False
-    return name in _HERMES_PROVIDER_ENV_BLOCKLIST
+    except Exception as e:
+        logger.warning(
+            "env passthrough: provider credential blocklist import failed; "
+            "refusing passthrough registration for %r: %s",
+            name,
+            e,
+        )
+        return True
+    return name in (_HERMES_PROVIDER_ENV_BLOCKLIST | _MINIMUM_HERMES_PROVIDER_ENV_BLOCKLIST)
 
 
 def register_env_passthrough(var_names: Iterable[str]) -> None:
@@ -159,5 +232,3 @@ def get_all_passthrough() -> frozenset[str]:
 def clear_env_passthrough() -> None:
     """Reset the skill-scoped allowlist (e.g. on session reset)."""
     _get_allowed().clear()
-
-
