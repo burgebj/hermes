@@ -2874,10 +2874,7 @@ class MatrixAdapter(BasePlatformAdapter):
         result = re.sub(
             r"\[([^\]]+)\]\(([^)]+)\)",
             lambda m: _protect_html(
-                '<a href="{}">{}</a>'.format(
-                    MatrixAdapter._sanitize_link_url(m.group(2)),
-                    _html_escape(m.group(1)),
-                )
+                f'<a href="{MatrixAdapter._sanitize_link_url(m.group(2))}">{_html_escape(m.group(1))}</a>'
             ),
             result,
         )

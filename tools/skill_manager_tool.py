@@ -534,7 +534,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
         result["category"] = category
     result["hint"] = (
         "To add reference files, templates, or scripts, use "
-        "skill_manage(action='write_file', name='{}', file_path='references/example.md', file_content='...')".format(name)
+        f"skill_manage(action='write_file', name='{name}', file_path='references/example.md', file_content='...')"
     )
     return result
 

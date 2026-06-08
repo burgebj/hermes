@@ -11937,9 +11937,7 @@ def cmd_profile(args):
                     print(f"{copied} bundled skills synced.")
                 else:
                     print(
-                        "⚠ Skills could not be seeded. Run `{} update` to retry.".format(
-                            name
-                        )
+                        f"⚠ Skills could not be seeded. Run `{name} update` to retry."
                     )
 
             # Create wrapper alias
