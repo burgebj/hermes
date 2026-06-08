@@ -1175,7 +1175,7 @@ def status(deep: bool = False) -> None:
         print("  hermes gateway install")
 
 
-def start() -> None:
+def start(*, prompt_install: bool = True) -> None:
     """Start the gateway. Prefers /Run on the scheduled task if present."""
     _assert_windows()
     running_pids = _gateway_pids()
@@ -1187,6 +1187,11 @@ def start() -> None:
     startup_installed = is_startup_entry_installed()
 
     if not task_installed and not startup_installed:
+        if not prompt_install:
+            pid = _spawn_detached()
+            _report_gateway_start(f"direct spawn (PID {pid})")
+            return
+
         from hermes_cli.setup import prompt_yes_no
 
         print("✗ Gateway service is not installed")
@@ -1308,4 +1313,4 @@ def restart() -> None:
     stop()
     # Give Windows a moment to release the listening port.
     time.sleep(1.0)
-    start()
+    start(prompt_install=False)

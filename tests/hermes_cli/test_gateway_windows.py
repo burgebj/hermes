@@ -432,6 +432,33 @@ def test_start_noops_when_gateway_already_running(monkeypatch, capsys):
     assert "27128" in out
 
 
+def test_restart_without_installed_service_spawns_directly_without_prompt(monkeypatch):
+    """Manual restart should recover even when no Windows login service is installed."""
+    calls = []
+    monkeypatch.setattr(gateway_windows, "_assert_windows", lambda: None)
+    monkeypatch.setattr(gateway_windows, "_gateway_pids", lambda: [])
+    monkeypatch.setattr(gateway_windows, "is_task_registered", lambda: False)
+    monkeypatch.setattr(gateway_windows, "is_startup_entry_installed", lambda: False)
+    monkeypatch.setattr(gateway_windows, "stop", lambda: calls.append("stop"))
+    monkeypatch.setattr(gateway_windows.time, "sleep", lambda seconds: calls.append(("sleep", seconds)))
+    monkeypatch.setattr(gateway_windows, "_spawn_detached", lambda path=None: calls.append(("spawn", path)) or 12345)
+    monkeypatch.setattr(gateway_windows, "_report_gateway_start", lambda via: calls.append(("report_start", via)))
+    monkeypatch.setattr(
+        setup,
+        "prompt_yes_no",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("restart must not prompt to install")),
+    )
+
+    gateway_windows.restart()
+
+    assert calls == [
+        "stop",
+        ("sleep", 1.0),
+        ("spawn", None),
+        ("report_start", "direct spawn (PID 12345)"),
+    ]
+
+
 def test_install_startup_fallback_does_not_spawn_when_gateway_already_running(monkeypatch, tmp_path, capsys):
     """Repeated Windows fallback installs should not spawn duplicate gateways."""
     script_path, calls = _arrange_startup_fallback(monkeypatch, tmp_path, [24476])
