@@ -175,6 +175,8 @@ def _build_responses_payload(*, prompt: str, size: str, quality: str) -> Dict[st
 def _extract_image_b64(value: Any) -> Optional[str]:
     """Return the newest image b64 embedded in a Responses event payload."""
     found: Optional[str] = None
+    if value is None:
+        return found
     if isinstance(value, dict):
         if value.get("type") == "image_generation_call":
             result = value.get("result")
@@ -222,6 +224,8 @@ def _iter_sse_json(response: Any):
         return payload
 
     for line in response.iter_lines():
+        if line is None:
+            continue
         if isinstance(line, bytes):
             line = line.decode("utf-8", errors="replace")
         line = str(line)
@@ -247,7 +251,7 @@ def _collect_image_b64(token: str, *, prompt: str, size: str, quality: str) -> O
     import httpx
     from agent.auxiliary_client import _codex_cloudflare_headers
 
-    headers = _codex_cloudflare_headers(token)
+    headers = _codex_cloudflare_headers(token) or {}
     headers.update({
         "Accept": "text/event-stream",
         "Authorization": f"Bearer {token}",

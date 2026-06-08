@@ -219,6 +219,40 @@ class TestGenerate:
         assert result["error_type"] == "api_error"
         assert "cloudflare 403" in result["error"]
 
+    def test_extract_image_b64_handles_none_input(self):
+        """_extract_image_b64 must not crash when given None (#35861)."""
+        assert codex_plugin._extract_image_b64(None) is None
+
+    def test_iter_sse_json_skips_none_lines(self):
+        """_iter_sse_json must skip None lines from iter_lines (#35861)."""
+        class _Response:
+            def iter_lines(self):
+                return iter([None, "event: test", 'data: {"a": 1}', "", None, ""])
+
+        events = list(codex_plugin._iter_sse_json(_Response()))
+        assert events == [{"a": 1, "type": "test"}]
+
+    def test_collect_image_b64_handles_none_headers(self, monkeypatch):
+        """_collect_image_b64 must not crash if _codex_cloudflare_headers
+        returns None (#35861)."""
+        from agent import auxiliary_client
+        monkeypatch.setattr(
+            auxiliary_client,
+            "_codex_cloudflare_headers",
+            lambda token: None,
+        )
+        # Should not raise TypeError from dict.update(None)
+        # We can't easily test the full HTTP flow, but we verify the
+        # header guard works by checking that the function doesn't crash
+        # before the HTTP call.
+        import httpx
+        try:
+            codex_plugin._collect_image_b64("fake-token", prompt="test", size="1024x1024", quality="medium")
+        except (httpx.ConnectError, httpx.ConnectTimeout, RuntimeError):
+            pass  # Expected — no real server
+        except TypeError as exc:
+            if "NoneType" in str(exc):
+                pytest.fail(f"NoneType guard failed: {exc}")
 
 # ── Plugin entry point ──────────────────────────────────────────────────────
 
