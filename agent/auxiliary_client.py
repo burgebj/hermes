@@ -4090,6 +4090,8 @@ def _resolve_strict_vision_backend(
         return resolve_provider_client("openai-codex", model, is_vision=True)
     if provider == "anthropic":
         return _try_anthropic()
+    if provider == "gemini":
+        return resolve_provider_client("gemini", model, is_vision=True)
     if provider == "custom":
         return _try_custom_endpoint()
     return None, None
