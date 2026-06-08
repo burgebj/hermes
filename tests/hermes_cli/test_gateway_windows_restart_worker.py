@@ -2078,6 +2078,7 @@ class TestWinnerWritesTerminalFailed:
         monkeypatch.setattr("hermes_cli.gateway_restart_state._pid_exists", lambda pid: False)
         monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._drain_and_stop", lambda *a, **kw: None)
         monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._detect_gateway_port", lambda: 0)
+        monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._wait_for_task_ready", lambda *a, **kw: True)
         monkeypatch.setattr("hermes_cli.gateway_windows_restart_worker._start_new_gateway",
                           MagicMock(side_effect=RuntimeError("spawn failed")))
 
@@ -2219,155 +2220,149 @@ class TestPsutilImportErrorFallback:
 
 
 # ---------------------------------------------------------------------------
-# Task Scheduler state convergence tests
+# Task Scheduler state convergence tests (COM API numeric states)
 # ---------------------------------------------------------------------------
 
 class TestTaskStateConvergence:
     """Tests for _wait_for_task_ready — Task Scheduler state convergence
-    between schtasks /End and schtasks /Run."""
+    using COM API numeric states (0=UNKNOWN, 1=DISABLED, 2=QUEUED,
+    3=READY, 4=RUNNING)."""
 
-    def test_task_becomes_ready(self, worker_env, monkeypatch):
-        """Task transitions from Running to Ready → returns True."""
+    def test_running_then_ready(self, worker_env, monkeypatch):
+        """RUNNING(4) → READY(3) → returns True."""
         import hermes_cli.gateway_windows_restart_worker as mod
 
         call_count = {"n": 0}
-        def mock_query():
+        def mock_com(name):
             call_count["n"] += 1
             if call_count["n"] <= 2:
-                return {"status": "Running"}
-            return {"status": "Ready"}
+                return 4  # RUNNING
+            return 3  # READY
 
-        monkeypatch.setattr("hermes_cli.gateway_windows.query_task_status", mock_query)
-        monkeypatch.setattr(mod.time, "sleep", lambda s: None)  # speed up
+        monkeypatch.setattr(mod, "_query_task_state_com", mock_com)
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
 
         result = mod._wait_for_task_ready(
-            "Hermes_Gateway", "Running",
-            "default", "req-test", 100, "test", timeout=10.0,
+            "Hermes_Gateway", "default", "req-test", 100, "test", timeout=10.0,
         )
         assert result is True
         assert call_count["n"] >= 3
 
-    def test_task_stays_running_timeout(self, worker_env, monkeypatch):
-        """Task stays Running beyond timeout → returns False."""
+    def test_ready_immediately(self, worker_env, monkeypatch):
+        """Already READY(3) → returns True on first poll."""
         import hermes_cli.gateway_windows_restart_worker as mod
 
-        def mock_query():
-            return {"status": "Running"}
-
-        monkeypatch.setattr("hermes_cli.gateway_windows.query_task_status", mock_query)
+        monkeypatch.setattr(mod, "_query_task_state_com", lambda name: 3)
         monkeypatch.setattr(mod.time, "sleep", lambda s: None)
-        # First call sets deadline, second call is past deadline
+
+        result = mod._wait_for_task_ready(
+            "Hermes_Gateway", "default", "req-test", 100, "test", timeout=10.0,
+        )
+        assert result is True
+
+    def test_unknown_state_keeps_polling(self, worker_env, monkeypatch):
+        """UNKNOWN(0) → not READY → keeps polling."""
+        import hermes_cli.gateway_windows_restart_worker as mod
+
+        monkeypatch.setattr(mod, "_query_task_state_com", lambda name: 0)
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
         calls = {"n": 0}
-        def mock_monotonic():
+        def mock_mono():
             calls["n"] += 1
-            if calls["n"] <= 1:
-                return 1000.0  # sets deadline = 1000 + 30 = 1030
-            return 1100.0  # past deadline
-
-        monkeypatch.setattr(mod.time, "monotonic", mock_monotonic)
+            return 1000.0 if calls["n"] <= 1 else 1100.0
+        monkeypatch.setattr(mod.time, "monotonic", mock_mono)
 
         result = mod._wait_for_task_ready(
-            "Hermes_Gateway", "Running",
-            "default", "req-test", 100, "test", timeout=30.0,
+            "Hermes_Gateway", "default", "req-test", 100, "test", timeout=30.0,
         )
         assert result is False
 
-    def test_empty_running_status_fail_closed(self, worker_env, monkeypatch):
-        """Empty running_status_text → fail closed, returns False."""
+    def test_disabled_state_keeps_polling(self, worker_env, monkeypatch):
+        """DISABLED(1) → not READY → keeps polling → timeout."""
         import hermes_cli.gateway_windows_restart_worker as mod
 
+        monkeypatch.setattr(mod, "_query_task_state_com", lambda name: 1)
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        calls = {"n": 0}
+        def mock_mono():
+            calls["n"] += 1
+            return 1000.0 if calls["n"] <= 1 else 1100.0
+        monkeypatch.setattr(mod.time, "monotonic", mock_mono)
+
         result = mod._wait_for_task_ready(
-            "Hermes_Gateway", "",  # empty baseline
-            "default", "req-test", 100, "test", timeout=30.0,
+            "Hermes_Gateway", "default", "req-test", 100, "test", timeout=30.0,
         )
         assert result is False
 
-    def test_query_exception_fail_closed(self, worker_env, monkeypatch):
-        """query_task_status raises exception → status becomes empty string,
-        which != running_status_text → returns True (task considered not-Running)."""
+    def test_queued_state_keeps_polling(self, worker_env, monkeypatch):
+        """QUEUED(2) → not READY → keeps polling → timeout."""
         import hermes_cli.gateway_windows_restart_worker as mod
 
-        def mock_query():
-            raise RuntimeError("COM error")
-
-        monkeypatch.setattr("hermes_cli.gateway_windows.query_task_status", mock_query)
+        monkeypatch.setattr(mod, "_query_task_state_com", lambda name: 2)
         monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        calls = {"n": 0}
+        def mock_mono():
+            calls["n"] += 1
+            return 1000.0 if calls["n"] <= 1 else 1100.0
+        monkeypatch.setattr(mod.time, "monotonic", mock_mono)
 
         result = mod._wait_for_task_ready(
-            "Hermes_Gateway", "Running",
-            "default", "req-test", 100, "test", timeout=10.0,
+            "Hermes_Gateway", "default", "req-test", 100, "test", timeout=30.0,
         )
-        # Exception → current_status="" != "Running" → task considered not-Running
-        assert result is True
+        assert result is False
 
-    def test_locale_independent_detection(self, worker_env, monkeypatch):
-        """Works with non-English status text (e.g. Chinese '正在运行')."""
+    def test_running_keeps_polling(self, worker_env, monkeypatch):
+        """RUNNING(4) stays RUNNING → timeout → returns False."""
         import hermes_cli.gateway_windows_restart_worker as mod
 
-        call_count = {"n": 0}
-        def mock_query():
-            call_count["n"] += 1
-            if call_count["n"] <= 1:
-                return {"status": "正在运行"}  # Chinese "Running"
-            return {"status": "就绪"}  # Chinese "Ready"
-
-        monkeypatch.setattr("hermes_cli.gateway_windows.query_task_status", mock_query)
+        monkeypatch.setattr(mod, "_query_task_state_com", lambda name: 4)
         monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        calls = {"n": 0}
+        def mock_mono():
+            calls["n"] += 1
+            return 1000.0 if calls["n"] <= 1 else 1100.0
+        monkeypatch.setattr(mod.time, "monotonic", mock_mono)
 
         result = mod._wait_for_task_ready(
-            "Hermes_Gateway", "正在运行",
-            "default", "req-test", 100, "test", timeout=10.0,
+            "Hermes_Gateway", "default", "req-test", 100, "test", timeout=30.0,
         )
-        assert result is True
+        assert result is False
 
-    def test_drain_and_stop_returns_running_status(self, worker_env, monkeypatch):
-        """_drain_and_stop captures and returns running status text."""
+    def test_query_failure_keeps_polling(self, worker_env, monkeypatch):
+        """COM query returns -1 → transient failure → keeps polling → timeout."""
         import hermes_cli.gateway_windows_restart_worker as mod
-        import hermes_cli.gateway_restart_state as state_mod
 
-        # PID exists at first check (drain), then doesn't exist after /End
-        pid_checks = {"n": 0}
-        def mock_pid_exists(pid):
-            pid_checks["n"] += 1
-            # First check (drain wait) returns True, second check (after /End) returns False
-            return pid_checks["n"] <= 1
+        monkeypatch.setattr(mod, "_query_task_state_com", lambda name: -1)
+        monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+        calls = {"n": 0}
+        def mock_mono():
+            calls["n"] += 1
+            return 1000.0 if calls["n"] <= 1 else 1100.0
+        monkeypatch.setattr(mod.time, "monotonic", mock_mono)
 
-        monkeypatch.setattr(state_mod, "_pid_exists", mock_pid_exists)
-        # Make _pid_wait return True immediately (PID exited)
-        monkeypatch.setattr(mod, "_pid_wait", lambda pid, timeout: True)
-        monkeypatch.setattr("hermes_cli.gateway_windows.query_task_status",
-                          lambda: {"status": "Running"})
-        monkeypatch.setattr("hermes_cli.gateway_windows._exec_schtasks",
-                          lambda args: (0, "", ""))
-        monkeypatch.setattr("hermes_cli.gateway_windows.get_task_name",
-                          lambda: "Hermes_Gateway")
-        monkeypatch.setattr("gateway.status.write_planned_stop_marker", lambda pid: None)
+        result = mod._wait_for_task_ready(
+            "Hermes_Gateway", "default", "req-test", 100, "test", timeout=30.0,
+        )
+        assert result is False
 
-        result = mod._drain_and_stop("default", "req-test", 100, "test")
-        assert result == "Running"
-
-    def test_convergence_logs_detail(self, worker_env, monkeypatch):
-        """_wait_for_task_ready logs contain task_state_ready detail."""
+    def test_convergence_logs_com_state(self, worker_env, monkeypatch):
+        """JSONL contains numeric COM state in detail."""
         import hermes_cli.gateway_windows_restart_worker as mod
         from hermes_cli.gateway_restart_state import jsonl_log_path
         import json
 
         call_count = {"n": 0}
-        def mock_query():
+        def mock_com(name):
             call_count["n"] += 1
-            if call_count["n"] <= 1:
-                return {"status": "Running"}
-            return {"status": "Ready"}
+            return 4 if call_count["n"] <= 1 else 3
 
-        monkeypatch.setattr("hermes_cli.gateway_windows.query_task_status", mock_query)
+        monkeypatch.setattr(mod, "_query_task_state_com", mock_com)
         monkeypatch.setattr(mod.time, "sleep", lambda s: None)
 
         mod._wait_for_task_ready(
-            "Hermes_Gateway", "Running",
-            "default", "req-log-test", 100, "test", timeout=10.0,
+            "Hermes_Gateway", "default", "req-log-test", 100, "test", timeout=10.0,
         )
 
-        # Check JSONL for the log entry
         log_path = jsonl_log_path()
         found = False
         if log_path.exists():
@@ -2377,7 +2372,7 @@ class TestTaskStateConvergence:
                     if (d.get("request_id") == "req-log-test"
                             and d.get("reason") == "task_state_ready"):
                         found = True
-                        assert "polls=" in d.get("detail", "")
+                        assert "READY(3)" in d.get("detail", "")
                         break
                 except (json.JSONDecodeError, ValueError):
                     pass

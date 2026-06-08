@@ -179,7 +179,7 @@ def _run_restart_transaction(
         )
 
         # --- Phase 1: Drain and stop old gateway ---
-        running_status_text = _drain_and_stop(profile, request_id, old_pid, origin)
+        _drain_and_stop(profile, request_id, old_pid, origin)
 
         # P0-6: Old PID MUST be dead before starting a new gateway
         if old_pid > 0 and _pid_exists(old_pid):
@@ -195,17 +195,18 @@ def _run_restart_transaction(
             _wait_for_port_release(profile, request_id, old_pid, origin, port)
 
         # --- Phase 2.5: Wait for Task Scheduler state convergence ---
-        if task_name and running_status_text:
+        # MUST check whenever task_name is set, regardless of how old PID exited.
+        if task_name:
             write_status(profile, "waiting_task_ready", request_id=request_id)
             task_ready = _wait_for_task_ready(
-                task_name, running_status_text,
+                task_name,
                 profile, request_id, old_pid, origin,
                 timeout=30.0,
             )
             if not task_ready:
                 raise RuntimeError(
-                    f"Scheduled Task '{task_name}' did not converge from Running state "
-                    "within 30s after /End.  Will NOT execute /Run to avoid "
+                    f"Scheduled Task '{task_name}' did not reach READY state "
+                    "within 30s.  Will NOT execute /Run to avoid "
                     "MultipleInstancesPolicy=IgnoreNew suppression."
                 )
 
@@ -260,23 +261,16 @@ def _drain_and_stop(
     request_id: str,
     old_pid: int,
     origin: str,
-) -> str:
-    """Drain and stop the old gateway using existing infrastructure.
-
-    Returns the localized 'Running' status text captured before /End,
-    so the caller can wait for Task Scheduler state convergence.
-    Returns empty string if status could not be captured.
-    """
+) -> None:
+    """Drain and stop the old gateway using existing infrastructure."""
     from hermes_cli.gateway_restart_state import (
         append_restart_log,
         write_status,
         _pid_exists,
     )
 
-    running_status_text = ""
-
     if old_pid <= 0:
-        return running_status_text
+        return
 
     # Step 1: Write planned-stop marker
     write_status(profile, "draining", request_id=request_id, old_pid=old_pid)
@@ -298,7 +292,7 @@ def _drain_and_stop(
             request_id=request_id, profile=profile, old_pid=old_pid,
             origin=origin, state="stopped", reason="drain_exit",
         )
-        return running_status_text
+        return
 
     # Step 3: schtasks /End
     write_status(profile, "stopping", request_id=request_id, old_pid=old_pid)
@@ -306,21 +300,6 @@ def _drain_and_stop(
         request_id=request_id, profile=profile, old_pid=old_pid,
         origin=origin, state="stopping",
     )
-
-    # Capture running status text BEFORE /End for locale-agnostic convergence check
-    try:
-        from hermes_cli.gateway_windows import query_task_status
-        _task_info = query_task_status()
-        running_status_text = _task_info.get("status", "")
-        if running_status_text:
-            append_restart_log(
-                request_id=request_id, profile=profile, old_pid=old_pid,
-                origin=origin, state="stopping",
-                reason="task_state_before_end",
-                detail=f"status={running_status_text!r}",
-            )
-    except Exception:
-        pass
 
     try:
         from hermes_cli.gateway_windows import _exec_schtasks, get_task_name
@@ -337,7 +316,7 @@ def _drain_and_stop(
     # Step 4: Wait for PID exit
     write_status(profile, "waiting_pid_exit", request_id=request_id, old_pid=old_pid)
     if _pid_wait(old_pid, timeout=10.0):
-        return running_status_text
+        return
 
     # Step 5: taskkill /T (graceful)
     append_restart_log(
@@ -351,7 +330,7 @@ def _drain_and_stop(
         pass
 
     if _pid_wait(old_pid, timeout=5.0):
-        return running_status_text
+        return
 
     # Step 6: taskkill /T /F (force)
     append_restart_log(
@@ -373,7 +352,7 @@ def _drain_and_stop(
             error=f"PID {old_pid} still alive after force kill",
         )
 
-    return running_status_text
+    return
 
 
 # ---------------------------------------------------------------------------
@@ -558,65 +537,103 @@ def _wait_for_port_release(
 # Phase 2.5: Wait for Task Scheduler state convergence
 # ---------------------------------------------------------------------------
 
+# Task Scheduler COM state constants (locale-independent)
+_TASK_STATE_UNKNOWN = 0
+_TASK_STATE_DISABLED = 1
+_TASK_STATE_QUEUED = 2
+_TASK_STATE_READY = 3
+_TASK_STATE_RUNNING = 4
+
+_TASK_STATE_NAMES = {
+    0: "UNKNOWN", 1: "DISABLED", 2: "QUEUED", 3: "READY", 4: "RUNNING",
+}
+
+
+def _query_task_state_com(task_name: str) -> int:
+    """Query Scheduled Task state via COM API (locale-independent).
+
+    Returns numeric state: 0=UNKNOWN, 1=DISABLED, 2=QUEUED, 3=READY, 4=RUNNING.
+    Returns -1 on query failure.
+    """
+    import subprocess
+    try:
+        ps_cmd = (
+            f'$svc = New-Object -ComObject "Schedule.Service"; '
+            f'$svc.Connect(); '
+            f'$task = $svc.GetFolder("\\").GetTask("\\{task_name}"); '
+            f'$task.State'
+        )
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=10,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        )
+        output = (proc.stdout or "").strip()
+        if proc.returncode == 0 and output.isdigit():
+            return int(output)
+        return -1
+    except Exception:
+        return -1
+
+
 def _wait_for_task_ready(
     task_name: str,
-    running_status_text: str,
     profile: str,
     request_id: str,
     old_pid: int,
     origin: str,
     timeout: float = 30.0,
 ) -> bool:
-    """Wait for the Scheduled Task to leave 'Running' state after /End.
+    """Wait for the Scheduled Task to reach READY state (COM state == 3).
 
-    Uses locale-agnostic detection: captures the localized 'Running' text
-    before /End, then polls until the status text changes.
+    Uses COM API numeric state (locale-independent):
+    0=UNKNOWN, 1=DISABLED, 2=QUEUED, 3=READY, 4=RUNNING.
+    Only READY (3) allows proceeding with /Run.
 
-    Returns True if task became non-Running within timeout.
-    Returns False if timed out (caller must NOT proceed with /Run).
+    Returns True if task reached READY within timeout.
+    Returns False if timed out or query failed (caller must NOT proceed).
     """
-    from hermes_cli.gateway_windows import query_task_status
     from hermes_cli.gateway_restart_state import append_restart_log
-
-    if not running_status_text:
-        # No baseline — cannot detect convergence, fail closed
-        append_restart_log(
-            request_id=request_id, profile=profile, old_pid=old_pid,
-            origin=origin, state="waiting_task_ready",
-            reason="no_running_status_baseline",
-        )
-        return False
 
     deadline = time.monotonic() + timeout
     poll_count = 0
+
     while time.monotonic() < deadline:
         poll_count += 1
-        try:
-            info = query_task_status()
-            current_status = info.get("status", "")
-        except Exception:
-            current_status = ""
+        state = _query_task_state_com(task_name)
+        state_name = _TASK_STATE_NAMES.get(state, f"INVALID({state})")
 
-        if current_status != running_status_text:
-            # Status changed — task is no longer Running
+        if state == _TASK_STATE_READY:
             append_restart_log(
                 request_id=request_id, profile=profile, old_pid=old_pid,
                 origin=origin, state="waiting_task_ready",
                 reason="task_state_ready",
-                detail=f"polls={poll_count}, final_status={current_status!r}",
+                detail=f"polls={poll_count}, state={state_name}({state})",
             )
-            # Brief stability window after state change
+            # Brief stability window after reaching READY
             time.sleep(1.5)
             return True
 
+        # Not READY — log and continue polling
+        if poll_count == 1:
+            append_restart_log(
+                request_id=request_id, profile=profile, old_pid=old_pid,
+                origin=origin, state="waiting_task_ready",
+                reason="task_state_poll",
+                detail=f"state={state_name}({state})",
+            )
+
+        # Query failure (-1) → continue polling (transient), not immediate fail
         time.sleep(2.0)
 
-    # Timeout — task still Running
+    # Timeout — task never reached READY
+    final_state = _query_task_state_com(task_name)
+    final_name = _TASK_STATE_NAMES.get(final_state, f"INVALID({final_state})")
     append_restart_log(
         request_id=request_id, profile=profile, old_pid=old_pid,
         origin=origin, state="waiting_task_ready",
         reason="task_stop_timeout",
-        detail=f"polls={poll_count}, status_still={running_status_text!r}",
+        detail=f"polls={poll_count}, final_state={final_name}({final_state})",
     )
     return False
 
